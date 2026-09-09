@@ -16,7 +16,8 @@ dogfood from I3 onward — every increment PR is reviewed by this tool itself be
 | I0 | ✅ Done (PR #2) | Project context persisted: README, AGENTS.md, HANDOFF.md, ROADMAP, ATTRIBUTION policy; repo public with `main` PR-protected. | — |
 | I1 | ✅ Done (PR #3) | Installable plugin skeleton: `plugin.json` + extension registering `/pr-review` (status/help only) and `/pr-review-config show\|set\|unset`; schema-versioned config at `~/.copilot/pr-review-glm/config.json` (tiers, default mode, autoPostReviews, deadlines). No model calls; no-inference smoke script proves command registration + config round-trip. Evidence: 48 unit tests (`node --test tests/*.test.mjs`) + `node tests/smoke-i1.mjs` (SDK-dispatched commands, zero inference events, 0600 config round-trip). | I0 |
 | I2 | ⬜ Pending | Read-only PR capture: `/pr-review N --capture-only` fetches metadata/base/head/diff via `gh` into a 0600 temp file, freezes repo/PR binding, enforces draft/closed gates; fail-closed consistency checks. Demonstrated against a real PR, zero inference. | I1 |
-| I3 | ⬜ Pending | **First minimal review (dogfood entry point):** one heavy lane over the captured diff via a Copilot SDK child runtime (envelope-marker contract), findings parsed and rendered in-chat. From here, every increment PR is reviewed by this tool. | I2 |
+| L1 | ⬜ Pending | **dev-loop** (non-plugin increment): `scripts/dev-loop.mjs` orchestrating fresh headless agent phases per increment (worker → gates → independent review → fixer → merge), `STATUS:` protocol in HANDOFF, prompt templates, `--dry-run`. Spec: `docs/superpowers/specs/2026-09-10-dev-loop-design.md`. | I2 |
+| I3 | ⬜ Pending | **First minimal review (dogfood entry point):** one heavy lane over the captured diff via a Copilot SDK child runtime (envelope-marker contract), findings parsed and rendered in-chat. From here, every increment PR is reviewed by this tool — via the dev-loop. | I2, L1 |
 | I4 | ⬜ Pending | Topologies and tiers: quick/balanced/full/deep lane sets, light/medium/heavy models + one fallback each from config, concurrent lanes with per-lane progress, attempt/total budgets with cancellation. | I3 |
 | I5 | ⬜ Pending | Validation and adjudication: deterministic candidate validation (severity ladder, anchors vs diff, evidence), isolated adjudicator call, dedup, per-mode findings policy, degraded assembly with coverage disclosure. | I4 |
 | I6 | ⬜ Pending | Selection and retention: elicitation-based finding selection (`--all`, subset, none), retained settled result inspectable without inference. | I5 |
@@ -24,9 +25,16 @@ dogfood from I3 onward — every increment PR is reviewed by this tool itself be
 | I8 | ⬜ Pending | Hardening: large-diff file-backed transport (≥200 KB manifest + required read ranges), lane/credit telemetry from runtime events, dogfood-driven fixes. | I7 |
 
 Sizes are deliberately small (a focused session each). Later items may split further
-without changing the spec; record splits here.
+without changing the spec; record splits here. Non-plugin increments (L-series) carry
+the development workflow itself.
 
 ## Journey log
+
+- **2026-09-10 (dev-loop design)** — Approved in conversation: a script-orchestrated
+  increment loop (`scripts/dev-loop.mjs`) with fresh headless agent phases, deterministic
+  gates, dual review before auto-merge (independent reviewer always; the plugin's own
+  dogfood review from I3; human merges until then), `STATUS:` protocol in HANDOFF.
+  Spec in this PR; ROADMAP amended with L1 between I2 and I3.
 
 - **2026-09-09** — Research (upstream pi-pr-review v1.18.1 architecture map, Copilot CLI
   extensibility, prior `copilot-pr-review` prototype facts), design approved through
