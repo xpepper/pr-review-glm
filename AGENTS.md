@@ -72,7 +72,8 @@ path) · COMMENT-only publication in v1 · upstream `lib/` reused with attributi
 ## Conventions
 
 - Plain ESM JavaScript (`.mjs`) for the extension and modules; no build step in v1.
-- Tests: `node --test` unit tests + no-inference smoke scripts under `tests/`.
+- Tests: `node --test` unit tests + no-inference smoke scripts under `tests/` (all
+  smoke scripts share `tests/smoke-harness.mjs` — extend it, don't fork it).
 - Any code ported from upstream pi-pr-review keeps provenance: note it in
   `docs/ATTRIBUTION.md` (module, upstream version, commit) — see the attribution policy there.
 - Keep model-influenced output out of authority paths: gates, anchors, publication

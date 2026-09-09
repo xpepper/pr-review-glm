@@ -8,65 +8,58 @@ Read in order: `AGENTS.md` → this file → `ROADMAP.md` → the
 Check `git status`, recent PRs (all merged except none expected), and that local `main`
 matches `origin/main` before starting. Do not rely on any prior conversation's context.
 
-## Recorded state (2026-09-09, end of I1 session)
+## Recorded state (2026-09-10, end of I2 session)
 
-- `main` = I1 complete (plugin skeleton + configuration), assuming PR #3 merges. Working
-  tree clean. No open PRs should remain.
-- I1 shipped: `plugin.json` (name `pr-review-glm`), `extensions/pr-review/extension.mjs`
-  (`joinSession`, registers `/pr-review status|help` and `/pr-review-config
-  show|key=value|unset|help`), `extensions/pr-review/config.mjs` (schema-versioned
-  config at `~/.copilot/pr-review-glm/config.json`, whole-object validation, atomic
-  0600 writes, rejected-file protection), `extensions/pr-review/commands.mjs` (pure
-  parsing/rendering), MIT `LICENSE`.
-- Tests: `node --test tests/*.test.mjs` (48 tests). Smoke: `node tests/smoke-i1.mjs`
-  (spawns a fresh CLI session via the SDK with `--plugin-dir "$(pwd)" --experimental`,
-  dispatches commands by RPC, asserts zero inference events; snapshots/restores the
-  user's config file). Both must pass before any increment merges.
-- The prior `copilot-pr-review` prototype is **uninstalled** (same command names caused
-  ambiguous dispatch). Its source checkout at `~/Documents/workspace/ai/pr-review` is
-  untouched: runtime-facts reference only, never a code source. Caveat: after the I1
-  uninstall the registration reappeared once by an unidentified mechanism (a plain
-  session afterwards did not reproduce it). Before any smoke run, check
-  `copilot plugins list`; if `copilot-pr-review` reappears, `copilot plugin uninstall
-  copilot-pr-review` again — the smoke fails loudly (description-matched registration)
-  rather than dispatching to the wrong plugin.
-- Config schema details chosen in I1 (flagged in PR #3, not settled by the spec):
-  tier `model: null` means "use the session model at review time"; `fallback` is a
-  model-id string (same effort as its tier) and must differ from the tier's model;
-  `unset` resets a key to its default value (optional keys like `fallback` are removed);
-  deadline validation enforces `totalMs > batchMs`, `> max(attemptMs.*)`,
-  `> adjudicationMs`.
-- **dev-loop approved (2026-09-10):** a script-orchestrated increment loop lands as
-  non-plugin increment **L1 right after I2** — spec at
-  `docs/superpowers/specs/2026-09-10-dev-loop-design.md`. From I3 on, increments run
-  through the loop; merging stays human until the dogfood reviewer exists. The I2
-  session works exactly as before; when rewriting this file at the end of I2, target
-  L1 as the next increment (it will introduce the `STATUS:` line this file will grow).
+- `main` = I2 complete (read-only PR capture), assuming PR #6 merges. Working tree
+  clean. No open PRs should remain.
+- I2 shipped: `extensions/pr-review/capture.mjs` (`capturePullRequest`: `gh auth
+  status` pre-check → `gh repo view --json nameWithOwner` freezes the repo binding →
+  `gh pr view N --json …` + `gh pr diff N` with fail-closed consistency checks and
+  draft/closed skip gates → JSON envelope written 0600 into a `pr-review-glm-*`
+  mkdtemp dir, diff embedded), full review-flag grammar in `parseReviewArgs`
+  (`commands.mjs`), `renderCapture` + capture-aware `renderStatus`, extension wiring
+  with session-local `lastCapture`. No lanes, no model calls, no publication.
+- Tests: `node --test tests/*.test.mjs` (77 tests; fake-`gh` suite in
+  `tests/capture.test.mjs`). Smoke: `node tests/smoke-i1.mjs` and
+  `node tests/smoke-i2.mjs` (default target: merged PR #3, exercising the closed-gate
+  refusal + capture; `SMOKE_PR_NUMBER=<N> SMOKE_PR_CLOSED=0` targets an open PR).
+  Both smokes share `tests/smoke-harness.mjs` (SDK session + `waitForCommands` +
+  `runCommand` with the zero-inference assertion) — extend that harness, don't fork
+  it. All must pass before any increment merges.
+- Before any smoke run, check `copilot plugins list`: the prior `copilot-pr-review`
+  prototype must stay uninstalled (same command names → ambiguous dispatch). If it
+  reappears, `copilot plugin uninstall copilot-pr-review` again.
+- I2 details chosen in-session (flagged in PR #6, not settled by the spec): the
+  capture envelope schema (`kind: "pr-review-glm-capture"`, `schemaVersion: 1`,
+  diff embedded — I8 swaps ≥200 KB diffs to file-backed transport); concrete
+  consistency checks (gh-echoed number must match the request, 40-hex OID shape,
+  base ≠ head, state ∈ OPEN/CLOSED/MERGED); `--include-drafts`/`--include-closed`
+  skip (not fail) while everything else fails closed; flags inert under
+  `--capture-only` (mode/comment/all) are rejected at parse time; per-`gh`-call 30s
+  timeout; capture files persist in tmpdir for the session (no GC yet). Capturing
+  the gh user identity for the I7 self-author gate was deferred to I7.
+- The dev-loop (L1) was approved 2026-09-10: spec
+  `docs/superpowers/specs/2026-09-10-dev-loop-design.md`, implementation plan
+  `docs/superpowers/plans/2026-09-10-dev-loop-l1.md` (6 TDD tasks, complete code in
+  the plan). L1 introduces the `STATUS:` line protocol in this file — it is
+  deliberately absent until then.
 
-## Next increment: I2 — read-only PR capture
+## Next increment: L1 — dev-loop (non-plugin)
 
-Definition of done (from ROADMAP; spec §Components 3 for details):
+Build `scripts/dev-loop.mjs` per the L1 plan (authoritative for tasks and code):
+script-orchestrated increment loop with fresh headless agent phases (worker →
+deterministic gates → independent review → fixer → merge), `STATUS:` protocol in
+HANDOFF, prompt templates, `--dry-run`. The plan is TDD-ordered; follow it task by
+task. It is a non-plugin increment: no changes to `extensions/` expected, but the
+full test + smoke suite must still pass.
 
-1. `/pr-review N --capture-only` (extend `parseReviewArgs`): fetch PR metadata, base/head
-   info, and diff via `gh` (authenticated, fail-closed on errors), write the capture to a
-   0600 temp file, freeze the repo/PR binding at capture time.
-2. Draft/closed lifecycle gates: drafts skipped unless `--include-drafts`; closed/merged
-   require `--include-closed` (no interactive confirmation needed for `--capture-only`).
-3. Fail-closed consistency checks: capture refuses on inconsistent repo/head state,
-   empty diff, or unauthenticated `gh`.
-4. Zero inference: capture is pure code (`gh` subprocess + parsing); extend the smoke
-   script (or add `tests/smoke-i2.mjs`) proving a real PR captures without any model
-   events. Demonstrate against a real PR on this repo (e.g. the I2 PR itself once open).
-5. Update `ROADMAP.md` (I2 → ✅ with evidence) and rewrite this file for I3.
+From I3 onward, increments run through the dev-loop; merging stays human until the
+dogfood reviewer exists (I3). **Do not** start I3 in the L1 session.
 
-Boundaries: no lanes, no model calls, no publication. `renderStatus` should learn to
-report capture state. Reuse the smoke-script harness pattern (`runCommand` +
-no-inference assertion) rather than inventing a second one.
+## After L1
 
-## After I2
-
-I3 — first minimal review (dogfood entry point): one heavy lane over the captured diff
-via a Copilot SDK child runtime with the envelope-marker contract. From I3 on, every
-increment PR is reviewed by this tool before merge; findings stay local unless the user
-says post. The upstream LICENSE issue (see `docs/ATTRIBUTION.md`) must be filed before
-I4+ reuse — not needed for I2/I3.
+I3 — first minimal review (dogfood entry point): one heavy lane over the captured
+diff via a Copilot SDK child runtime with the envelope-marker contract; from here
+every increment PR is reviewed by this tool before merge. The upstream LICENSE
+issue (see `docs/ATTRIBUTION.md`) must be filed before I4+ reuse — not needed for
+I3.
