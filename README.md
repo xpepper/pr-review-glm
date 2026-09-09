@@ -5,10 +5,10 @@ A GitHub Copilot CLI plugin that ports the review workflow of
 of GitHub pull requests with host-validated findings and gated publication — for
 personal use.
 
-**Status: pre-alpha (increment I1).** The plugin skeleton exists: `/pr-review status|help`
-and `/pr-review-config` (show/set/unset of `~/.copilot/pr-review-glm/config.json`) work and
-make no model calls. No reviews yet — see [ROADMAP.md](ROADMAP.md) for what's next. This
-README evolves with the tool.
+**Status: pre-alpha (increment I2).** `/pr-review status|help`, `/pr-review N
+--capture-only` (read-only PR capture via `gh`: metadata, base/head, diff — no model
+calls), and `/pr-review-config` work. No reviews yet — see [ROADMAP.md](ROADMAP.md) for
+what's next. This README evolves with the tool.
 
 ## What it will do
 
@@ -37,7 +37,8 @@ session after edits):
 copilot --plugin-dir /path/to/pr-review-glm --experimental
 ```
 
-`/pr-review` shows the capability boundary and `/pr-review-config` manages configuration.
+`/pr-review` shows the capability boundary, `/pr-review N --capture-only` captures a PR
+read-only (needs an authenticated `gh`), and `/pr-review-config` manages configuration.
 Reviews arrive with later increments.
 
 ## Repository map

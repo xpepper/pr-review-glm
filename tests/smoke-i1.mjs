@@ -1,50 +1,25 @@
-// I1 no-inference smoke script.
-//
-// Spawns a fresh Copilot CLI session via the SDK with
-//   copilot --plugin-dir <repo> --experimental
-// (passed as the child's CLI args), then drives the plugin's commands through
-// session.rpc.commands.execute — direct dispatch, never a model prompt.
-// `copilot -p "/pr-review"` is NOT used: a prompt-mode slash command starts an
-// ambient model turn, which is exactly what this script must prove absent.
+// I1 no-inference smoke script: plugin registration + status/help + a config
+// round-trip, all dispatched by RPC through a fresh CLI session. See
+// smoke-harness.mjs for how the session is driven (and why `copilot -p` is
+// never used).
 //
 // Usage:
 //   node tests/smoke-i1.mjs
-// Optional env: COPILOT_CLI_PATH (default: `command -v copilot`),
-//               COPILOT_SDK_PATH (default: ~/.copilot/pkg/<arch>/<version>/copilot-sdk).
+// Optional env: COPILOT_CLI_PATH, COPILOT_SDK_PATH (see smoke-harness.mjs).
 //
 // The script snapshots ~/.copilot/pr-review-glm/config.json and restores it
 // (or removes it, if it did not exist) before exiting.
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { defaultConfigPath } from "../extensions/pr-review/config.mjs";
+import { runCommand, snapshotFile, startPluginSession, stopClient, waitForCommands } from "./smoke-harness.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-
-const cliPath = process.env.COPILOT_CLI_PATH ?? execFileSync("sh", ["-c", "command -v copilot"], { encoding: "utf8" }).trim();
-const sdkPath = process.env.COPILOT_SDK_PATH ?? resolveSdkPath();
-
-function resolveSdkPath() {
-  const versionOutput = execFileSync(cliPath, ["--version"], { encoding: "utf8" });
-  const version = versionOutput.match(/CLI ([0-9][0-9.]*[0-9])/)?.[1];
-  assert(version, `Could not parse copilot version from: ${versionOutput}`);
-  for (const arch of ["darwin-arm64", "universal", "darwin-x64"]) {
-    const candidate = join(homedir(), ".copilot", "pkg", arch, version, "copilot-sdk");
-    if (existsSync(candidate)) return candidate;
-  }
-  throw new Error(`Bundled copilot-sdk not found for CLI ${version}; set COPILOT_SDK_PATH`);
-}
-
-const { CopilotClient, RuntimeConnection } = await import(
-  pathToFileURL(join(sdkPath, "index.js")).href
-);
-
 const configPath = defaultConfigPath();
-const snapshot = snapshotConfig();
+const snapshot = snapshotFile(configPath, "config");
 
 let client;
 let cleanedUp = false;
@@ -68,10 +43,7 @@ async function cleanup() {
   cleanedUp = true;
   const problems = [];
   try {
-    if (client) {
-      const errors = await client.stop();
-      assert.deepEqual(errors, [], "client.stop() must be clean");
-    }
+    if (client) await stopClient(client);
   } catch (error) {
     problems.push(`client stop: ${String(error)}`);
   }
@@ -85,25 +57,14 @@ async function cleanup() {
 }
 
 try {
-  client = new CopilotClient({
-    connection: RuntimeConnection.forStdio({
-      path: resolve(cliPath),
-      args: ["--plugin-dir", repoRoot, "--experimental"],
-    }),
-  });
-  const session = await client.createSession({
-    enableExperimentalMode: true,
-    requestExtensions: true,
-    enableConfigDiscovery: true,
-    availableTools: [],
-    onPermissionRequest: async () => ({ kind: "denied-no-approval-rule" }),
-    workingDirectory: repoRoot,
-  });
+  const started = await startPluginSession({ repoRoot });
+  client = started.client;
+  const session = started.session;
 
   await waitForCommands(session, {
-    "pr-review": "Show the pr-review-glm capability boundary",
+    "pr-review": "Read-only PR capture (--capture-only) plus status and help",
     "pr-review-config": "Inspect or update pr-review-glm configuration",
-  }, 30_000);
+  });
   console.log("PASS /pr-review and /pr-review-config are registered by the plugin extension");
 
   const statusMessages = await runCommand(session, "pr-review", "");
@@ -154,65 +115,4 @@ try {
   console.log("SMOKE PASS I1: registration + status/help + config round-trip, zero inference");
 } finally {
   await cleanup();
-}
-
-// Waits until every expected command is registered with this plugin's exact
-// description. Matching descriptions (not just names) makes a command-name
-// collision with another plugin fail loudly instead of dispatching to it.
-async function waitForCommands(session, expectedByName, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const { commands } = await session.rpc.commands.list();
-    const registered = Object.entries(expectedByName).filter(([name, description]) =>
-      commands.some((command) => command.name === name && command.description.startsWith(description))
-    );
-    if (registered.length === Object.keys(expectedByName).length) return;
-    if (Date.now() > deadline) {
-      const seen = commands.map((c) => `${c.name} (${c.description.slice(0, 40)})`).join("; ") || "(none)";
-      throw new Error(`Timed out waiting for plugin commands; registered: ${seen}`);
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-}
-
-// Executes a command by direct RPC and proves no inference happened: the only
-// new events must be session logging, never a model turn or tool execution.
-async function runCommand(session, commandName, args) {
-  const before = (await session.getEvents()).length;
-  const result = await session.rpc.commands.execute({ commandName, args });
-  assert.equal(result.error, undefined, `${commandName} ${args} failed: ${result.error}`);
-  const events = (await session.getEvents()).slice(before);
-  const inference = events.filter((event) =>
-    event.type === "user.message" ||
-    event.type.startsWith("assistant.") ||
-    event.type.startsWith("model.") ||
-    event.type.startsWith("subagent.") ||
-    event.type === "tool.execution_start" ||
-    event.type === "session.usage_checkpoint"
-  );
-  assert.deepEqual(inference.map((e) => e.type), [], `${commandName} ${args} must not start inference`);
-  return events
-    .filter((event) => event.type === "session.info" || event.type === "session.error")
-    .map((event) => event.data.message);
-}
-
-function snapshotConfig() {
-  const existed = existsSync(configPath);
-  const original = existed ? readFileSync(configPath, "utf8") : undefined;
-  const dirExisted = existsSync(dirname(configPath));
-  return {
-    restore() {
-      if (existed) {
-        writeFileSync(configPath, original, { mode: 0o600 });
-      } else {
-        rmSync(configPath, { force: true });
-      }
-      if (!dirExisted && existsSync(dirname(configPath)) && readdirSync(dirname(configPath)).length === 0) {
-        rmSync(dirname(configPath), { recursive: true, force: true });
-      }
-      assert.equal(existsSync(configPath), existed, "smoke must restore the prior config-file state");
-      if (existed) assert.equal(readFileSync(configPath, "utf8"), original, "restored config content must match byte-for-byte");
-      console.log(`PASS config state restored (pre-existing file: ${existed})`);
-    },
-  };
 }
