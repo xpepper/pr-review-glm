@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -143,5 +143,19 @@ describe("renderConfigShow / renderConfigHelp", () => {
     assert(text.includes("key=value"));
     assert(text.includes("unset key"));
     assert(text.includes(store.path));
+  });
+});
+
+describe("renderConfigShow with a rejected file", () => {
+  it("surfaces the load warning alongside the active defaults", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pr-review-glm-warn-"));
+    const store = new ConfigStore(join(dir, "config.json"));
+    mkdirSync(join(store.path, ".."), { recursive: true });
+    writeFileSync(store.path, "{ broken", { mode: 0o600 });
+    await store.load();
+    const text = renderConfigShow(store);
+    assert(text.includes("Warning:"));
+    assert(text.includes(store.path));
+    assert(text.includes("defaultMode: balanced"), "defaults must render as the active state");
   });
 });

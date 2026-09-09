@@ -18,13 +18,18 @@ matches `origin/main` before starting. Do not rely on any prior conversation's c
   config at `~/.copilot/pr-review-glm/config.json`, whole-object validation, atomic
   0600 writes, rejected-file protection), `extensions/pr-review/commands.mjs` (pure
   parsing/rendering), MIT `LICENSE`.
-- Tests: `node --test tests/*.test.mjs` (46 tests). Smoke: `node tests/smoke-i1.mjs`
+- Tests: `node --test tests/*.test.mjs` (48 tests). Smoke: `node tests/smoke-i1.mjs`
   (spawns a fresh CLI session via the SDK with `--plugin-dir "$(pwd)" --experimental`,
   dispatches commands by RPC, asserts zero inference events; snapshots/restores the
   user's config file). Both must pass before any increment merges.
 - The prior `copilot-pr-review` prototype is **uninstalled** (same command names caused
   ambiguous dispatch). Its source checkout at `~/Documents/workspace/ai/pr-review` is
-  untouched: runtime-facts reference only, never a code source.
+  untouched: runtime-facts reference only, never a code source. Caveat: after the I1
+  uninstall the registration reappeared once by an unidentified mechanism (a plain
+  session afterwards did not reproduce it). Before any smoke run, check
+  `copilot plugins list`; if `copilot-pr-review` reappears, `copilot plugin uninstall
+  copilot-pr-review` again — the smoke fails loudly (description-matched registration)
+  rather than dispatching to the wrong plugin.
 - Config schema details chosen in I1 (flagged in PR #3, not settled by the spec):
   tier `model: null` means "use the session model at review time"; `fallback` is a
   model-id string (same effort as its tier) and must differ from the tier's model;

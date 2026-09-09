@@ -369,3 +369,10 @@ describe("ConfigStore with a rejected file", () => {
     assert.equal(JSON.parse(readFileSync(store.path, "utf8")).defaultMode, "full");
   });
 });
+
+describe("ConfigStore.set value hygiene", () => {
+  it("rejects values containing control characters", async () => {
+    const { store } = newStore();
+    await assert.rejects(() => store.set([["tiers.heavy.model", "bad\u0007model"]]), ConfigError);
+  });
+});

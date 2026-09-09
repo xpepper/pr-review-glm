@@ -47,6 +47,43 @@ const configPath = defaultConfigPath();
 const snapshot = snapshotConfig();
 
 let client;
+let cleanedUp = false;
+
+// Node does not run `finally` blocks on default signal termination; without
+// these handlers a Ctrl-C mid-run would leave smoke values in the user's
+// real config file.
+process.once("SIGINT", () => void exitViaSignal("SIGINT"));
+process.once("SIGTERM", () => void exitViaSignal("SIGTERM"));
+
+async function exitViaSignal(signal) {
+  console.error(`\n${signal} received — restoring config state before exit.`);
+  await cleanup();
+  process.exit(130);
+}
+
+// Cleanup failures must surface (and fail the run) without masking the
+// original failure from the try block or skipping the config restore.
+async function cleanup() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  const problems = [];
+  try {
+    if (client) {
+      const errors = await client.stop();
+      assert.deepEqual(errors, [], "client.stop() must be clean");
+    }
+  } catch (error) {
+    problems.push(`client stop: ${String(error)}`);
+  }
+  try {
+    snapshot.restore();
+  } catch (error) {
+    problems.push(`config restore: ${String(error)}`);
+  }
+  for (const problem of problems) console.error(`CLEANUP PROBLEM: ${problem}`);
+  if (problems.length) process.exitCode = 1;
+}
+
 try {
   client = new CopilotClient({
     connection: RuntimeConnection.forStdio({
@@ -79,9 +116,16 @@ try {
   console.log("PASS /pr-review help prints usage");
 
   const initialShow = await runCommand(session, "pr-review-config", "show");
-  assert(initialShow.some((m) => m.includes("defaultMode: balanced")), "initial show must show defaults");
-  assert(initialShow.every((m) => !m.startsWith("Warning:")), "no warnings expected on a clean machine state");
-  assert.equal(existsSync(configPath), false, "show must not create the config file");
+  const pristineConfig = !snapshot.existed;
+  if (pristineConfig) {
+    assert(initialShow.some((m) => m.includes("defaultMode: balanced")), "initial show must show defaults");
+    assert(initialShow.every((m) => !m.startsWith("Warning:")), "no warnings expected when no config file exists");
+    assert.equal(existsSync(configPath), false, "show must not create the config file");
+  } else {
+    // A pre-existing user config (possibly with its own values or a warning)
+    // must still render without inference; the round-trip below restores it.
+    assert(initialShow.some((m) => m.includes("pr-review-glm configuration")), "show must render");
+  }
 
   const afterSet = await runCommand(session, "pr-review-config", "defaultMode=deep tiers.heavy.model=gpt-5.6-terra");
   assert(afterSet.some((m) => m.includes("defaultMode: deep")), "set must persist defaultMode");
@@ -90,7 +134,10 @@ try {
   assert.equal(onDisk.defaultMode, "deep");
   assert.equal(onDisk.tiers.heavy.model, "gpt-5.6-terra");
   assert.equal(statSync(configPath).mode & 0o777, 0o600, "config file must be 0600");
-  assert.deepEqual(readdirSync(dirname(configPath)), ["config.json"], "no temp files may linger");
+  assert(
+    readdirSync(dirname(configPath)).every((name) => !name.startsWith("config.json.tmp-")),
+    "no temp files may linger",
+  );
   console.log("PASS config set writes a 0600 file with the changed values");
 
   const badSet = await runCommand(session, "pr-review-config", "defaultMode=turbo");
@@ -106,8 +153,7 @@ try {
 
   console.log("SMOKE PASS I1: registration + status/help + config round-trip, zero inference");
 } finally {
-  await stopClient(client);
-  snapshot.restore();
+  await cleanup();
 }
 
 // Waits until every expected command is registered with this plugin's exact
@@ -169,10 +215,4 @@ function snapshotConfig() {
       console.log(`PASS config state restored (pre-existing file: ${existed})`);
     },
   };
-}
-
-async function stopClient(client) {
-  if (!client) return;
-  const errors = await client.stop();
-  assert.deepEqual(errors, [], "client.stop() must be clean");
 }

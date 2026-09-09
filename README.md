@@ -51,6 +51,6 @@ Reviews arrive with later increments.
 
 ## License & attribution
 
-New code in this repository: MIT (license file lands with the first code increment).
+New code in this repository: MIT — see [LICENSE](LICENSE).
 Code ported from upstream pi-pr-review (MIT-declared) is attributed in
 [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md).

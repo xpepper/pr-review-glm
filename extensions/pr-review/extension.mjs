@@ -40,18 +40,16 @@ const session = await joinSession({
           await session.log(renderConfigHelp(store));
           return;
         }
-        await store.load();
-        if (parsed.kind === "set" || parsed.kind === "unset") {
-          try {
-            if (parsed.kind === "set") {
-              await store.set(parsed.entries);
-            } else {
-              await store.unset(parsed.keys);
-            }
-          } catch (error) {
-            await session.log(describeConfigError(error), { level: "error" });
-            return;
+        try {
+          await store.load();
+          if (parsed.kind === "set") {
+            await store.set(parsed.entries);
+          } else if (parsed.kind === "unset") {
+            await store.unset(parsed.keys);
           }
+        } catch (error) {
+          await session.log(describeConfigError(error), { level: "error" });
+          return;
         }
         await session.log(renderConfigShow(store));
       },

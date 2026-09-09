@@ -150,6 +150,7 @@ export function renderConfigHelp(store) {
     "autoPostReviews, deadlines.{attemptMs.{light,medium,heavy},fallbackMs,batchMs,",
     "adjudicationMs,totalMs}.",
     "Values: true/false, integers (milliseconds), or strings (model ids, efforts).",
-    "A tier model of null uses the session model at review time.",
+    "A tier model of null uses the session model at review time; only",
+    "`unset tiers.<tier>.model` restores that null (set always takes a literal id).",
   ].join("\n");
 }

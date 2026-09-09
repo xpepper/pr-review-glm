@@ -317,7 +317,9 @@ export class ConfigStore {
   }
 
   #rejectFile(reason) {
-    // The last valid state stays active; the rejected file is left untouched.
+    // A load-time rejection has no prior in-session state to keep, so the
+    // defaults activate (set/unset then refuse to write until the file is
+    // fixed); the file itself is left untouched.
     this.#config = defaultConfig();
     this.#source = "defaults";
     this.#warnings = [
