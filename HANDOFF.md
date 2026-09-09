@@ -8,47 +8,54 @@ Read in order: `AGENTS.md` → this file → `ROADMAP.md` → the
 Check `git status`, recent PRs (all merged except none expected), and that local `main`
 matches `origin/main` before starting. Do not rely on any prior conversation's context.
 
-## Recorded state (2026-09-09, end of session)
+## Recorded state (2026-09-09, end of I1 session)
 
-- `main` = I0 complete. PRs #1 (spec + principles) and #2 (project context) are merged;
-  no other PRs should exist. Working tree clean.
-- Repo is **public**: https://github.com/xpepper/pr-review-glm. `main` is protected:
-  PRs required, zero approvals needed, admins bound, force pushes disabled.
-  (Classic branch protection — the rulesets API rejected the equivalent payload.)
-- Prior prototype `copilot-pr-review` remains installed and **enabled** at
-  `~/.copilot/installed-plugins/_direct/pr-review`; it registers `/pr-review` too.
-  It must be disabled before dogfooding this plugin in a live session
-  (`copilot plugins disable` or uninstall; its checkout stays untouched).
-- Upstream LICENSE issue (pi-pr-review declares MIT, ships no LICENSE file) has **not**
-  been filed yet — file it when first reusing upstream code (I4+), see
-  `docs/ATTRIBUTION.md`.
+- `main` = I1 complete (plugin skeleton + configuration), assuming PR #3 merges. Working
+  tree clean. No open PRs should remain.
+- I1 shipped: `plugin.json` (name `pr-review-glm`), `extensions/pr-review/extension.mjs`
+  (`joinSession`, registers `/pr-review status|help` and `/pr-review-config
+  show|key=value|unset|help`), `extensions/pr-review/config.mjs` (schema-versioned
+  config at `~/.copilot/pr-review-glm/config.json`, whole-object validation, atomic
+  0600 writes, rejected-file protection), `extensions/pr-review/commands.mjs` (pure
+  parsing/rendering), MIT `LICENSE`.
+- Tests: `node --test tests/*.test.mjs` (46 tests). Smoke: `node tests/smoke-i1.mjs`
+  (spawns a fresh CLI session via the SDK with `--plugin-dir "$(pwd)" --experimental`,
+  dispatches commands by RPC, asserts zero inference events; snapshots/restores the
+  user's config file). Both must pass before any increment merges.
+- The prior `copilot-pr-review` prototype is **uninstalled** (same command names caused
+  ambiguous dispatch). Its source checkout at `~/Documents/workspace/ai/pr-review` is
+  untouched: runtime-facts reference only, never a code source.
+- Config schema details chosen in I1 (flagged in PR #3, not settled by the spec):
+  tier `model: null` means "use the session model at review time"; `fallback` is a
+  model-id string (same effort as its tier) and must differ from the tier's model;
+  `unset` resets a key to its default value (optional keys like `fallback` are removed);
+  deadline validation enforces `totalMs > batchMs`, `> max(attemptMs.*)`,
+  `> adjudicationMs`.
 
-## Next increment: I1 — plugin skeleton + configuration
+## Next increment: I2 — read-only PR capture
 
-Definition of done (from ROADMAP; spec §Components for details):
+Definition of done (from ROADMAP; spec §Components 3 for details):
 
-1. `plugin.json` (name `pr-review-glm`, `extensions: ["./extensions"]`) and
-   `extensions/pr-review/extension.mjs` using `joinSession` from
-   `@github/copilot-sdk/extension`, registering:
-   - `/pr-review` with subcommands `status` (capability boundary, default when run
-     bare) and `help` — **no model calls**;
-   - `/pr-review-config` with `show`, `key=value …`, `unset key …`.
-2. `extensions/pr-review/config.mjs`: read/validate/write
-   `~/.copilot/pr-review-glm/config.json`, schema-versioned, mode 0600; keys:
-   `tiers` (`light|medium|heavy` → `{model, effort, fallback?}`), `defaultMode`
-   (`balanced`), `autoPostReviews` (false), `deadlines` (spec defaults). Validate the
-   whole object as a unit; reject partial/malformed with the last valid state kept.
-3. `tests/` no-inference smoke script: load the plugin via
-   `copilot --plugin-dir "$(pwd)" --experimental` in a fresh session and prove both
-   commands appear and a config set/show/unset round-trip works without inference.
-4. Update `ROADMAP.md` (I1 → ✅ with evidence) and rewrite this file for I2.
+1. `/pr-review N --capture-only` (extend `parseReviewArgs`): fetch PR metadata, base/head
+   info, and diff via `gh` (authenticated, fail-closed on errors), write the capture to a
+   0600 temp file, freeze the repo/PR binding at capture time.
+2. Draft/closed lifecycle gates: drafts skipped unless `--include-drafts`; closed/merged
+   require `--include-closed` (no interactive confirmation needed for `--capture-only`).
+3. Fail-closed consistency checks: capture refuses on inconsistent repo/head state,
+   empty diff, or unauthenticated `gh`.
+4. Zero inference: capture is pure code (`gh` subprocess + parsing); extend the smoke
+   script (or add `tests/smoke-i2.mjs`) proving a real PR captures without any model
+   events. Demonstrate against a real PR on this repo (e.g. the I2 PR itself once open).
+5. Update `ROADMAP.md` (I2 → ✅ with evidence) and rewrite this file for I3.
 
-Boundaries: no PR capture, no lanes, no model calls, no upstream code needed. Don't
-re-open settled decisions (AGENTS.md). If the extension API surface differs from the
-research notes (it's experimental and moving), adapt and record the delta in AGENTS.md.
+Boundaries: no lanes, no model calls, no publication. `renderStatus` should learn to
+report capture state. Reuse the smoke-script harness pattern (`runCommand` +
+no-inference assertion) rather than inventing a second one.
 
-## After I1
+## After I2
 
-I2 — read-only PR capture (`--capture-only`), per ROADMAP. The first dogfood-eligible
-review is I3; from I3 onward every increment PR must be reviewed by this tool before
-merge (its review output goes in the PR; findings stay local unless the user says post).
+I3 — first minimal review (dogfood entry point): one heavy lane over the captured diff
+via a Copilot SDK child runtime with the envelope-marker contract. From I3 on, every
+increment PR is reviewed by this tool before merge; findings stay local unless the user
+says post. The upstream LICENSE issue (see `docs/ATTRIBUTION.md`) must be filed before
+I4+ reuse — not needed for I2/I3.

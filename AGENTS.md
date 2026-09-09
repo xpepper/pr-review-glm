@@ -51,11 +51,23 @@ path) · COMMENT-only publication in v1 · upstream `lib/` reused with attributi
 - Headless: `copilot -p "…" --output-format json` (JSONL events: `assistant.message`,
   `model.call_finished`, `session.usage_checkpoint`, …); per-invocation `--model` and
   `--effort none|minimal|low|medium|high|xhigh|max`.
-- The prior clean-room prototype is installed at
-  `~/.copilot/installed-plugins/_direct/pr-review` — reference for runtime facts only,
-  never a code source; disable it when this plugin installs (same command names).
+- The prior clean-room prototype was **uninstalled** on 2026-09-09 (I1): it registers the
+  same `/pr-review` command names and dispatch with both loaded is ambiguous (last
+  registrant wins, order unspecified). Its source checkout at
+  `~/Documents/workspace/ai/pr-review` is untouched and remains a reference for runtime
+  facts only, never a code source. Direct (`_direct`) installs cannot be disabled, only
+  uninstalled; `plugins uninstall` removes the cache copy, not the source.
 - Markdown prompt slash-commands exist only via plugin `commands/` dirs; our commands
   are extension-registered code.
+- Headless command dispatch (learned I1): `copilot -p "/pr-review" …` does NOT execute
+  the command — the slash text goes to the model as an ambient turn. Direct, inference-
+  free dispatch is via the SDK: spawn `RuntimeConnection.forStdio({ path, args:
+  ["--plugin-dir", repo, "--experimental"] })`, `client.createSession({ …,
+  requestExtensions: true, enableExperimentalMode: true })`, then
+  `session.rpc.commands.execute({ commandName, args })`; output arrives as
+  `session.info`/`session.error` events. Bundled SDK lives at
+  `~/.copilot/pkg/<arch>/<version>/copilot-sdk` (derive from `copilot --version`); see
+  `tests/smoke-i1.mjs`.
 
 ## Conventions
 

@@ -4,7 +4,7 @@ The full increment plan and where we are on the journey. Authoritative for statu
 the [design spec](docs/superpowers/specs/2026-09-09-copilot-pr-review-port-design.md) is
 authoritative for what each increment must deliver.
 
-**Where we are:** I0 complete (PR #2). **Next:** I1 — plugin skeleton + configuration.
+**Where we are:** I1 complete (PR #3). **Next:** I2 — read-only PR capture.
 
 Core principles (from the spec): small sequential increments, each landing as a PR;
 dogfood from I3 onward — every increment PR is reviewed by this tool itself before merge.
@@ -14,7 +14,7 @@ dogfood from I3 onward — every increment PR is reviewed by this tool itself be
 | ID | Status | Independently demonstrable outcome | Depends on |
 |----|--------|------------------------------------|------------|
 | I0 | ✅ Done (PR #2) | Project context persisted: README, AGENTS.md, HANDOFF.md, ROADMAP, ATTRIBUTION policy; repo public with `main` PR-protected. | — |
-| I1 | ⬜ Next | Installable plugin skeleton: `plugin.json` + extension registering `/pr-review` (status/help only) and `/pr-review-config show\|set\|unset`; schema-versioned config at `~/.copilot/pr-review-glm/config.json` (tiers, default mode, autoPostReviews, deadlines). No model calls; no-inference smoke script proves command registration + config round-trip. | I0 |
+| I1 | ✅ Done (PR #3) | Installable plugin skeleton: `plugin.json` + extension registering `/pr-review` (status/help only) and `/pr-review-config show\|set\|unset`; schema-versioned config at `~/.copilot/pr-review-glm/config.json` (tiers, default mode, autoPostReviews, deadlines). No model calls; no-inference smoke script proves command registration + config round-trip. Evidence: 46 unit tests (`node --test tests/*.test.mjs`) + `node tests/smoke-i1.mjs` (SDK-dispatched commands, zero inference events, 0600 config round-trip). | I0 |
 | I2 | ⬜ Pending | Read-only PR capture: `/pr-review N --capture-only` fetches metadata/base/head/diff via `gh` into a 0600 temp file, freezes repo/PR binding, enforces draft/closed gates; fail-closed consistency checks. Demonstrated against a real PR, zero inference. | I1 |
 | I3 | ⬜ Pending | **First minimal review (dogfood entry point):** one heavy lane over the captured diff via a Copilot SDK child runtime (envelope-marker contract), findings parsed and rendered in-chat. From here, every increment PR is reviewed by this tool. | I2 |
 | I4 | ⬜ Pending | Topologies and tiers: quick/balanced/full/deep lane sets, light/medium/heavy models + one fallback each from config, concurrent lanes with per-lane progress, attempt/total budgets with cancellation. | I3 |
@@ -32,6 +32,14 @@ without changing the spec; record splits here.
   extensibility, prior `copilot-pr-review` prototype facts), design approved through
   Q&A, spec written and merged (PR #1) with the two core principles. Repo pushed
   public; `main` protected (PRs required, admins bound, force pushes off). I0 merged (PR #2).
+- **2026-09-09 (I1)** — Plugin skeleton + configuration landed: `plugin.json`, extension
+  registering `/pr-review status|help` and `/pr-review-config show|set|unset`,
+  schema-versioned 0600 config store with whole-object validation, 46 unit tests and an
+  SDK-dispatched no-inference smoke script. Runtime facts learned en route: headless
+  `copilot -p "/cmd"` starts an ambient model turn (direct dispatch must go through SDK
+  `commands.execute`); two plugins registering the same command name dispatch
+  ambiguously — the prior prototype was uninstalled (source checkout untouched).
+  MIT LICENSE added.
 
 ## Backlog (post-v1, from the spec's out-of-scope list)
 
