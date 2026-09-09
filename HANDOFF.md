@@ -36,6 +36,12 @@ matches `origin/main` before starting. Do not rely on any prior conversation's c
   `unset` resets a key to its default value (optional keys like `fallback` are removed);
   deadline validation enforces `totalMs > batchMs`, `> max(attemptMs.*)`,
   `> adjudicationMs`.
+- **dev-loop approved (2026-09-10):** a script-orchestrated increment loop lands as
+  non-plugin increment **L1 right after I2** — spec at
+  `docs/superpowers/specs/2026-09-10-dev-loop-design.md`. From I3 on, increments run
+  through the loop; merging stays human until the dogfood reviewer exists. The I2
+  session works exactly as before; when rewriting this file at the end of I2, target
+  L1 as the next increment (it will introduce the `STATUS:` line this file will grow).
 
 ## Next increment: I2 — read-only PR capture
 
