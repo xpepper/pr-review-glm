@@ -5,9 +5,10 @@ A GitHub Copilot CLI plugin that ports the review workflow of
 of GitHub pull requests with host-validated findings and gated publication — for
 personal use.
 
-**Status: pre-alpha (increment I0).** Nothing reviewable is built yet; see
-[ROADMAP.md](ROADMAP.md) for where we are and what's next. This README evolves with the
-tool.
+**Status: pre-alpha (increment I1).** The plugin skeleton exists: `/pr-review status|help`
+and `/pr-review-config` (show/set/unset of `~/.copilot/pr-review-glm/config.json`) work and
+make no model calls. No reviews yet — see [ROADMAP.md](ROADMAP.md) for what's next. This
+README evolves with the tool.
 
 ## What it will do
 
@@ -27,14 +28,17 @@ Small, sequential increments, each landing as a pull request — and, from the f
 working review onward, **reviewed by this tool itself** before merging (dogfooding).
 `main` is protected: every change arrives by PR.
 
-## Install (placeholder — not functional yet)
+## Install (personal use)
+
+Load locally from a checkout (extensions need `--experimental` for now; start a fresh
+session after edits):
 
 ```sh
-copilot plugin install xpepper/pr-review-glm   # once I1+ land
-copilot --experimental
+copilot --plugin-dir /path/to/pr-review-glm --experimental
 ```
 
-Until then: `copilot --plugin-dir <checkout> --experimental`.
+`/pr-review` shows the capability boundary and `/pr-review-config` manages configuration.
+Reviews arrive with later increments.
 
 ## Repository map
 
@@ -47,6 +51,6 @@ Until then: `copilot --plugin-dir <checkout> --experimental`.
 
 ## License & attribution
 
-New code in this repository: MIT (license file lands with the first code increment).
+New code in this repository: MIT — see [LICENSE](LICENSE).
 Code ported from upstream pi-pr-review (MIT-declared) is attributed in
 [docs/ATTRIBUTION.md](docs/ATTRIBUTION.md).
