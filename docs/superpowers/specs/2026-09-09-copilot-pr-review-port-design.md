@@ -1,8 +1,8 @@
 # Design: Porting pi-pr-review to GitHub Copilot CLI
 
 Date: 2026-09-09
-Status: approved in conversation; pending user review of this document
-Repo: `pr-review-glm` (this repository)
+Status: approved in conversation; amended with development-approach principles (this PR); pending user review
+Repo: `pr-review-glm` → https://github.com/xpepper/pr-review-glm (private)
 
 ## Context and goal
 
@@ -22,6 +22,15 @@ A prior clean-room prototype (`copilot-pr-review`, installed at `~/.copilot/inst
 | Relation to prior prototype | Fresh port; prototype consulted for runtime facts only. |
 | Architecture | Code-owned orchestrator in a plugin extension; reviewer lanes as Copilot SDK child runtimes. |
 | Upstream licensing | Upstream declares MIT in `package.json` but ships no LICENSE file. We reuse source with clear attribution (`docs/ATTRIBUTION.md`) and open an upstream issue/PR requesting the missing LICENSE file. |
+
+## Development approach (core principles)
+
+Two principles govern how this port is built; they override convenience in every planning decision:
+
+1. **Small, sequential increments.** The tool grows from the ground up in small increments, each independently developable and demonstrable, tested as we go. No big upfront build: we validate that we like each layer (capture, lanes, adjudication, publication) before investing in the next.
+2. **Dogfood from the first reviewable increment.** Every increment lands as a pull request on [xpepper/pr-review-glm](https://github.com/xpepper/pr-review-glm) (pushed on day one for this purpose) and is merged only after review — by this tool itself as soon as it can run a minimal review end-to-end, by conventional review before that. `main` is never pushed to directly; branch-protection enforcement is currently unavailable (private repo on a free plan) so the no-direct-push rule is by convention until the repo goes public or the plan upgrades.
+
+Consequences for planning: the implementation plan must be a sequence of small increments, each shipping on a branch → PR → review → merge; and the increment ordering must prioritize the first end-to-end minimal review (capture + one lane + report, no publication) so dogfooding starts as early as possible, with depth (more lanes, tiers, adjudication, gates, publication) added in later increments.
 
 ## Architecture
 
