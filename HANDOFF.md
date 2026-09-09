@@ -14,12 +14,14 @@ matches `origin/main` before starting. Do not rely on any prior conversation's c
   clean. No open PRs should remain.
 - I2 shipped: `extensions/pr-review/capture.mjs` (`capturePullRequest`: `gh auth
   status` pre-check → `gh repo view --json nameWithOwner` freezes the repo binding →
-  `gh pr view N --json …` + `gh pr diff N` with fail-closed consistency checks and
-  draft/closed skip gates → JSON envelope written 0600 into a `pr-review-glm-*`
+  `gh pr view N --json …` + `gh pr diff N` with fail-closed consistency checks
+  (number echo, boolean isDraft, string metadata, 40-hex OIDs, base ≠ head) and
+  draft/closed skip gates → head/base re-check so the frozen binding always
+  describes the fetched diff → JSON envelope written 0600 into a `pr-review-glm-*`
   mkdtemp dir, diff embedded), full review-flag grammar in `parseReviewArgs`
   (`commands.mjs`), `renderCapture` + capture-aware `renderStatus`, extension wiring
   with session-local `lastCapture`. No lanes, no model calls, no publication.
-- Tests: `node --test tests/*.test.mjs` (77 tests; fake-`gh` suite in
+- Tests: `node --test tests/*.test.mjs` (81 tests; fake-`gh` suite in
   `tests/capture.test.mjs`). Smoke: `node tests/smoke-i1.mjs` and
   `node tests/smoke-i2.mjs` (default target: merged PR #3, exercising the closed-gate
   refusal + capture; `SMOKE_PR_NUMBER=<N> SMOKE_PR_CLOSED=0` targets an open PR).
@@ -37,7 +39,9 @@ matches `origin/main` before starting. Do not rely on any prior conversation's c
   skip (not fail) while everything else fails closed; flags inert under
   `--capture-only` (mode/comment/all) are rejected at parse time; per-`gh`-call 30s
   timeout; capture files persist in tmpdir for the session (no GC yet). Capturing
-  the gh user identity for the I7 self-author gate was deferred to I7.
+  the gh user identity for the I7 self-author gate was deferred to I7; per-call
+  timeout is SIGTERM-based only — kill escalation deferred to I4's cancellation
+  machinery (fresh-eyes review finding, accepted as I4 scope).
 - The dev-loop (L1) was approved 2026-09-10: spec
   `docs/superpowers/specs/2026-09-10-dev-loop-design.md`, implementation plan
   `docs/superpowers/plans/2026-09-10-dev-loop-l1.md` (6 TDD tasks, complete code in

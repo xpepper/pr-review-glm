@@ -136,6 +136,14 @@ export async function capturePullRequest({
   if (!PR_STATES.includes(pr.state)) {
     throw new CaptureError(`PR #${number} has an unrecognized state "${pr.state}"; failing closed.`);
   }
+  if (typeof pr.isDraft !== "boolean") {
+    throw new CaptureError(`PR #${number} has a malformed isDraft; failing closed.`);
+  }
+  for (const field of ["title", "headRefName", "baseRefName", "url", "updatedAt"]) {
+    if (typeof pr[field] !== "string" || pr[field].length === 0) {
+      throw new CaptureError(`PR #${number} has malformed metadata (${field}); failing closed.`);
+    }
+  }
   for (const [label, oid] of [
     ["headRefOid", pr.headRefOid],
     ["baseRefOid", pr.baseRefOid],
@@ -168,6 +176,24 @@ export async function capturePullRequest({
   const diff = await runGhOrThrow(runGh, ["pr", "diff", String(number)], cwd, `fetching the diff of PR #${number}`);
   if (diff.length === 0) {
     throw new CaptureError(`PR #${number} has an empty diff; there is nothing to review.`);
+  }
+
+  // Metadata and diff come from separate gh calls; a force-push in between
+  // would freeze an envelope whose recorded head does not describe the diff.
+  // Re-check before writing so the frozen binding always matches the diff.
+  const recheck = parseJsonOrThrow(
+    await runGhOrThrow(
+      runGh,
+      ["pr", "view", String(number), "--json", "headRefOid,baseRefOid"],
+      cwd,
+      `re-checking the head of PR #${number}`,
+    ),
+    `re-checking the head of PR #${number}`,
+  );
+  if (recheck?.headRefOid !== pr.headRefOid || recheck?.baseRefOid !== pr.baseRefOid) {
+    throw new CaptureError(
+      `PR #${number} changed while it was being captured (head moved between the metadata and diff fetches); re-run the capture.`,
+    );
   }
 
   const capturedAt = now();

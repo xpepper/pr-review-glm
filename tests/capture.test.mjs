@@ -11,7 +11,9 @@ import {
 } from "../extensions/pr-review/capture.mjs";
 
 // A fake gh: commands are scripted by their exact argv join; anything not
-// scripted fails loudly so tests cannot silently exercise the real gh.
+// scripted fails loudly so tests cannot silently exercise the real gh. The
+// returned shape matches defaultRunGh's contract: stdout/stderr are always
+// strings.
 function fakeGh(script) {
   return async (args) => {
     const key = args.join(" ");
@@ -19,7 +21,9 @@ function fakeGh(script) {
     if (entry === undefined) {
       return { code: 127, stdout: "", stderr: `fake gh: unscripted command: gh ${key}`, timedOut: false };
     }
-    return typeof entry === "function" ? entry() : { code: 0, stdout: entry, stderr: "", timedOut: false, ...entry };
+    if (typeof entry === "function") return entry();
+    const base = { code: 0, stdout: "", stderr: "", timedOut: false };
+    return typeof entry === "string" ? { ...base, stdout: entry } : { ...base, ...entry };
   };
 }
 
@@ -50,7 +54,20 @@ function defaultScript(pr = prMetadata(), diff = "diff --git a/a b/a\n+hello\n")
     "repo view --json nameWithOwner": JSON.stringify({ nameWithOwner: "xpepper/pr-review-glm" }),
     [`pr view ${pr.number} --json ${CAPTURED_PR_FIELDS.join(",")}`]: JSON.stringify(pr),
     [`pr diff ${pr.number}`]: diff,
+    [`pr view ${pr.number} --json headRefOid,baseRefOid`]: JSON.stringify({
+      headRefOid: pr.headRefOid,
+      baseRefOid: pr.baseRefOid,
+    }),
   };
+}
+
+// Removes every command the capture flow runs after the lifecycle gates, so
+// any regression that fetches the diff before gating fails loudly as an
+// unscripted command instead of passing silently.
+function noPostGateFetches(script, number = 3) {
+  delete script[`pr diff ${number}`];
+  delete script[`pr view ${number} --json headRefOid,baseRefOid`];
+  return script;
 }
 
 const tempRoots = [];
@@ -125,7 +142,9 @@ describe("capturePullRequest — happy path", () => {
 
 describe("capturePullRequest — lifecycle gates", () => {
   it("skips drafts without --include-drafts and writes nothing", async () => {
-    const outcome = await captureWith(defaultScript(prMetadata({ isDraft: true })));
+    // The script stops after the metadata fetch: the gates must decide before
+    // any diff is fetched (the fake gh fails loudly if they do not).
+    const outcome = await captureWith(noPostGateFetches(defaultScript(prMetadata({ isDraft: true }))));
     assert.equal(outcome.status, "skipped");
     assert(outcome.message.includes("draft"));
     assert(outcome.message.includes("--include-drafts"));
@@ -142,7 +161,7 @@ describe("capturePullRequest — lifecycle gates", () => {
 
   for (const state of ["CLOSED", "MERGED"]) {
     it(`skips ${state} PRs without --include-closed`, async () => {
-      const outcome = await captureWith(defaultScript(prMetadata({ state })));
+      const outcome = await captureWith(noPostGateFetches(defaultScript(prMetadata({ state }))));
       assert.equal(outcome.status, "skipped");
       assert(outcome.message.includes(state));
       assert(outcome.message.includes("--include-closed"));
@@ -158,7 +177,7 @@ describe("capturePullRequest — lifecycle gates", () => {
 
   it("lets a draft+closed PR through only with both flags", async () => {
     const script = defaultScript(prMetadata({ state: "MERGED", isDraft: true }));
-    const refused = await captureWith(script);
+    const refused = await captureWith(noPostGateFetches({ ...script }));
     assert.equal(refused.status, "skipped");
     const outcome = await captureWith(script, { includeDrafts: true, includeClosed: true });
     assert.equal(outcome.status, "captured");
@@ -217,6 +236,21 @@ describe("capturePullRequest — fail-closed refusals", () => {
     await assertRefuses(defaultScript(prMetadata({ state: "SOMETHING" })), "unrecognized state");
   });
 
+  it("refuses on a non-boolean isDraft (draft gate must fail closed)", async () => {
+    // gh omits absent booleans in JSON, so the missing case matters too.
+    const missing = defaultScript(prMetadata());
+    missing[`pr view 3 --json ${CAPTURED_PR_FIELDS.join(",")}`] = JSON.stringify(
+      prMetadata({ isDraft: undefined }),
+    );
+    await assertRefuses(missing, "malformed isDraft");
+    await assertRefuses(defaultScript(prMetadata({ isDraft: 1 })), "malformed isDraft");
+  });
+
+  it("refuses on non-string metadata fields", async () => {
+    await assertRefuses(defaultScript(prMetadata({ title: 42 })), "malformed metadata (title)");
+    await assertRefuses(defaultScript(prMetadata({ headRefName: null })), "malformed metadata (headRefName)");
+  });
+
   it("refuses on malformed head/base oids", async () => {
     await assertRefuses(defaultScript(prMetadata({ headRefOid: "short" })), "malformed headRefOid");
     await assertRefuses(defaultScript(prMetadata({ baseRefOid: null })), "malformed baseRefOid");
@@ -228,6 +262,24 @@ describe("capturePullRequest — fail-closed refusals", () => {
 
   it("refuses on an empty diff", async () => {
     await assertRefuses(defaultScript(prMetadata(), ""), "empty diff");
+  });
+
+  it("refuses when the PR head moves between the metadata and diff fetches", async () => {
+    const script = defaultScript();
+    script["pr view 3 --json headRefOid,baseRefOid"] = JSON.stringify({
+      headRefOid: "aaaaaaaabbbbbbbbccccccccdddddddd33333333",
+      baseRefOid: BASE,
+    });
+    await assertRefuses(script, "changed while it was being captured");
+  });
+
+  it("refuses when the head re-check itself fails or returns malformed JSON", async () => {
+    const failing = defaultScript();
+    failing["pr view 3 --json headRefOid,baseRefOid"] = { code: 1, stderr: "boom" };
+    await assertRefuses(failing, "re-checking the head");
+    const malformed = defaultScript();
+    malformed["pr view 3 --json headRefOid,baseRefOid"] = "not json";
+    await assertRefuses(malformed, "malformed JSON");
   });
 
   it("refuses when gh pr diff fails", async () => {
