@@ -18,8 +18,8 @@ parses and validates it. Keep it directly under the H1 title.
 
 ## Recorded state (2026-09-10, after the prototype-gate fix)
 
-- `main` = prototype-absent-gate fix complete (conventional fix PR after #13), assuming
-  that PR merges. Working tree clean. No open PRs should remain.
+- `main` = prototype-absent-gate fix complete (conventional fix PR after #13, assuming
+  this fix PR merges). Working tree clean. No open PRs should remain.
 - **The dev-loop's prototype-absent preflight gate is gone** (user decision 2026-09-10,
   fix PR): it predated the R1 rename and hard-failed every loop run on the benign
   condition of the sibling `copilot-pr-review` prototype being registered (it keeps
