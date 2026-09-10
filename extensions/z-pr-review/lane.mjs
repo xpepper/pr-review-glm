@@ -22,6 +22,10 @@ export class LaneError extends Error {
 // The output contract: markers count only as whole lines, and exactly one
 // whole-response fence around the payload is unwrapped. Anything else is
 // malformed — including marker-looking text that only appears mid-line.
+// Tolerating prose before/after the markers is deliberate: the spec's
+// contract is about locating the payload (whole-line markers, one fence), not
+// about rejecting a chatty model; the parsed findings themselves get shape
+// validation here and full anchor/evidence validation in I5.
 export function unwrapLaneOutput(text) {
   const lines = String(text).split(/\r?\n/);
   const isMarker = (line, marker) => line.trim() === marker;

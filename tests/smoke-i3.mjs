@@ -97,7 +97,7 @@ try {
     console.log(`SMOKE PASS I3: PR #${prNumber} reviewed by one heavy lane, findings in-chat, parent session inference-free`);
   }
 } finally {
-  cleanedUp = true;
   cleanupSync();
+  cleanedUp = true;
   await safeStop();
 }

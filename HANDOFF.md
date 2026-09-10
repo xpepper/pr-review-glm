@@ -52,9 +52,10 @@ parses and validates it. Keep it directly under the H1 title.
   dispatch; the lane child performs real inference BY DESIGN — parent session stays
   inference-free; scenario skips cleanly when no PR is open), `tests/smoke-l1.mjs`
   (script smoke: dev-loop `--dry-run`; transitively runs everything — allow a few
-  minutes). All must pass before merge. `tests/dev-loop-dogfood.test.mjs` runs a
-  `--dry-run --merge auto --dogfood on` CLI invocation, so it needs the working tree
-  green anyway.
+  minutes). All must pass before merge. smoke-l1 runs the dry-run with
+  `--merge auto --dogfood on` (the only combination auto allows since I3) and
+  therefore transitively exercises smoke-i3's real lane review when a PR is
+  open — budget the time and the model call.
 - The upstream LICENSE issue (see `docs/ATTRIBUTION.md`) **must be filed before I4+**
   reuse of upstream `lib/` — I4 is the first increment that would port upstream
   logic (tier fallbacks/topologies); do not port without it.

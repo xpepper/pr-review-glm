@@ -138,6 +138,18 @@ function shortOid(oid) {
   return oid.slice(0, 7);
 }
 
+// Model text is flattened before interpolation so a finding title/detail can
+// never inject lines, fences, or fake machine blocks into the report; inside
+// the machine block, backticks are also neutralized (JSON.stringify does not
+// escape them, so a stray ``` could terminate the fence early).
+function singleLine(text) {
+  return String(text).split(/\r?\n/).join(" ");
+}
+
+function machineText(text) {
+  return singleLine(text).replace(/`+/g, "'");
+}
+
 // In-chat review report for the I3 single-lane review. The trailing fenced
 // block is the machine-readable summary the dev-loop's dogfood review maps
 // into its verdict contract; the verdict itself is computed by loop code, not
@@ -154,9 +166,9 @@ export function renderReview(capture, lane) {
       lines.push(`Findings: ${lane.findings.length}`);
       for (const finding of lane.findings) {
         const location = finding.file ? ` — ${finding.file}${finding.line ? `:${finding.line}` : ""}` : "";
-        lines.push(`- [${finding.severity}] ${finding.title}${location}`);
+        lines.push(`- [${finding.severity}] ${singleLine(finding.title)}${location}`);
         if (finding.detail) {
-          lines.push(`  ${finding.detail.split(/\r?\n/).join(" ")}`);
+          lines.push(`  ${singleLine(finding.detail)}`);
         }
       }
     }
@@ -172,7 +184,9 @@ export function renderReview(capture, lane) {
     JSON.stringify({
       status: lane.status,
       reason: lane.status === "complete" ? undefined : lane.reason,
-      findings: lane.status === "complete" ? lane.findings : [],
+      findings: lane.status === "complete"
+        ? lane.findings.map((finding) => ({ ...finding, title: machineText(finding.title), detail: finding.detail === undefined ? undefined : machineText(finding.detail) }))
+        : [],
       dropped: lane.status === "complete" ? lane.dropped.length : 0,
     }),
     "```",

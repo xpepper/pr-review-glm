@@ -38,15 +38,28 @@ export function dogfoodVerdict(summary, { source = "dispatch" } = {}) {
       severity: finding.severity === "P0" || finding.severity === "P1" ? finding.severity : "P2",
       title: finding.title,
     }));
+  // A lane whose every candidate was dropped as malformed produced no review
+  // anyone assessed — that must not read as a clean approve.
+  if (findings.length === 0 && (Number(summary.dropped) > 0 || summary.dropped === undefined)) {
+    return {
+      verdict: "request-changes",
+      findings: [{ severity: "P1", title: `dogfood review produced no usable findings (${Number(summary.dropped) || "unknown"} candidate(s) dropped as malformed)` }],
+    };
+  }
   const blocking = findings.some((finding) => finding.severity === "P0" || finding.severity === "P1");
   if (blocking) return { verdict: "request-changes", findings };
   if (findings.length > 0) return { verdict: "approve-with-nits", findings };
   return { verdict: "approve", findings: [] };
 }
 
+// The LAST machine block in the last message wins: finding titles are model
+// text and may themselves contain fence-looking content, so a first-match
+// scan could be fed a fake summary instead of the code-generated one.
+const MACHINE_BLOCK_GLOBAL = new RegExp(MACHINE_BLOCK.source, "g");
 export function parseMachineSummary(messages) {
-  for (const message of messages) {
-    const match = MACHINE_BLOCK.exec(message);
+  for (const message of [...messages].reverse()) {
+    let match = null;
+    for (const candidate of message.matchAll(MACHINE_BLOCK_GLOBAL)) match = candidate;
     if (match) {
       try {
         return JSON.parse(match[1]);
@@ -62,10 +75,13 @@ export function parseMachineSummary(messages) {
 export async function runDogfoodReview({ prNumber, repoRoot, timeoutMs, log = () => {} }) {
   const { startPluginSession, stopClient, waitForCommands } = await import("../../tests/smoke-harness.mjs");
   let client;
-  const withTimeout = (promise) => Promise.race([
-    promise,
-    new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), timeoutMs)),
-  ]);
+  const withTimeout = (promise) => {
+    let timer;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  };
   try {
     const started = await startPluginSession({ repoRoot });
     client = started.client;
