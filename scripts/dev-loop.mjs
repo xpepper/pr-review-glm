@@ -9,7 +9,7 @@ import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
   gateBranchHead, gateDocsUpdated, gateMainGreen, gatePrototypeAbsent, gateRepoIdle,
-  gateSmokes, gateTests, isFullOid, reportGates,
+  gateSmokes, gateTests, gateZcodeHeadless, isFullOid, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 
@@ -94,7 +94,7 @@ function loadTemplate(name) {
 
 function phaseRunner({ zcode, template, vars, limits }) {
   const prompt = renderPrompt(template, vars);
-  const args = buildZcodeArgs({ prompt, repoRoot, maxTurns: limits.maxTurns });
+  const args = buildZcodeArgs({ prompt, repoRoot });
   return async () => {
     const result = await runCommand(zcode, args, { cwd: repoRoot, timeoutMs: limits.timeoutMs });
     if (result.code !== 0 || result.timedOut) console.error(result.stdout.slice(-2000), result.stderr.slice(-2000));
@@ -122,6 +122,7 @@ async function main() {
     preflight: async () => [
       await gateRepoIdle({ run, repoRoot }),
       await gatePrototypeAbsent({ run }),
+      await gateZcodeHeadless({ run, zcode, repoRoot }),
       await gateTests({ run, repoRoot }),
       await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }),
     ],

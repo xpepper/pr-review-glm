@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
-  gateRepoIdle, gateSmokes, gateTests, reportGates,
+  gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, reportGates,
 } from "../scripts/dev-loop/gates.mjs";
 
 const repoRoot = "/repo"; // never touched: all commands are faked
@@ -86,6 +86,39 @@ describe("gateSmokes", () => {
     assert(calls.some((c) => c.includes("smoke-i1.mjs")));
     const failing = await gateSmokes({ run: async () => ({ code: 2, stdout: "", stderr: "x" }), repoRoot: realRoot, exclude: [] });
     assert.equal(failing.ok, false);
+  });
+});
+
+describe("gateZcodeHeadless", () => {
+  it("passes when a probe turn exits 0, probing the exact worker arg set", async () => {
+    const spawned = [];
+    const run = async (command, args) => {
+      spawned.push([command, ...args].join(" "));
+      return { code: 0, stdout: "ok\n", stderr: "" };
+    };
+    // No injected buildArgs: the gate must use the real buildZcodeArgs so the
+    // probe exercises the same flags a worker phase would send.
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, true);
+    const probe = spawned[0];
+    assert.match(probe, /--prompt Reply with the single word: ok /);
+    assert.match(probe, new RegExp(`--cwd ${repoRoot} `));
+    assert.match(probe, /--mode yolo /);
+    assert.match(probe, /--disallowed-tools Bash\(gh pr merge \*\)/);
+    assert.doesNotMatch(probe, /--max-turns/);
+  });
+  it("fails with the CLI's first error line when the probe exits nonzero (flags, config, auth)", async () => {
+    const run = async () => ({ code: 1, stdout: "", stderr: "Error: Model config is missing. Create ~/.zcode/cli/config.json ...\n" });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /Model config is missing/);
+    assert.match(gate.detail, /zcode login/);
+  });
+  it("fails on a timed-out probe", async () => {
+    const run = async () => ({ code: null, stdout: "", stderr: "", timedOut: true });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /timedOut=true/);
   });
 });
 

@@ -21,7 +21,7 @@ normal PR flow itself.
 | Decision | Choice |
 |---|---|
 | Orchestrator | Script loop (`scripts/dev-loop.mjs`, plain ESM, no deps), not an in-session agent. Deterministic shell owns sequencing and gates; every judgment phase is a fresh headless agent invocation. |
-| Worker | `zcode` CLI headless: `zcode --prompt <text> --cwd <repo> --mode yolo --max-turns <n> --json`, with merge denied via `--disallowed-tools`. Binary resolved from `ZCODE_CLI` env, default the app-bundle path (version-sensitive; flagged below). |
+| Worker | `zcode` CLI headless: `zcode --prompt <text> --cwd <repo> --mode yolo`, with merge denied via `--disallowed-tools` (zcode 0.16.5 parser-rejects `--max-turns` while still listing it in `--help`; phase bounds are wall-clock — see Amendments). Binary resolved from `ZCODE_CLI` env, default the app-bundle path (version-sensitive; flagged below). |
 | Merge policy | Merging is loop-owned and code-governed (`gh pr merge --squash --delete-branch`), never agent-discretion. `--merge human\|auto` (default **human**): `auto` merges only when gates are green **and all active reviews are clean** — (1) an independent reviewer invocation always, (2) the plugin's own dogfood review once it exists (I3+), which `auto` then additionally requires. Pre-I3, `auto` is an explicit opt-in on the independent review alone; `human` stops the loop after review 1 + gates and leaves merging to the human. |
 | Clean | A review is clean when it reports no P0/P1 findings. P2 nits are recorded on the PR and do not block. |
 | State protocol | A machine-owned `STATUS:` line in `HANDOFF.md` (first line matching `^STATUS: `): `next=<increment-id>` · `blocked: <one-line reason>` · `done`. The worker writes it when rewriting HANDOFF; the loop only parses and validates it. |
@@ -138,13 +138,28 @@ automatic ROADMAP re-planning.
 1. Headless `zcode --prompt` behavior: unattended git push / `gh pr create` in yolo
    mode; exit-code / `--json` completion signal (gates are the real truth either way).
 2. `ZCODE_CLI` path stability across app auto-updates; add a `doctor`-style resolution
-   with a clear error when the binary moves.
-3. `--max-turns` and wall-clock defaults per phase, calibrated in the supervised run
-   (worker, reviewer, fixer differ by an order of magnitude).
+   with a clear error when the binary moves. Partially resolved (PR #10): the
+   `zcode-headless` preflight gate probes the worker invocation before dispatch;
+   the bare-binary resolution error remains as designed.
+3. Wall-clock defaults per phase, calibrated in the supervised run (worker,
+   reviewer, fixer differ by an order of magnitude). `--max-turns` is
+   parser-rejected by zcode 0.16.5 (see Amendments); `PHASE_LIMITS.maxTurns` stays
+   as calibration data until a CLI release re-accepts a turn bound.
 4. The dogfood review invocation contract (flags, output parsing) — fixed by I3's
    implementation; LOOP lands the harness with the flag off.
 
 ## Amendments
+
+- **2026-09-10 (zcode 0.16.5 first-run facts, PR #10):** the first real loop run
+  failed in the worker phase — the 0.16.5 parser rejects `--max-turns` (exit 1 +
+  usage dump) while `--help` still lists it; `--settings` is dead the same way.
+  The Worker invocation drops `--max-turns` (and never sent `--json`); per-phase
+  bounds are the wall-clock timeouts in `PHASE_LIMITS`. A new preflight gate
+  (`zcode-headless`) probes the exact worker arg set with one cheap turn so flag
+  drift or missing model config/auth fails before any phase is dispatched.
+  Runtime fact: standalone headless zcode ignores the running app's OAuth and
+  needs its own model config + API key (recipe in AGENTS.md, "Environment facts —
+  zcode CLI"); the operator owes that setup before the first real iteration.
 
 - **2026-09-10 (L2 — autopilot merge mode, approved in conversation):** the merge
   policy changed from "human merges until the dogfood reviewer exists" to an explicit
