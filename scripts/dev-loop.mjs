@@ -3,7 +3,7 @@
 // docs/superpowers/specs/2026-09-10-dev-loop-design.md).
 // The loop owns sequencing, gates, and merging; every judgment phase is a fresh
 // headless zcode invocation; nothing an agent claims is trusted without a gate.
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
@@ -23,12 +23,19 @@ function parseArgs(argv) {
     if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "--max-iterations") options.maxIterations = Number(argv[++i]);
     else if (arg === "--cooldown-seconds") options.cooldownSeconds = Number(argv[++i]);
-    else if (arg === "--dogfood") options.dogfood = argv[++i] === "on";
+    else if (arg === "--dogfood") {
+      const value = argv[++i];
+      if (value !== "on" && value !== "off") {
+        console.error("--dogfood requires an explicit on|off value");
+        process.exit(2);
+      }
+      options.dogfood = value === "on";
+    }
     else if (arg === "--help") { printUsage(); process.exit(0); }
     else { console.error(`unknown argument: ${arg}`); printUsage(); process.exit(2); }
   }
   if (!(options.maxIterations >= 1) || !(options.cooldownSeconds >= 0)) {
-    console.error("--max-iterations and --cooldown-seconds must be non-negative integers");
+    console.error("--max-iterations must be an integer >= 1; --cooldown-seconds an integer >= 0");
     process.exit(2);
   }
   return options;
@@ -125,6 +132,13 @@ async function main() {
       let prNumber = null;
       if (prs.code === 0 && open.length === 1) {
         prNumber = open[0].number;
+        // The worker may leave the checkout anywhere; gates and the reviewer must
+        // see the PR head, so establish it here (zero-trust: never assume).
+        const checkout = await run("git", ["checkout", open[0].headRefName], { cwd: repoRoot });
+        if (checkout.code !== 0) {
+          results.push({ name: "branch-checkout", ok: false, detail: `git checkout ${open[0].headRefName} failed: ${checkout.stderr.slice(0, 200)}` });
+          return { results, prNumber };
+        }
         results.push(await gateTests({ run, repoRoot }));
         results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
         results.push(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement }));
@@ -134,28 +148,44 @@ async function main() {
       return { results, prNumber };
     },
     runReviewer: async (prNumber) => {
-      const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefName"], { cwd: repoRoot });
-      const headRefName = JSON.parse(pr.stdout || "{}").headRefName ?? "";
-      const reviewFile = join(artDir, "review-independent.json");
-      const invocation = await phaseRunner({
-        zcode, template: loadTemplate("reviewer-prompt.md"),
-        vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, REVIEW_FILE: reviewFile },
-        limits: PHASE_LIMITS.reviewer,
-      })();
-      let review = null;
-      try { review = JSON.parse(readFileSync(reviewFile, "utf8")); } catch { /* reviewBlocking treats null as fatal */ }
-      return { ...invocation, review };
+      try {
+        const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefName"], { cwd: repoRoot });
+        const headRefName = JSON.parse(pr.stdout || "{}").headRefName ?? "";
+        const reviewFile = join(artDir, "review-independent.json");
+        // Invalidate any previous verdict first: a reviewer that exits 0 without
+        // writing the file must surface as a missing review, not a stale approve.
+        rmSync(reviewFile, { force: true });
+        const invocation = await phaseRunner({
+          zcode, template: loadTemplate("reviewer-prompt.md"),
+          vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, REVIEW_FILE: reviewFile },
+          limits: PHASE_LIMITS.reviewer,
+        })();
+        let review = null;
+        try { review = JSON.parse(readFileSync(reviewFile, "utf8")); } catch { /* reviewBlocking treats null as fatal */ }
+        return { ...invocation, review };
+      } catch (error) {
+        // Wiring failures (gh/JSON.parse) must not escape runLoop: report them as
+        // an invocation failure so the loop stops with a written report.
+        return { code: 1, stdout: "", stderr: String(error), timedOut: false, review: undefined };
+      }
     },
     runDogfood: undefined, // harness lands with I3; --dogfood refuses to run until then
     runFixer: async (prNumber, findings) => {
-      const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefName"], { cwd: repoRoot });
-      const headRefName = JSON.parse(pr.stdout || "{}").headRefName ?? "";
-      await run("git", ["checkout", headRefName], { cwd: repoRoot });
-      return phaseRunner({
-        zcode, template: loadTemplate("fixer-prompt.md"),
-        vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, FINDINGS_JSON: JSON.stringify(findings) },
-        limits: PHASE_LIMITS.fixer,
-      })();
+      try {
+        const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefName"], { cwd: repoRoot });
+        const headRefName = JSON.parse(pr.stdout || "{}").headRefName ?? "";
+        const checkout = await run("git", ["checkout", headRefName], { cwd: repoRoot });
+        if (checkout.code !== 0) {
+          return { code: checkout.code, stdout: checkout.stdout, stderr: checkout.stderr, timedOut: false };
+        }
+        return phaseRunner({
+          zcode, template: loadTemplate("fixer-prompt.md"),
+          vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, FINDINGS_JSON: JSON.stringify(findings) },
+          limits: PHASE_LIMITS.fixer,
+        })();
+      } catch (error) {
+        return { code: 1, stdout: "", stderr: String(error), timedOut: false };
+      }
     },
     merge: async (prNumber) => {
       const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });

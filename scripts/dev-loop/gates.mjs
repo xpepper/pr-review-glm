@@ -18,9 +18,15 @@ function smokeFiles(repoRoot, exclude = []) {
 }
 
 export async function gateRepoIdle({ run, repoRoot }) {
+  const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot });
+  if (branch.code !== 0 || branch.stdout.trim() !== "main") {
+    return bad("repo-idle", `expected checkout on main, found "${branch.stdout.trim()}"`);
+  }
   const status = await run("git", ["status", "--porcelain"], { cwd: repoRoot });
   if (status.code !== 0) return bad("repo-idle", `git status failed: ${status.stderr.slice(0, 200)}`);
   if (status.stdout.trim()) return bad("repo-idle", `working tree not clean: ${status.stdout.trim().slice(0, 200)}`);
+  const fetched = await run("git", ["fetch", "--quiet", "origin"], { cwd: repoRoot });
+  if (fetched.code !== 0) return bad("repo-idle", `git fetch failed: ${fetched.stderr.slice(0, 200)}`);
   const refs = await run("git", ["rev-parse", "main", "origin/main"], { cwd: repoRoot });
   const [local, remote] = refs.stdout.trim().split("\n");
   if (refs.code !== 0 || local !== remote) return bad("repo-idle", `main ${local?.slice(0, 7)} != origin/main ${remote?.slice(0, 7)}`);
@@ -75,6 +81,11 @@ export async function gateDocsUpdated({ readFileSync, repoRoot, increment }) {
   }
   const handoff = readFileSync(join(repoRoot, "HANDOFF.md"), "utf8");
   const status = parseStatusLine(handoff);
+  // `done` after a ✅ row is the legitimate final-increment state (the worker
+  // prompt instructs it); anything else must name the next pending increment.
+  if (status.kind === "done") {
+    return { name: "docs-updated", ok: true, detail: "ROADMAP ✅ + STATUS done (final increment)", nextIncrement: null };
+  }
   if (status.kind !== "next") return bad("docs-updated", `HANDOFF STATUS is ${status.kind}`);
   if (status.increment === increment) return bad("docs-updated", `HANDOFF STATUS still targets ${increment}`);
   if (roadmapIncrementState(roadmap, status.increment) !== "pending") {

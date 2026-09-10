@@ -93,6 +93,15 @@ describe("runLoop", () => {
     assert.equal(summary.stopped, "failure");
     assert.equal(calls.fixer, 2);
   });
+  it("fails fast on gate blocking with no known PR instead of dispatching the fixer", async () => {
+    const { deps: d, calls } = deps({
+      workerGates: async () => ({ results: [gate("increment-pr", false, "expected exactly one open PR, found 0")], prNumber: null }),
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "failure");
+    assert.equal(calls.fixer, 0);
+    assert.match(summary.reason, /no known PR/);
+  });
   it("treats a crashed reviewer as fatal, not fixable", async () => {
     const { deps: d, calls } = deps({ runReviewer: async () => ({ code: 1, timedOut: false, review: undefined }) });
     const summary = await runLoop(d);

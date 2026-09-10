@@ -15,10 +15,14 @@ const runOk = (stdout = "") => async () => ({ code: 0, stdout, stderr: "" });
 
 describe("gateRepoIdle", () => {
   // One constant stdout cannot express a clean tree + synced main + no PRs, so
-  // the idle fake dispatches per command.
+  // the idle fake dispatches per command. On-main is the default so each
+  // failure case exercises its own condition.
   const idleRun = (outputs) => async (command, args) => {
-    const result = outputs[`${command} ${args.join(" ")}`];
-    return result ?? { code: 0, stdout: "", stderr: "" };
+    const key = `${command} ${args.join(" ")}`;
+    const result = outputs[key];
+    if (result) return result;
+    if (key === "git rev-parse --abbrev-ref HEAD") return { code: 0, stdout: "main\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
   };
   it("passes on clean synced repo with no open PRs", async () => {
     const run = idleRun({
@@ -28,10 +32,12 @@ describe("gateRepoIdle", () => {
     const gate = await gateRepoIdle({ run, repoRoot });
     assert.deepEqual(gate, { name: "repo-idle", ok: true, detail: "main clean, synced, no open PRs" });
   });
-  it("fails on dirty tree, desync, or open PRs", async () => {
+  it("fails on non-main checkout, dirty tree, desync, fetch failure, or open PRs", async () => {
     const cases = [
+      idleRun({ "git rev-parse --abbrev-ref HEAD": { code: 0, stdout: "l1-dev-loop\n", stderr: "" } }),
       idleRun({ "git status --porcelain": { code: 0, stdout: " M file\n", stderr: "" } }),
       idleRun({ "git rev-parse main origin/main": { code: 0, stdout: "aaa\nbbb\n", stderr: "" } }),
+      idleRun({ "git fetch --quiet origin": { code: 1, stdout: "", stderr: "network down" } }),
       idleRun({ "gh pr list --state open --json number,headRefName": { code: 0, stdout: '[{"number":7,"headRefName":"x"}]', stderr: "" } }),
     ];
     for (const run of cases) {
@@ -103,7 +109,7 @@ describe("gateDocsUpdated", () => {
     assert.equal(gate.ok, true);
     assert.equal(gate.nextIncrement, "I3");
   });
-  it("fails when the row is not done, or STATUS is missing/same/already-done", async () => {
+  it("fails when the row is not done, or STATUS is missing/same/already-done/blocked", async () => {
     const notDoneR = (path) => path.endsWith("ROADMAP.md") ? "| L1 | ⬜ Pending | x | I2 |\n" : "STATUS: next=I3\n";
     assert.equal((await gateDocsUpdated({ readFileSync: notDoneR, repoRoot, increment: "L1" })).ok, false);
     const noStatus = (path) => path.endsWith("ROADMAP.md") ? roadmap : "# HANDOFF\n";
@@ -112,6 +118,15 @@ describe("gateDocsUpdated", () => {
     assert.equal((await gateDocsUpdated({ readFileSync: sameNext, repoRoot, increment: "L1" })).ok, false);
     const doneNext = (path) => path.endsWith("ROADMAP.md") ? roadmap : "STATUS: next=I2\n"; // I2 absent from this fixture roadmap
     assert.equal((await gateDocsUpdated({ readFileSync: doneNext, repoRoot, increment: "L1" })).ok, false);
+    const blocked = (path) => path.endsWith("ROADMAP.md") ? roadmap : "STATUS: blocked: stuck\n";
+    assert.equal((await gateDocsUpdated({ readFileSync: blocked, repoRoot, increment: "L1" })).ok, false);
+  });
+  it("accepts STATUS done as the final-increment state after a ✅ row", async () => {
+    const readFileSync = (path) => path.endsWith("ROADMAP.md") ? roadmap : "STATUS: done\n";
+    const gate = await gateDocsUpdated({ readFileSync, repoRoot, increment: "L1" });
+    assert.equal(gate.ok, true);
+    assert.equal(gate.nextIncrement, null);
+    assert.match(gate.detail, /done/);
   });
 });
 

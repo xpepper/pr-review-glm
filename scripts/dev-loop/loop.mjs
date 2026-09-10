@@ -78,6 +78,9 @@ export async function runLoop(deps) {
 
     let state = await assess();
     while (state.kind === "blocking") {
+      // Gate failures with no known PR (e.g. increment-pr: 0 or ≥2 open PRs) are
+      // not fixable by a PR-scoped fixer — stop instead of dispatching garbage.
+      if (iteration.prNumber === null) return fail(`blocking state with no known PR, not fixable: ${state.reason}`);
       if (fixerBudget === 0) return fail(`unresolved after fixer budget: ${state.reason}`);
       fixerBudget -= 1;
       iteration.fixerRounds += 1;

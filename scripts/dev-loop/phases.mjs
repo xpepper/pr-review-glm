@@ -45,11 +45,12 @@ export function runCommand(command, args, { cwd, timeoutMs } = {}) {
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let killTimer = null;
     const timer = timeoutMs
       ? setTimeout(() => {
           timedOut = true;
           child.kill("SIGTERM");
-          setTimeout(() => child.kill("SIGKILL"), 5_000);
+          killTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
         }, timeoutMs)
       : null;
     child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -58,6 +59,7 @@ export function runCommand(command, args, { cwd, timeoutMs } = {}) {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
       resolve({ code, stdout, stderr, timedOut });
     };
     child.on("close", (code) => finish(code));
