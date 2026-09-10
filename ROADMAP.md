@@ -46,9 +46,10 @@ the development workflow itself.
   coexistence question becomes live again only at I3's dogfood wiring — noted in
   HANDOFF). The repo name stays pr-review-glm (history, links); no repo/remote rename.
   Historical rows above keep the old names as written at the time; the spec records a
-  short amendment rather than a rewrite. The prototype had re-registered itself again
-  (third time) during state verification — documented remedy applied. Evidence: 138
-  unit tests + all three smokes green under the new names.
+  short amendment rather than a rewrite. The prototype re-registered itself twice more
+  during R1 verification (at state check and mid-smoke-rerun, both caught by the
+  prototype-absent gate) — documented remedy applied each time. Evidence: 138 unit
+  tests + all three smokes green under the new names.
 
 - **2026-09-10 (loop first-run fix, after PR #9)** — the first real
   `node scripts/dev-loop.mjs --merge human` run failed in the worker phase: zcode

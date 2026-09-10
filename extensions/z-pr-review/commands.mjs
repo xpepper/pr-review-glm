@@ -144,7 +144,7 @@ export function renderHelp() {
     "  /z-pr-review status                     Show the capability boundary (default)",
     "  /z-pr-review help                       Show this help",
     "  /z-pr-review <N> --capture-only         Capture PR N read-only (metadata + diff via gh)",
-    "                                         [--include-drafts] [--include-closed]",
+    "                                           [--include-drafts] [--include-closed]",
     "",
     "Reviews (lanes, findings, publication) are not implemented yet; they arrive with",
     "increment I3 onward. Full review flags: [--quick|--balanced|--full|--deep]",
