@@ -1,18 +1,19 @@
 # pr-review-glm
 
-A GitHub Copilot CLI plugin that ports the review workflow of
-[pi-pr-review](https://github.com/10ego/pi-pr-review) — parallel, tiered AI code review
-of GitHub pull requests with host-validated findings and gated publication — for
-personal use.
+This repository hosts **z-pr-review**, a GitHub Copilot CLI plugin that ports the review
+workflow of [pi-pr-review](https://github.com/10ego/pi-pr-review) — parallel, tiered AI
+code review of GitHub pull requests with host-validated findings and gated publication —
+for personal use. (The plugin identity was renamed to z-pr-review by R1; the repository
+keeps its original name.)
 
-**Status: pre-alpha (increment I2).** `/pr-review status|help`, `/pr-review N
---capture-only` (read-only PR capture via `gh`: metadata, base/head, diff — no model
-calls), and `/pr-review-config` work. No reviews yet — see [ROADMAP.md](ROADMAP.md) for
-what's next. This README evolves with the tool.
+**Status: pre-alpha (increment I2 + R1 rename).** `/z-pr-review status|help`,
+`/z-pr-review N --capture-only` (read-only PR capture via `gh`: metadata, base/head,
+diff — no model calls), and `/z-pr-review-config` work. No reviews yet — see
+[ROADMAP.md](ROADMAP.md) for what's next. This README evolves with the tool.
 
 ## What it will do
 
-`/pr-review 123` captures the PR with `gh`, runs focused reviewer lanes in parallel on
+`/z-pr-review 123` captures the PR with `gh`, runs focused reviewer lanes in parallel on
 configured light/medium/heavy models (quick / balanced / full / deep topologies),
 validates and adjudicates candidate findings in code, renders a structured report
 (severity P0–P3/nit, blocking, confidence, diff-anchored locations), and — only when
@@ -37,9 +38,9 @@ session after edits):
 copilot --plugin-dir /path/to/pr-review-glm --experimental
 ```
 
-`/pr-review` shows the capability boundary, `/pr-review N --capture-only` captures a PR
-read-only (needs an authenticated `gh`), and `/pr-review-config` manages configuration.
-Reviews arrive with later increments.
+`/z-pr-review` shows the capability boundary, `/z-pr-review N --capture-only` captures a
+PR read-only (needs an authenticated `gh`), and `/z-pr-review-config` manages
+configuration. Reviews arrive with later increments.
 
 ## Repository map
 

@@ -1,13 +1,15 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-// Personal configuration for pr-review-glm. The whole object is validated as a
+// Personal configuration for z-pr-review. The whole object is validated as a
 // unit: a file that is partial or malformed is rejected and the last valid
 // state stays active (spec: "Error handling").
 
 export const CONFIG_SCHEMA_VERSION = 1;
 
-export const CONFIG_DIR_NAME = "pr-review-glm";
+// Renamed from "pr-review-glm" by R1 (2026-09-10). The store is user-local and
+// schema-versioned, so the rename starts fresh at the new path — no migration.
+export const CONFIG_DIR_NAME = "z-pr-review";
 export const CONFIG_FILE_NAME = "config.json";
 
 export const TIER_NAMES = ["light", "medium", "heavy"];

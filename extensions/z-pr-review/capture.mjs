@@ -198,7 +198,7 @@ export async function capturePullRequest({
 
   const capturedAt = now();
   const envelope = {
-    kind: "pr-review-glm-capture",
+    kind: "z-pr-review-capture",
     schemaVersion: CAPTURE_SCHEMA_VERSION,
     capturedAt: capturedAt.toISOString(),
     repo,
@@ -235,7 +235,7 @@ export async function capturePullRequest({
     capturePath: null,
   };
 
-  const directory = await mkdtemp(join(tempRoot, "pr-review-glm-"));
+  const directory = await mkdtemp(join(tempRoot, "z-pr-review-"));
   const path = join(
     directory,
     `capture-${repo.replace("/", "-")}-${number}-${capturedAt.toISOString().replace(/[:.]/g, "-")}.json`,

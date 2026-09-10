@@ -8,7 +8,7 @@ import {
   CAPTURED_PR_FIELDS,
   CaptureError,
   capturePullRequest,
-} from "../extensions/pr-review/capture.mjs";
+} from "../extensions/z-pr-review/capture.mjs";
 
 // A fake gh: commands are scripted by their exact argv join; anything not
 // scripted fails loudly so tests cannot silently exercise the real gh. The
@@ -73,7 +73,7 @@ function noPostGateFetches(script, number = 3) {
 const tempRoots = [];
 
 async function captureWith(script, options = {}) {
-  const tempRoot = mkdtempSync(join(tmpdir(), "pr-review-glm-test-"));
+  const tempRoot = mkdtempSync(join(tmpdir(), "z-pr-review-test-"));
   tempRoots.push(tempRoot);
   return capturePullRequest({
     number: 3,
@@ -111,7 +111,7 @@ describe("capturePullRequest — happy path", () => {
 
     const onDisk = JSON.parse(readFileSync(path, "utf8"));
     assert.deepEqual(onDisk, {
-      kind: "pr-review-glm-capture",
+      kind: "z-pr-review-capture",
       schemaVersion: CAPTURE_SCHEMA_VERSION,
       capturedAt: "2026-09-10T12:00:00.000Z",
       repo: "xpepper/pr-review-glm",

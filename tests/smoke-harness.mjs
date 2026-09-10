@@ -4,7 +4,7 @@
 //   copilot --plugin-dir <repo> --experimental
 // (passed as the child's CLI args), then drives the plugin's commands through
 // session.rpc.commands.execute — direct dispatch, never a model prompt.
-// `copilot -p "/pr-review"` is NOT used: a prompt-mode slash command starts an
+// `copilot -p "/z-pr-review"` is NOT used: a prompt-mode slash command starts an
 // ambient model turn, which is exactly what the smokes must prove absent.
 //
 // Scripts keep their own scenario, signal handling, and cleanup; this module

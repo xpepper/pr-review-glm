@@ -125,3 +125,20 @@ Incremental re-review (`--incremental`, `pr_review_prior`); verification profile
 ## Attribution
 
 Upstream code reused under its declared MIT license (package.json) with attribution in `docs/ATTRIBUTION.md`, listing the upstream repository, version/commit pinned at port time, and the modules reused.
+
+## Amendments
+
+- **2026-09-10 (R1 — plugin identity rename).** The plugin is now **z-pr-review**:
+  `plugin.json` name; commands `/z-pr-review` and `/z-pr-review-config` (formerly
+  `/pr-review` and `/pr-review-config`); extension directory `extensions/z-pr-review/`
+  (formerly `extensions/pr-review/`); config store `~/.copilot/z-pr-review/config.json`
+  (formerly `~/.copilot/pr-review-glm/config.json`, amending the settled config-path
+  decision — the store is user-local and schema-versioned, so it starts fresh with no
+  migration). Motivation: sibling ports of pi-pr-review developed on the same machine
+  register `/pr-review` command names, and Copilot CLI dispatch is ambiguous when two
+  plugins share a command name (the I1 lesson); unique names give every port its own
+  namespace ("z-" honors the zai GLM models). Mechanical and behavior-preserving — gate
+  logic, review pipeline, and budgets are untouched, and the GitHub repository keeps the
+  name `pr-review-glm`. This also softens open item 2 (name collision with the prior
+  prototype is gone, though it stays uninstallable hygiene). Text above keeps the prior
+  names as written at the time.

@@ -1,4 +1,4 @@
-// I2 no-inference smoke script: /pr-review N --capture-only dispatched by RPC
+// I2 no-inference smoke script: /z-pr-review N --capture-only dispatched by RPC
 // against a real PR of this repository. Proves capture is pure code over `gh`:
 // real metadata/diff land in a 0600 file with the repo binding frozen, and the
 // session event stream shows zero inference (harness assertion in runCommand).
@@ -15,7 +15,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { CAPTURE_SCHEMA_VERSION } from "../extensions/pr-review/capture.mjs";
+import { CAPTURE_SCHEMA_VERSION } from "../extensions/z-pr-review/capture.mjs";
 import { runCommand, startPluginSession, stopClient, waitForCommands } from "./smoke-harness.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -72,12 +72,12 @@ try {
   const session = started.session;
 
   await waitForCommands(session, {
-    "pr-review": "Read-only PR capture (--capture-only) plus status and help",
+    "z-pr-review": "Read-only PR capture (--capture-only) plus status and help",
   });
-  console.log("PASS /pr-review is registered by the plugin extension");
+  console.log("PASS /z-pr-review is registered by the plugin extension");
 
   if (prClosed) {
-    const refused = await runCommand(session, "pr-review", `${prNumber} --capture-only`);
+    const refused = await runCommand(session, "z-pr-review", `${prNumber} --capture-only`);
     assert(
       refused.some((m) => m.includes("Skipped") && m.includes("--include-closed")),
       `capturing closed PR #${prNumber} without --include-closed must be skipped, got: ${refused.join(" | ")}`,
@@ -87,7 +87,7 @@ try {
 
   const captureMessages = await runCommand(
     session,
-    "pr-review",
+    "z-pr-review",
     `${prNumber} --capture-only${prClosed ? " --include-closed" : ""}`,
   );
   assert(
@@ -103,7 +103,7 @@ try {
 
   assert.equal(statSync(capturePath).mode & 0o777, 0o600, "capture file must be 0600");
   const envelope = JSON.parse(readFileSync(capturePath, "utf8"));
-  assert.equal(envelope.kind, "pr-review-glm-capture");
+  assert.equal(envelope.kind, "z-pr-review-capture");
   assert.equal(envelope.schemaVersion, CAPTURE_SCHEMA_VERSION);
   assert.equal(envelope.repo, expectedRepo, "the frozen repo binding must match this repository");
   assert.equal(envelope.pr.number, prNumber);
@@ -111,12 +111,12 @@ try {
   assert(envelope.diff.length > 0, "the real diff must be embedded");
   console.log(`PASS capture envelope is well-formed and bound to ${expectedRepo} (diff ${envelope.diff.length} chars)`);
 
-  const statusMessages = await runCommand(session, "pr-review", "status");
+  const statusMessages = await runCommand(session, "z-pr-review", "status");
   assert(
     statusMessages.some((m) => m.includes("Last capture (this session)") && m.includes(`PR #${prNumber}`)),
     "status must report the session's capture",
   );
-  console.log("PASS /pr-review status reports the last capture");
+  console.log("PASS /z-pr-review status reports the last capture");
 
   console.log(`SMOKE PASS I2: PR #${prNumber} captured read-only via gh, zero inference`);
 } finally {
