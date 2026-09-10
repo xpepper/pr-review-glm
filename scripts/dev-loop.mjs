@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
-  gateDocsUpdated, gateMainGreen, gatePrototypeAbsent, gateRepoIdle,
-  gateSmokes, gateTests, reportGates,
+  gateBranchHead, gateDocsUpdated, gateMainGreen, gatePrototypeAbsent, gateRepoIdle,
+  gateSmokes, gateTests, isFullOid, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 
@@ -17,7 +17,7 @@ const repoRoot = process.cwd();
 const artDir = join(repoRoot, ".dev-loop");
 
 function parseArgs(argv) {
-  const options = { maxIterations: 1, cooldownSeconds: 60, dryRun: false, dogfood: false };
+  const options = { maxIterations: 1, cooldownSeconds: 60, dryRun: false, dogfood: false, mergeMode: "human" };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--dry-run") options.dryRun = true;
@@ -31,6 +31,14 @@ function parseArgs(argv) {
       }
       options.dogfood = value === "on";
     }
+    else if (arg === "--merge") {
+      const value = argv[++i];
+      if (value !== "human" && value !== "auto") {
+        console.error("--merge requires an explicit human|auto value");
+        process.exit(2);
+      }
+      options.mergeMode = value;
+    }
     else if (arg === "--help") { printUsage(); process.exit(0); }
     else { console.error(`unknown argument: ${arg}`); printUsage(); process.exit(2); }
   }
@@ -41,7 +49,7 @@ function parseArgs(argv) {
   return options;
 }
 function printUsage() {
-  console.log("usage: node scripts/dev-loop.mjs [--max-iterations N] [--cooldown-seconds S] [--dry-run] [--dogfood on|off]");
+  console.log("usage: node scripts/dev-loop.mjs [--max-iterations N] [--cooldown-seconds S] [--dry-run] [--dogfood on|off] [--merge human|auto]");
 }
 
 const read = (path) => readFileSync(join(repoRoot, path), "utf8");
@@ -62,8 +70,8 @@ function statusGate() {
   return { name: "status", ok: false, detail: `HANDOFF STATUS is ${status.kind}: ${status.line ?? ""}`.trim(), status };
 }
 
-async function dryRun() {
-  console.log("DRY-RUN: gates only, no agent phases, nothing mutates.");
+async function dryRun(options) {
+  console.log(`DRY-RUN: gates only, no agent phases, nothing mutates. (merge=${options.mergeMode})`);
   const results = [];
   const status = statusGate();
   results.push(status);
@@ -96,7 +104,7 @@ function phaseRunner({ zcode, template, vars, limits }) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
-  if (options.dryRun) return dryRun();
+  if (options.dryRun) return dryRun(options);
   if (options.dogfood) {
     console.error("--dogfood on requires the plugin's own review (lands with I3); refusing to run without it.");
     process.exit(2);
@@ -125,27 +133,29 @@ async function main() {
       })();
     },
     workerGates: async () => {
-      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url"], { cwd: repoRoot });
+      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid"], { cwd: repoRoot });
       let open = [];
       try { open = JSON.parse(prs.stdout || "[]"); } catch { /* gate below reports */ }
       const results = [];
       let prNumber = null;
+      let headRefOid = null;
       if (prs.code === 0 && open.length === 1) {
         prNumber = open[0].number;
+        headRefOid = open[0].headRefOid ?? null;
         // The worker may leave the checkout anywhere; gates and the reviewer must
-        // see the PR head, so establish it here (zero-trust: never assume).
-        const checkout = await run("git", ["checkout", open[0].headRefName], { cwd: repoRoot });
-        if (checkout.code !== 0) {
-          results.push({ name: "branch-checkout", ok: false, detail: `git checkout ${open[0].headRefName} failed: ${checkout.stderr.slice(0, 200)}` });
-          return { results, prNumber };
-        }
+        // see the exact PR head, so establish it before anything runs (zero-trust:
+        // never assume the worker left it there or that it matches the remote
+        // head the pin records).
+        const branchHead = await gateBranchHead({ run, repoRoot, headRefName: open[0].headRefName, headRefOid });
+        if (!branchHead.ok) return { results: [branchHead], prNumber, headRefOid };
+        results.push(branchHead);
         results.push(await gateTests({ run, repoRoot }));
         results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
         results.push(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement }));
       } else {
         results.push({ name: "increment-pr", ok: false, detail: `expected exactly one open PR, found ${open.length}` });
       }
-      return { results, prNumber };
+      return { results, prNumber, headRefOid };
     },
     runReviewer: async (prNumber) => {
       try {
@@ -187,6 +197,22 @@ async function main() {
         return { code: 1, stdout: "", stderr: String(error), timedOut: false };
       }
     },
+    // Head pinning (spec, architecture step 7): the loop re-fetches the PR head
+    // immediately before merging and refuses on gh failure or a malformed OID —
+    // a merge must never race ahead of the pin check.
+    fetchPrHead: async (prNumber) => {
+      try {
+        const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefOid"], { cwd: repoRoot });
+        let headRefOid = null;
+        try { headRefOid = JSON.parse(pr.stdout || "{}").headRefOid ?? null; } catch { /* error below */ }
+        if (pr.code !== 0 || !isFullOid(headRefOid)) {
+          return { error: `gh pr view headRefOid failed: ${(pr.stderr || pr.stdout || "").slice(0, 200)}` };
+        }
+        return { headRefOid };
+      } catch (error) {
+        return { error: String(error) };
+      }
+    },
     merge: async (prNumber) => {
       const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
       if (merged.code === 0) {
@@ -200,6 +226,7 @@ async function main() {
       return results;
     },
     dogfood: options.dogfood,
+    mergeMode: options.mergeMode,
     maxIterations: options.maxIterations,
     cooldownSeconds: options.cooldownSeconds,
     log: (line) => console.log(`[dev-loop] ${line}`),

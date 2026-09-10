@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
+  gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
   gateRepoIdle, gateSmokes, gateTests, reportGates,
 } from "../scripts/dev-loop/gates.mjs";
 
@@ -89,12 +89,57 @@ describe("gateSmokes", () => {
   });
 });
 
+describe("gateBranchHead", () => {
+  const OID = "a".repeat(40);
+  // Unlisted commands succeed silently; each case pins only what it exercises.
+  const dispatch = (outputs) => async (command, args) =>
+    outputs[`${command} ${args.join(" ")}`] ?? { code: 0, stdout: "", stderr: "" };
+  it("passes when the checkout lands exactly on the assessed head", async () => {
+    const run = dispatch({ "git rev-parse HEAD": { code: 0, stdout: `${OID}\n`, stderr: "" } });
+    const gate = await gateBranchHead({ run, repoRoot, headRefName: "i3-lanes", headRefOid: OID });
+    assert.equal(gate.ok, true);
+    assert.match(gate.detail, /at PR head/);
+  });
+  it("fails on checkout, fetch, or ff-only sync failures", async () => {
+    const cases = [
+      dispatch({ "git checkout i3-lanes": { code: 1, stdout: "", stderr: "no such branch" } }),
+      dispatch({ "git fetch --quiet origin": { code: 1, stdout: "", stderr: "network down" } }),
+      dispatch({ "git merge --ff-only origin/i3-lanes": { code: 1, stdout: "", stderr: "not possible to fast-forward" } }),
+    ];
+    for (const run of cases) {
+      const gate = await gateBranchHead({ run, repoRoot, headRefName: "i3-lanes", headRefOid: OID });
+      assert.equal(gate.ok, false, gate.detail);
+    }
+  });
+  it("fails when the local head differs from the assessed head (stale or ahead)", async () => {
+    const run = dispatch({ "git rev-parse HEAD": { code: 0, stdout: `${"b".repeat(40)}\n`, stderr: "" } });
+    const gate = await gateBranchHead({ run, repoRoot, headRefName: "i3-lanes", headRefOid: OID });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /not at PR head/);
+  });
+  it("fails with a precise message when the PR has no valid headRefOid", async () => {
+    for (const headRefOid of [undefined, null, "too-short"]) {
+      const gate = await gateBranchHead({ run: dispatch({}), repoRoot, headRefName: "i3-lanes", headRefOid });
+      assert.equal(gate.ok, false);
+      assert.match(gate.detail, /no valid headRefOid/);
+    }
+  });
+});
+
 describe("gateIncrementPr", () => {
-  it("requires exactly one open PR and surfaces its number and branch", async () => {
-    const one = await gateIncrementPr({ run: runOk('[{"number":7,"headRefName":"i3-lanes"}]'), repoRoot });
+  it("requires exactly one open PR and surfaces its number, branch, and reviewed head", async () => {
+    const seen = [];
+    const run = async (command, args) => {
+      seen.push(args.join(" "));
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}"}]`, stderr: "" };
+    };
+    const one = await gateIncrementPr({ run, repoRoot });
     assert.equal(one.ok, true);
     assert.equal(one.prNumber, 7);
     assert.equal(one.headRefName, "i3-lanes");
+    assert.equal(one.headRefOid, "a".repeat(40));
+    // The head pin (L2) depends on gh returning headRefOid, so the field must be requested.
+    assert.match(seen[0], /--json number,headRefName,url,headRefOid/);
     for (const stdout of ["[]", '[{"number":1,"headRefName":"a"},{"number":2,"headRefName":"b"}]']) {
       assert.equal((await gateIncrementPr({ run: runOk(stdout), repoRoot })).ok, false);
     }
