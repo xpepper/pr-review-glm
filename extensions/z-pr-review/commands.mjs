@@ -94,10 +94,12 @@ export function renderStatus(lastCapture = null) {
     "- /z-pr-review status | help — this capability boundary. These commands make no model calls.",
     "- /z-pr-review N --capture-only — read-only PR capture via gh (metadata, base/head, diff).",
     "  No model calls.",
+    "- /z-pr-review N [--no-comment] — capture plus one heavy review lane over the diff",
+    "  (an owned Copilot SDK child runtime); findings rendered in-chat. Publication never",
+    "  runs in v1 without a future gate (I7).",
     "- /z-pr-review-config — inspect and edit personal configuration.",
     "",
     "Not implemented yet (ROADMAP order):",
-    "- I3: first review lane and in-chat findings (dogfood entry point)",
     "- I4: mode topologies and model tiers",
     "- I5: deterministic validation and adjudication",
     "- I6: finding selection",
@@ -136,6 +138,48 @@ function shortOid(oid) {
   return oid.slice(0, 7);
 }
 
+// In-chat review report for the I3 single-lane review. The trailing fenced
+// block is the machine-readable summary the dev-loop's dogfood review maps
+// into its verdict contract; the verdict itself is computed by loop code, not
+// by any model (spec: model text never decides publication or merges).
+export function renderReview(capture, lane) {
+  const lines = [
+    `Reviewed PR #${capture.number} — "${capture.title}" (${capture.repo})`,
+    `Lane: heavy, ${lane.modelLabel} — ${lane.status === "complete" ? "complete" : `FAILED (${lane.reason})`}`,
+  ];
+  if (lane.status === "complete") {
+    if (lane.findings.length === 0) {
+      lines.push("Findings: none. (One heavy lane; no clean-review claim before I4+ adds coverage.)");
+    } else {
+      lines.push(`Findings: ${lane.findings.length}`);
+      for (const finding of lane.findings) {
+        const location = finding.file ? ` — ${finding.file}${finding.line ? `:${finding.line}` : ""}` : "";
+        lines.push(`- [${finding.severity}] ${finding.title}${location}`);
+        if (finding.detail) {
+          lines.push(`  ${finding.detail.split(/\r?\n/).join(" ")}`);
+        }
+      }
+    }
+    if (lane.dropped.length > 0) {
+      lines.push(`Dropped ${lane.dropped.length} malformed candidate finding(s) — disclosed, not hidden.`);
+    }
+  } else {
+    lines.push("No findings can be claimed from a failed lane; this is an incomplete review, not a clean one.");
+  }
+  lines.push(
+    "",
+    "```z-pr-review-findings",
+    JSON.stringify({
+      status: lane.status,
+      reason: lane.status === "complete" ? undefined : lane.reason,
+      findings: lane.status === "complete" ? lane.findings : [],
+      dropped: lane.status === "complete" ? lane.dropped.length : 0,
+    }),
+    "```",
+  );
+  return lines.join("\n");
+}
+
 export function renderHelp() {
   return [
     "/z-pr-review — parallel tiered PR review (under construction)",
@@ -145,10 +189,12 @@ export function renderHelp() {
     "  /z-pr-review help                       Show this help",
     "  /z-pr-review <N> --capture-only         Capture PR N read-only (metadata + diff via gh)",
     "                                           [--include-drafts] [--include-closed]",
+    "  /z-pr-review <N> [--no-comment]         Review PR N: capture, then one heavy reviewer",
+    "                                           lane over the diff; findings in-chat.",
+    "                                           [--include-drafts] [--include-closed]",
     "",
-    "Reviews (lanes, findings, publication) are not implemented yet; they arrive with",
-    "increment I3 onward. Full review flags: [--quick|--balanced|--full|--deep]",
-    "[--comment|--no-comment] [--all] — accepted later, not today.",
+    "More lanes, mode topologies (--quick|--balanced|--full|--deep), selection (--all),",
+    "and COMMENT publication (--comment) arrive with increments I4, I6, and I7.",
     "Configuration: /z-pr-review-config [show] | key=value ... | unset key ...",
   ].join("\n");
 }

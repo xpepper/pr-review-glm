@@ -8,6 +8,9 @@ export const PHASE_LIMITS = Object.freeze({
   worker: { maxTurns: 300, timeoutMs: 90 * 60_000 },
   reviewer: { maxTurns: 80, timeoutMs: 20 * 60_000 },
   fixer: { maxTurns: 150, timeoutMs: 45 * 60_000 },
+  // The dogfood review is one heavy lane over the captured diff; 20m is the
+  // starting guess pending the supervised first run (I3 calibration item).
+  dogfood: { maxTurns: 80, timeoutMs: 20 * 60_000 },
 });
 
 export const DEFAULT_ZCODE_CLI = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";

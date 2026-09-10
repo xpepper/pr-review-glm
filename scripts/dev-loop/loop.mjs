@@ -36,6 +36,15 @@ export async function runLoop(deps) {
   const fail = (reason) => { summary.reason = reason; return summary; };
   const finishAs = (stopped, reason) => { summary.stopped = stopped; summary.reason = reason; return summary; };
 
+  // From I3 the dogfood review exists, so auto merging requires it (spec, L2
+  // amendment): without dogfood the loop stops before dispatching anything.
+  if (mergeMode === "auto" && !dogfood) {
+    return fail("--merge auto requires --dogfood on: the loop merges only heads the plugin's own review assessed");
+  }
+  if (dogfood && typeof runDogfood !== "function") {
+    return fail("--dogfood on requires a dogfood review runner (not wired)");
+  }
+
   for (let index = 0; index < maxIterations; index++) {
     // Status is read before an iteration is recorded: terminal statuses must
     // leave iterations empty ("without dispatching anything").

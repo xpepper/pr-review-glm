@@ -124,9 +124,10 @@ describe("renderStatus / renderHelp / renderCapture", () => {
   it("status states the capability boundary without promising a review", () => {
     const text = renderStatus();
     assert(text.includes("z-pr-review"));
-    assert(text.includes("no model calls"), "must state that it makes no model calls");
+    assert(text.includes("no model calls"), "must state that status/help/capture make no model calls");
     assert(text.includes("--capture-only"), "must name capture as implemented");
-    assert(text.includes("I3"), "must name the next increment");
+    assert(text.includes("heavy review lane"), "must name the I3 review as implemented");
+    assert(text.includes("I4"), "must name the next increment");
     assert(!text.includes("Last capture"), "no capture section without a capture");
   });
 

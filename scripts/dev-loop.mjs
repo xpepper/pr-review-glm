@@ -12,6 +12,7 @@ import {
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
+import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 
 const repoRoot = process.cwd();
 const artDir = join(repoRoot, ".dev-loop");
@@ -46,6 +47,12 @@ function parseArgs(argv) {
     console.error("--max-iterations must be an integer >= 1; --cooldown-seconds an integer >= 0");
     process.exit(2);
   }
+  // From I3, the loop merges only heads the plugin's own review assessed
+  // (spec, L2 amendment): auto without the dogfood review refuses to run.
+  if (options.mergeMode === "auto" && !options.dogfood) {
+    console.error("--merge auto requires --dogfood on: the loop merges only heads the plugin's own review assessed");
+    process.exit(2);
+  }
   return options;
 }
 function printUsage() {
@@ -71,7 +78,7 @@ function statusGate() {
 }
 
 async function dryRun(options) {
-  console.log(`DRY-RUN: gates only, no agent phases, nothing mutates. (merge=${options.mergeMode})`);
+  console.log(`DRY-RUN: gates only, no agent phases, nothing mutates. (merge=${options.mergeMode}, dogfood=${options.dogfood ? "on" : "off"})`);
   const results = [];
   const status = statusGate();
   results.push(status);
@@ -104,10 +111,6 @@ function phaseRunner({ zcode, template, vars, limits }) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.dryRun) return dryRun(options);
-  if (options.dogfood) {
-    console.error("--dogfood on requires the plugin's own review (lands with I3); refusing to run without it.");
-    process.exit(2);
-  }
   const zcode = resolveZcodeCli();
   mkdirSync(artDir, { recursive: true });
   const run = (command, args, opts) => runCommand(command, args, opts);
@@ -178,7 +181,9 @@ async function main() {
         return { code: 1, stdout: "", stderr: String(error), timedOut: false, review: undefined };
       }
     },
-    runDogfood: undefined, // harness lands with I3; --dogfood refuses to run until then
+    runDogfood: (prNumber) => runDogfoodReview({
+      prNumber, repoRoot, timeoutMs: PHASE_LIMITS.dogfood.timeoutMs, log: (line) => console.log(`[dev-loop] ${line}`),
+    }),
     runFixer: async (prNumber, findings) => {
       try {
         const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefName"], { cwd: repoRoot });
