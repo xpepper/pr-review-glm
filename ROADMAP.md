@@ -43,8 +43,10 @@ the development workflow itself.
   sending `--max-turns` (wall-clock timeouts are the bound; PHASE_LIMITS keeps
   maxTurns for I3 calibration), and a new preflight gate `zcode-headless` runs a
   one-turn probe with the exact worker arg set so flag drift or missing auth fails
-  in seconds, before any phase is dispatched. User action still owed before the
-  next run: provide zcode headless auth (AGENTS.md has the recipe).
+  in seconds, before any phase is dispatched. Headless auth resolved the same day
+  and verified end-to-end: the user's pre-existing `ZAI_API_KEY` env var plus a
+  keyless config (recipe in AGENTS.md); the loop must run from a shell where the
+  var is set.
 
 - **2026-09-10 (L2)** — autopilot merge mode landed (PR #9): `--merge human|auto`
   (default human, explicit value required, exit 2 otherwise) decoupled merging from
