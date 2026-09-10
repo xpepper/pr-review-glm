@@ -1,0 +1,134 @@
+// tests/dev-loop-gates.test.mjs
+import assert from "node:assert/strict";
+import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+  gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
+  gateRepoIdle, gateSmokes, gateTests, reportGates,
+} from "../scripts/dev-loop/gates.mjs";
+
+const repoRoot = "/repo"; // never touched: all commands are faked
+// gateTests/gateSmokes/gateMainGreen enumerate the real tests/ dir (readdirSync)
+// while faking execution, so they need the real repo root.
+const realRoot = fileURLToPath(new URL("..", import.meta.url));
+const runOk = (stdout = "") => async () => ({ code: 0, stdout, stderr: "" });
+
+describe("gateRepoIdle", () => {
+  // One constant stdout cannot express a clean tree + synced main + no PRs, so
+  // the idle fake dispatches per command.
+  const idleRun = (outputs) => async (command, args) => {
+    const result = outputs[`${command} ${args.join(" ")}`];
+    return result ?? { code: 0, stdout: "", stderr: "" };
+  };
+  it("passes on clean synced repo with no open PRs", async () => {
+    const run = idleRun({
+      "git rev-parse main origin/main": { code: 0, stdout: "commit-a\ncommit-a\n", stderr: "" },
+      "gh pr list --state open --json number,headRefName": { code: 0, stdout: "[]", stderr: "" },
+    });
+    const gate = await gateRepoIdle({ run, repoRoot });
+    assert.deepEqual(gate, { name: "repo-idle", ok: true, detail: "main clean, synced, no open PRs" });
+  });
+  it("fails on dirty tree, desync, or open PRs", async () => {
+    const cases = [
+      idleRun({ "git status --porcelain": { code: 0, stdout: " M file\n", stderr: "" } }),
+      idleRun({ "git rev-parse main origin/main": { code: 0, stdout: "aaa\nbbb\n", stderr: "" } }),
+      idleRun({ "gh pr list --state open --json number,headRefName": { code: 0, stdout: '[{"number":7,"headRefName":"x"}]', stderr: "" } }),
+    ];
+    for (const run of cases) {
+      const gate = await gateRepoIdle({ run, repoRoot });
+      assert.equal(gate.ok, false);
+    }
+  });
+});
+
+describe("gatePrototypeAbsent", () => {
+  it("passes when the prototype is gone, fails when registered or list fails", async () => {
+    assert.equal((await gatePrototypeAbsent({ run: runOk("superpowers\n") })).ok, true);
+    const registered = await gatePrototypeAbsent({ run: runOk("copilot-pr-review (v0.0.1)\n") });
+    assert.equal(registered.ok, false);
+    assert.match(registered.detail, /copilot plugin uninstall copilot-pr-review/);
+    assert.equal((await gatePrototypeAbsent({ run: async () => ({ code: 1, stdout: "", stderr: "boom" }) })).ok, false);
+  });
+});
+
+describe("gateTests", () => {
+  it("runs node --test with the explicit test files it discovered", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args]);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    assert.equal((await gateTests({ run, repoRoot: realRoot })).ok, true);
+    const flat = calls.flat().join(" ");
+    assert.match(flat, /node/);
+    assert.match(flat, /--test/);
+    assert.match(flat, /dev-loop-status\.test\.mjs/);
+    assert.doesNotMatch(flat, /smoke-harness/);
+  });
+  it("fails on nonzero test exit", async () => {
+    assert.equal((await gateTests({ run: async () => ({ code: 1, stdout: "", stderr: "failing" }), repoRoot: realRoot })).ok, false);
+  });
+});
+
+describe("gateSmokes", () => {
+  it("excludes the named smoke scripts, skips the shared harness, and fails on nonzero exits", async () => {
+    const calls = [];
+    const run = async (command, args) => { calls.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; };
+    await gateSmokes({ run, repoRoot: realRoot, exclude: ["smoke-l1.mjs"] });
+    for (const call of calls) assert.doesNotMatch(call, /smoke-l1/);
+    for (const call of calls) assert.doesNotMatch(call, /smoke-harness/);
+    assert(calls.some((c) => c.includes("smoke-i1.mjs")));
+    const failing = await gateSmokes({ run: async () => ({ code: 2, stdout: "", stderr: "x" }), repoRoot: realRoot, exclude: [] });
+    assert.equal(failing.ok, false);
+  });
+});
+
+describe("gateIncrementPr", () => {
+  it("requires exactly one open PR and surfaces its number and branch", async () => {
+    const one = await gateIncrementPr({ run: runOk('[{"number":7,"headRefName":"i3-lanes"}]'), repoRoot });
+    assert.equal(one.ok, true);
+    assert.equal(one.prNumber, 7);
+    assert.equal(one.headRefName, "i3-lanes");
+    for (const stdout of ["[]", '[{"number":1,"headRefName":"a"},{"number":2,"headRefName":"b"}]']) {
+      assert.equal((await gateIncrementPr({ run: runOk(stdout), repoRoot })).ok, false);
+    }
+  });
+});
+
+describe("gateDocsUpdated", () => {
+  const roadmap = "| I3 | ⬜ Pending | lanes | I2 |\n| L1 | ✅ Done (PR #9) | dev-loop | I2 |\n";
+  const readFileSync = (path) => path.endsWith("ROADMAP.md") ? roadmap : "# HANDOFF\n\nSTATUS: next=I3\n";
+  it("passes when the increment row is done and STATUS points at a different pending increment", async () => {
+    const gate = await gateDocsUpdated({ readFileSync, repoRoot, increment: "L1" });
+    assert.equal(gate.ok, true);
+    assert.equal(gate.nextIncrement, "I3");
+  });
+  it("fails when the row is not done, or STATUS is missing/same/already-done", async () => {
+    const notDoneR = (path) => path.endsWith("ROADMAP.md") ? "| L1 | ⬜ Pending | x | I2 |\n" : "STATUS: next=I3\n";
+    assert.equal((await gateDocsUpdated({ readFileSync: notDoneR, repoRoot, increment: "L1" })).ok, false);
+    const noStatus = (path) => path.endsWith("ROADMAP.md") ? roadmap : "# HANDOFF\n";
+    assert.equal((await gateDocsUpdated({ readFileSync: noStatus, repoRoot, increment: "L1" })).ok, false);
+    const sameNext = (path) => path.endsWith("ROADMAP.md") ? roadmap : "STATUS: next=L1\n";
+    assert.equal((await gateDocsUpdated({ readFileSync: sameNext, repoRoot, increment: "L1" })).ok, false);
+    const doneNext = (path) => path.endsWith("ROADMAP.md") ? roadmap : "STATUS: next=I2\n"; // I2 absent from this fixture roadmap
+    assert.equal((await gateDocsUpdated({ readFileSync: doneNext, repoRoot, increment: "L1" })).ok, false);
+  });
+});
+
+describe("gateMainGreen", () => {
+  it("runs tests and smokes (excluding the dry-run smoke)", async () => {
+    const calls = [];
+    const run = async (command, args) => { calls.push(args.join(" ")); return { code: 0, stdout: "", stderr: "" }; };
+    assert.equal((await gateMainGreen({ run, repoRoot: realRoot })).ok, true);
+    assert(calls.some((c) => c.includes("--test")));
+    for (const call of calls) assert.doesNotMatch(call, /smoke-l1/);
+  });
+});
+
+describe("reportGates", () => {
+  it("renders PASS/FAIL per gate", () => {
+    const text = reportGates([{ name: "a", ok: true, detail: "fine" }, { name: "b", ok: false, detail: "broken" }]);
+    assert.match(text, /PASS a — fine/);
+    assert.match(text, /FAIL b — broken/);
+  });
+});
