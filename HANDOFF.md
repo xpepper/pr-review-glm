@@ -33,9 +33,9 @@ parses and validates it. Keep it directly under the H1 title.
   - `--merge human|auto`, default **human**, always an explicit flag — no silent
     default flips later.
   - `auto` = the **loop** merging under code-owned conditions (green gates + all
-    active reviews clean + fixer resolved) → then post-merge gates (main-green,
-    stop-on-red). Never an agent-discretion merge; workers/reviewer/fixer stay
-    merge-denied (`--disallowed-tools`, prompts).
+    active reviews clean + fixer resolved + **unchanged reviewed head**) → then
+    post-merge gates (main-green, stop-on-red). Never an agent-discretion merge;
+    workers/reviewer/fixer stay merge-denied (`--disallowed-tools`, prompts).
   - Pre-I3, `auto` merges on the independent review alone (explicit opt-in, bounded:
     squash-revertible, no force pushes, main-green catch). Once dogfood exists, `auto`
     additionally requires `--dogfood on` — **enforcement is I3's obligation, not L2's**.
@@ -51,19 +51,23 @@ parses and validates it. Keep it directly under the H1 title.
 
 Implement what the amended spec settles (above). Definition of done:
 
-- `scripts/dev-loop.mjs`: parse/validate `--merge human|auto` exactly like `--dogfood`
-  (explicit `human|off`-style value required; missing/invalid → exit 2); default
-  `human`; usage string updated; pass `mergeMode` into the loop wiring.
+- `scripts/dev-loop.mjs`: parse/validate `--merge human|auto` like `--dogfood on|off`
+  (explicit value required; missing/invalid → exit 2); default `human`; usage string
+  updated; pass `mergeMode` into the loop wiring.
 - `scripts/dev-loop/loop.mjs`: new injected `mergeMode` dep (default `"human"`).
   With `auto`, a clean assessment proceeds to merge + post-merge gates exactly like
   today's dogfood-on path (pre-I3 that means independent review only). With `human`,
   today's `awaiting-human-merge` stop is unchanged (including when `--dogfood on`,
   which pre-I3 still refuses to run entirely).
+- **Head pinning (spec, architecture step 7):** record the PR `headRefOid` at
+  assessment time (extend the increment-pr gate/wiring to surface it) and re-fetch it
+  immediately before `gh pr merge`; a moved head re-enters assessment instead of
+  merging unreviewed commits (the I2 capture head-moved re-check pattern).
 - Tests (`tests/dev-loop-loop.test.mjs`): merge-mode matrix — `auto` + dogfood off
   merges and runs post-merge gates; `human` stops at awaiting-human-merge; `auto`
-  still never merges on blocking findings, fatal stops, or exhausted fixer budget.
-  Keep all existing loop tests green (they default to `human` semantics → the
-  awaiting-human-merge case stays the default-path assertion).
+  still never merges on blocking findings, fatal stops, exhausted fixer budget, or a
+  moved head. Keep all existing loop tests green (they default to `human` semantics
+  → the awaiting-human-merge case stays the default-path assertion).
 - Optional nicety, not required: surface the configured merge mode in the dry-run
   header line.
 - NOT in scope: dogfood wiring or `auto⇒dogfood` enforcement (I3), any default flips,

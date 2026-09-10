@@ -67,7 +67,10 @@ normal PR flow itself.
    reports attached to the PR.
 7. **Merge** (`--merge auto` only): squash + delete branch, when gates green and all
    active reviews clean — pre-I3 that is the independent review alone (explicit
-   opt-in); once the dogfood reviewer exists, `auto` additionally requires it. With
+   opt-in); once the dogfood reviewer exists, `auto` additionally requires it. The
+   merge **pins the reviewed head**: re-fetch the PR `headRefOid` immediately before
+   `gh pr merge` and, if it moved since assessment, re-enter assessment instead of
+   merging unreviewed commits (the I2 capture head-moved re-check pattern). With
    `--merge human` (the default), stop here and leave merging to the human.
 8. **Post-merge** (shell): sync `main`; re-run unit tests + smoke on merged `main`;
    red → stop immediately and report (human decides revert vs fix-forward); cooldown;
@@ -107,8 +110,10 @@ normal PR flow itself.
 - `--dry-run` runs every gate exercisable against the current repo state (preflight,
   tests, smoke, `STATUS` parsing, ROADMAP consistency) without invoking any agent, and
   prints what it could not exercise (e.g. "one open PR" with none open).
-- First real run is supervised (a human watches one full iteration, `--max-iterations 1`)
-  during L1; the loop's own PR is reviewed conventionally (it is pre-I3).
+- First real run is supervised (a human watches one full iteration, `--max-iterations 1`).
+  L1 landed dry-run-only, so that supervised run is the I3 iteration, with
+  `--merge human` recommended (from L2 the operator may opt into `--merge auto`);
+  the loop's own PRs are reviewed conventionally while pre-I3.
 - Defaults are conservative: one iteration per invocation until the user opts into
   batches.
 
@@ -145,10 +150,11 @@ automatic ROADMAP re-planning.
   policy changed from "human merges until the dogfood reviewer exists" to an explicit
   `--merge human|auto` opt-in (default **human**, always an explicit flag — no silent
   default flips later). Design rule: autopilot is the *loop* merging under code-owned
-  conditions (green gates + clean active reviews + resolved fixer); an agent never
-  merges by its own judgment — the same authority-path rule the plugin applies to
-  publication. Pre-I3, `auto` merges on the independent review alone (explicit
-  opt-in, bounded blast radius: squash-revertible, no force pushes, post-merge
-  main-green still stops on red); once the dogfood reviewer exists (I3+), `auto`
-  additionally requires it — enforcement lands with I3's wiring. Merge-policy row,
-  architecture step 7, guardrails, and the CLI signature above were updated.
+  conditions (green gates + clean active reviews + resolved fixer + unchanged reviewed
+  head); an agent never merges by its own judgment — the same authority-path rule the
+  plugin applies to publication. Pre-I3, `auto` merges on the independent review alone
+  (explicit opt-in, bounded blast radius: squash-revertible, no force pushes,
+  head-SHA pinning, post-merge main-green still stops on red); once the dogfood
+  reviewer exists (I3+), `auto` additionally requires it — enforcement lands with
+  I3's wiring. Merge-policy row, architecture step 7, guardrails, CLI signature, and
+  the Sequencing section above were updated.
