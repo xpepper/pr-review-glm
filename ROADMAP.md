@@ -21,6 +21,7 @@ dogfood from I3 onward — every increment PR is reviewed by this tool itself be
 | R1 | ✅ Done (PR #12) | **Plugin identity rename to z-pr-review** (mechanical, behavior-preserving; user decision 2026-09-10): plugin.json name; commands `/pr-review`→`/z-pr-review` and `/pr-review-config`→`/z-pr-review-config` (registration, parsing/usage/help/status text); extension dir `extensions/pr-review/`→`extensions/z-pr-review/`; config store `~/.copilot/pr-review-glm/`→`~/.copilot/z-pr-review/` (amends the settled config-path decision — user-local, schema-versioned, starts fresh, no migration); capture envelope kind + temp-dir prefix follow the plugin name. Motivation: sibling pi-pr-review ports on this machine register `/pr-review` names and command names are the dispatch collision surface (the I1 lesson); `z-` honors the zai GLM models. Repo name stays pr-review-glm; gate logic and the dev-loop untouched. Evidence: 138 unit tests + smoke-i1 + smoke-i2 + smoke-l1 green (commands registered under the new names, config round-trip at the new path, prototype-absent gate unchanged and passing). Spec amendment recorded in the port design spec's Amendments section. | L2 |
 | I3 | ⬜ Pending | **First minimal review (dogfood entry point):** one heavy lane over the captured diff via a Copilot SDK child runtime (envelope-marker contract), findings parsed and rendered in-chat. From here, every increment PR is reviewed by this tool — via the dev-loop. | I2, L1 |
 | I4 | ⬜ Pending | Topologies and tiers: quick/balanced/full/deep lane sets, light/medium/heavy models + one fallback each from config, concurrent lanes with per-lane progress, attempt/total budgets with cancellation. | I3 |
+| C1 | ⬜ Pending | **Custom review roles:** user-defined reviewer lanes in config — each role is a prompt plus a tier (light/medium/heavy ⇒ budgets/fallback) with optional model and reasoning-effort overrides falling back to the tier's values; custom modes as ordered role lists, with the four standard modes as code-owned defaults that config may override. Roles feed the same pipeline as built-in lanes — deterministic validation/adjudication and publication gates unchanged (prompts are model input, never authority). Amends the "fixed code-owned topologies" settled decision to "code-owned defaults + user-configurable composition" (record in the spec amendment when C1 is designed); config schemaVersion bump; roles edited directly in the config file for v1 (the key=value grammar doesn't fit multi-line prompts). Original extension — upstream has fixed topologies, nothing ported. | I4 |
 | I5 | ⬜ Pending | Validation and adjudication: deterministic candidate validation (severity ladder, anchors vs diff, evidence), isolated adjudicator call, dedup, per-mode findings policy, degraded assembly with coverage disclosure. | I4 |
 | I6 | ⬜ Pending | Selection and retention: elicitation-based finding selection (`--all`, subset, none), retained settled result inspectable without inference. | I5 |
 | I7 | ⬜ Pending | Gated COMMENT publication: single POST, ≤50 validated inline anchors, idempotency marker, stale/draft/self gates, uncertain-write reconciliation; `--comment` / `autoPostReviews`. | I6 |
@@ -31,6 +32,22 @@ without changing the spec; record splits here. Non-plugin increments (L-series) 
 the development workflow itself.
 
 ## Journey log
+
+- **2026-09-10 (C1 design, approved in conversation)** — new post-I4 increment
+  **C1 — custom review roles** added to the plan: the user wants pluggable extra
+  reviewer roles defined by a prompt, a preferred model, and a preferred reasoning
+  effort — alongside the standard specialists, or replacing them per mode. Shape
+  agreed in conversation: a role = prompt + tier (the budget/fallback class) with
+  optional model/effort overrides that fall back to the tier's values; modes become
+  ordered role lists over code-owned standard defaults, overridable in config;
+  custom-role findings flow through the same validation/adjudication/publication
+  gates (prompts never gain authority — severity, anchors, blocking stay
+  code-classified). Config schemaVersion bump; prompts edited directly in the JSON
+  file for v1. Placed after I4 rather than inside it (lanes, concurrency, and
+  budgets must exist first; I4 is already the largest increment). Amends the
+  "fixed code-owned topologies" settled decision — to be recorded in the spec's
+  Amendments section when C1 is designed. Upstream is fixed-topology: C1 is
+  original work, not a port.
 
 - **2026-09-10 (R1)** — plugin identity renamed to **z-pr-review** (PR #12): sibling
   pr-review ports are developed in parallel on this machine (the prior
