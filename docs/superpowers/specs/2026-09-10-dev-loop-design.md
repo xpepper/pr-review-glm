@@ -22,11 +22,11 @@ normal PR flow itself.
 |---|---|
 | Orchestrator | Script loop (`scripts/dev-loop.mjs`, plain ESM, no deps), not an in-session agent. Deterministic shell owns sequencing and gates; every judgment phase is a fresh headless agent invocation. |
 | Worker | `zcode` CLI headless: `zcode --prompt <text> --cwd <repo> --mode yolo --max-turns <n> --json`, with merge denied via `--disallowed-tools`. Binary resolved from `ZCODE_CLI` env, default the app-bundle path (version-sensitive; flagged below). |
-| Merge policy | Auto-merge (`gh pr merge --squash --delete-branch`) only when gates are green **and both reviews are clean**: (1) an independent reviewer invocation always, (2) the plugin's own dogfood review once it exists (I3+). Before the dogfood reviewer exists, the loop stops after review 1 + gates and leaves merging to the human. |
+| Merge policy | Merging is loop-owned and code-governed (`gh pr merge --squash --delete-branch`), never agent-discretion. `--merge human\|auto` (default **human**): `auto` merges only when gates are green **and all active reviews are clean** — (1) an independent reviewer invocation always, (2) the plugin's own dogfood review once it exists (I3+), which `auto` then additionally requires. Pre-I3, `auto` is an explicit opt-in on the independent review alone; `human` stops the loop after review 1 + gates and leaves merging to the human. |
 | Clean | A review is clean when it reports no P0/P1 findings. P2 nits are recorded on the PR and do not block. |
 | State protocol | A machine-owned `STATUS:` line in `HANDOFF.md` (first line matching `^STATUS: `): `next=<increment-id>` · `blocked: <one-line reason>` · `done`. The worker writes it when rewriting HANDOFF; the loop only parses and validates it. |
 | Worker permissions | `--mode yolo` (headless default) minus merge. Start permissive-but-mergeless rather than pre-narrowed; tighten after the first supervised runs. |
-| Guardrails | `--max-iterations` default **1**; cooldown between iterations; `--dry-run`; bounded fixer budget (≤2 rounds per iteration, shared across gates and reviews); stop on any failure with a report, state left inspectable. The loop never force-pushes and never commits to `main` directly. |
+| Guardrails | `--max-iterations` default **1**; cooldown between iterations; `--dry-run`; `--merge` default **human** (auto is always an explicit flag); bounded fixer budget (≤2 rounds per iteration, shared across gates and reviews); stop on any failure with a report, state left inspectable. The loop never force-pushes and never commits to `main` directly. |
 | ROADMAP amendment | One non-plugin increment, **L1 (dev-loop)**, lands after I2 and before I3. I3 is the first fully automated increment — and the first the plugin reviews itself. |
 
 ## Why a script loop (recorded rationale)
@@ -65,8 +65,13 @@ normal PR flow itself.
    when any gate or review fails; each round is one fixer invocation followed by re-gates
    and re-reviews. Budget: ≤2 rounds per iteration, shared. Exhausted → stop with all
    reports attached to the PR.
-7. **Merge**: squash + delete branch, only when gates green and both active reviews
-   clean. In the pre-dogfood window, stop here and leave merging to the human.
+7. **Merge** (`--merge auto` only): squash + delete branch, when gates green and all
+   active reviews clean — pre-I3 that is the independent review alone (explicit
+   opt-in); once the dogfood reviewer exists, `auto` additionally requires it. The
+   merge **pins the reviewed head**: re-fetch the PR `headRefOid` immediately before
+   `gh pr merge` and, if it moved since assessment, re-enter assessment instead of
+   merging unreviewed commits (the I2 capture head-moved re-check pattern). With
+   `--merge human` (the default), stop here and leave merging to the human.
 8. **Post-merge** (shell): sync `main`; re-run unit tests + smoke on merged `main`;
    red → stop immediately and report (human decides revert vs fix-forward); cooldown;
    next iteration from the new `STATUS:`.
@@ -75,7 +80,8 @@ normal PR flow itself.
 
 - `scripts/dev-loop.mjs` — the loop: state parsing, invocation, gates, merge, report.
   CLI: `node scripts/dev-loop.mjs [--max-iterations N] [--cooldown-seconds S]
-  [--dry-run] [--dogfood on|off]` (`--dogfood` defaults to off; I3 turns it on).
+  [--dry-run] [--dogfood on|off] [--merge human|auto]` (`--dogfood` defaults to off,
+  I3 turns it on; `--merge` defaults to human and `auto` is always explicit).
   Env: `ZCODE_CLI`, `GH_REPO` (default from origin).
 - `scripts/dev-loop/worker-prompt.md` — the standard increment prompt, `{INCREMENT}`
   placeholder. Derived from the prompt used for I1 (read-first, one increment, evidence,
@@ -104,17 +110,21 @@ normal PR flow itself.
 - `--dry-run` runs every gate exercisable against the current repo state (preflight,
   tests, smoke, `STATUS` parsing, ROADMAP consistency) without invoking any agent, and
   prints what it could not exercise (e.g. "one open PR" with none open).
-- First real run is supervised (a human watches one full iteration, `--max-iterations 1`)
-  during L1; the loop's own PR is reviewed conventionally (it is pre-I3).
+- First real run is supervised (a human watches one full iteration, `--max-iterations 1`).
+  L1 landed dry-run-only, so that supervised run is the I3 iteration, with
+  `--merge human` recommended (from L2 the operator may opt into `--merge auto`);
+  the loop's own PRs are reviewed conventionally while pre-I3.
 - Defaults are conservative: one iteration per invocation until the user opts into
   batches.
 
 ## Sequencing
 
 L1 lands after I2, before I3. I3's dependency becomes I2 + L1 (soft: the plugin work
-does not depend on the loop, the automation does). From I3 on, every increment runs
-through the loop with both reviews active — the loop and the dogfood reviewer mature
-together.
+does not depend on the loop, the automation does). **L2 (autopilot merge mode)** lands
+between L1 and I3 so the supervised first real run can already exercise loop-owned
+merging if the operator opts in. From I3 on, every increment runs through the loop
+with both reviews active — the loop and the dogfood reviewer mature together; from I4
+the operator can run unattended batches (`--merge auto --dogfood on`).
 
 ## Out of scope (explicit)
 
@@ -133,3 +143,18 @@ automatic ROADMAP re-planning.
    (worker, reviewer, fixer differ by an order of magnitude).
 4. The dogfood review invocation contract (flags, output parsing) — fixed by I3's
    implementation; LOOP lands the harness with the flag off.
+
+## Amendments
+
+- **2026-09-10 (L2 — autopilot merge mode, approved in conversation):** the merge
+  policy changed from "human merges until the dogfood reviewer exists" to an explicit
+  `--merge human|auto` opt-in (default **human**, always an explicit flag — no silent
+  default flips later). Design rule: autopilot is the *loop* merging under code-owned
+  conditions (green gates + clean active reviews + resolved fixer + unchanged reviewed
+  head); an agent never merges by its own judgment — the same authority-path rule the
+  plugin applies to publication. Pre-I3, `auto` merges on the independent review alone
+  (explicit opt-in, bounded blast radius: squash-revertible, no force pushes,
+  head-SHA pinning, post-merge main-green still stops on red); once the dogfood
+  reviewer exists (I3+), `auto` additionally requires it — enforcement lands with
+  I3's wiring. Merge-policy row, architecture step 7, guardrails, CLI signature, and
+  the Sequencing section above were updated.
