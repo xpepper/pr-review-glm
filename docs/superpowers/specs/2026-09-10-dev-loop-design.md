@@ -43,9 +43,9 @@ normal PR flow itself.
 
 ## Architecture — one iteration
 
-1. **Preflight** (shell): `main` clean and synced with `origin/main`; no open PRs; the
-   prior `copilot-pr-review` prototype has not re-registered (the I1 caveat; check
-   `copilot plugins list`); unit tests + smoke green on `main`.
+1. **Preflight** (shell): `main` clean and synced with `origin/main`; no open PRs; unit
+   tests + smoke green on `main`. (An L1-era prototype-absent check also lived here;
+   removed 2026-09-10 — see Amendments.)
 2. **Worker** (one fresh headless invocation, prompt from
    `scripts/dev-loop/worker-prompt.md` with `{INCREMENT}` substituted from `STATUS`):
    the standard increment prompt — read AGENTS/HANDOFF/ROADMAP/spec, verify state, one
@@ -175,3 +175,18 @@ automatic ROADMAP re-planning.
   reviewer exists (I3+), `auto` additionally requires it — enforcement lands with
   I3's wiring. Merge-policy row, architecture step 7, guardrails, CLI signature, and
   the Sequencing section above were updated.
+
+- **2026-09-10 (prototype-absent gate removed, post-R1 fix):** the preflight gate that
+  failed a loop run whenever the prior `copilot-pr-review` prototype was registered was
+  removed (user decision; conventional fix PR). It predated the R1 rename: until then
+  both plugins registered `/pr-review` command names, and Copilot CLI dispatch is
+  ambiguous when two plugins share a command name (the I1 lesson) — so a registered
+  prototype was a real hazard. R1 renamed this plugin's commands to
+  `/z-pr-review`/`/z-pr-review-config`, making that collision structurally impossible,
+  while the sibling prototype (actively developed on this machine) keeps re-registering
+  itself — the gate then hard-failed every run on a benign condition, stopping the
+  first real I3 run at preflight. It was also a weak proxy regardless: it checked
+  registry state at preflight time, not at dispatch time. The robust protection —
+  asserting at dispatch that our commands are registered with our descriptions (the
+  `waitForCommands` name+description pattern in `tests/smoke-harness.mjs`) — is owed by
+  I3's dogfood wiring. Architecture step 1 updated accordingly.
