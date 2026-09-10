@@ -92,12 +92,13 @@ path) · COMMENT-only publication in v1 · upstream `lib/` reused with attributi
     "https://api.z.ai/api/anthropic"}}}` for the Z.AI coding-plan endpoint
     (`kind` is required; `anthropic|openai|openai-compatible`; bigmodel uses
     `https://open.bigmodel.cn/api/anthropic`).
-  - Auth: verified working so far is an API key (`provider.<id>.options.apiKey`,
-    or env `ZAI_API_KEY` / `ANTHROPIC_API_KEY` / `ZCODE_API_KEY`); the keyless
-    route is presumably one interactive `zcode login` (Z.AI OAuth, "for model
-    access") — NOT yet verified, it needs the user's browser. The loop's
-    preflight `zcode-headless` gate runs a one-turn probe and fails fast with the
-    CLI's own error line when any of this is missing.
+  - Auth (**verified end-to-end 2026-09-10**): the env var `ZAI_API_KEY`
+    (alternatives: `ANTHROPIC_API_KEY`, `ZCODE_API_KEY`, or an inline
+    `provider.<id>.options.apiKey`) — the keyless `zcode login` route (note: the
+    binary is not on PATH; use its full path) remains unverified. Launch the
+    dev-loop from a shell where the var is set; the preflight `zcode-headless`
+    gate runs a one-turn probe and fails fast with the CLI's own error line when
+    any of this is missing.
 - `--mode yolo` (default for `--prompt`), `--cwd`, `--disallowed-tools` parse and
   work as the loop uses them.
 
