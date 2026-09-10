@@ -43,11 +43,11 @@ parses and validates it. Keep it directly under the H1 title.
   its own model config + auth (the app's OAuth is ignored) — config shape and the
   key/login options are documented in AGENTS.md ("Environment facts — zcode CLI").
   **Auth resolved 2026-09-10, verified end-to-end** (probe replies `ok`): the
-  user's pre-existing `ZAI_API_KEY` env var supplies the key; `~/.zcode/cli/
-  config.json` carries only the keyless `model` + `provider` entries (no secret
-  at rest). The loop must be launched from a shell where `ZAI_API_KEY` is set
-  (`echo ${ZAI_API_KEY:+set}`). The `zcode-headless` preflight gate (one cheap
-  probe turn) fails fast with the CLI's own error if that ever regresses.
+  user's pre-existing `ZAI_API_KEY` env var supplies the key; the keyless
+  `~/.zcode/cli/config.json` carries only the `model` + `provider` entries (no
+  secret at rest). The loop must be launched from a shell where `ZAI_API_KEY`
+  is set (`echo ${ZAI_API_KEY:+set}`). The `zcode-headless` preflight gate (one
+  cheap probe turn) fails fast with the CLI's own error if that ever regresses.
 - Tests: `node --test tests/*.test.mjs` (138). Smokes: `tests/smoke-i1.mjs`,
   `tests/smoke-i2.mjs` (SDK dispatch, share `tests/smoke-harness.mjs`),
   `tests/smoke-l1.mjs` (script smoke: dev-loop `--dry-run`; transitively runs the

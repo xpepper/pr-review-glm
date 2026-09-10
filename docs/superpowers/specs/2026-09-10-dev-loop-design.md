@@ -159,7 +159,9 @@ automatic ROADMAP re-planning.
   drift or missing model config/auth fails before any phase is dispatched.
   Runtime fact: standalone headless zcode ignores the running app's OAuth and
   needs its own model config + API key (recipe in AGENTS.md, "Environment facts —
-  zcode CLI"); the operator owes that setup before the first real iteration.
+  zcode CLI"); the operator owes that setup before the first real iteration
+  (resolved 2026-09-10: pre-existing `ZAI_API_KEY` env var + keyless config,
+  verified end-to-end — launch the loop from a shell where the var is set).
 
 - **2026-09-10 (L2 — autopilot merge mode, approved in conversation):** the merge
   policy changed from "human merges until the dogfood reviewer exists" to an explicit
