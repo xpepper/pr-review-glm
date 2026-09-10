@@ -71,8 +71,11 @@ upstream `lib/` reused with attribution.
   both loaded, dispatch is ambiguous (last registrant wins, order unspecified). Since R1
   this plugin registers `/z-pr-review` names, so sibling ports (the prototype,
   gem-pr-review) no longer collide with it by name; the prototype has kept re-registering
-  itself (I1 hazard, recurred at L1 and R1 — remedy: `copilot plugin uninstall
-  copilot-pr-review`, which does not trip on gem-pr-review). Its source checkout at
+  itself (I1 hazard, recurred at L1 and R1). The dev-loop's prototype-absent preflight
+  gate — whose remedy was `copilot plugin uninstall copilot-pr-review` (it does not trip
+  on gem-pr-review) — was **removed** on 2026-09-10: with unique command names the
+  prototype being registered is benign for this plugin, and the gate hard-failed loop
+  runs on that benign condition. Its source checkout at
   `~/Documents/workspace/ai/pr-review` is untouched and remains a reference for runtime
   facts only, never a code source. Direct (`_direct`) installs cannot be disabled, only
   uninstalled; `plugins uninstall` removes the cache copy, not the source.

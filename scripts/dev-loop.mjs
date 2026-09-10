@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
-  gateBranchHead, gateDocsUpdated, gateMainGreen, gatePrototypeAbsent, gateRepoIdle,
+  gateBranchHead, gateDocsUpdated, gateMainGreen, gateRepoIdle,
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
@@ -76,7 +76,6 @@ async function dryRun(options) {
   const status = statusGate();
   results.push(status);
   const run = (command, args, opts) => runCommand(command, args, opts);
-  results.push(await gatePrototypeAbsent({ run }));
   results.push(await gateTests({ run, repoRoot }));
   results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
   console.log(reportGates(results));
@@ -121,7 +120,6 @@ async function main() {
     readStatus: async () => parseStatusLine(read("HANDOFF.md")),
     preflight: async () => [
       await gateRepoIdle({ run, repoRoot }),
-      await gatePrototypeAbsent({ run }),
       await gateZcodeHeadless({ run, zcode, repoRoot }),
       await gateTests({ run, repoRoot }),
       await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }),

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
+  gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen,
   gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, reportGates,
 } from "../scripts/dev-loop/gates.mjs";
 
@@ -44,16 +44,6 @@ describe("gateRepoIdle", () => {
       const gate = await gateRepoIdle({ run, repoRoot });
       assert.equal(gate.ok, false);
     }
-  });
-});
-
-describe("gatePrototypeAbsent", () => {
-  it("passes when the prototype is gone, fails when registered or list fails", async () => {
-    assert.equal((await gatePrototypeAbsent({ run: runOk("superpowers\n") })).ok, true);
-    const registered = await gatePrototypeAbsent({ run: runOk("copilot-pr-review (v0.0.1)\n") });
-    assert.equal(registered.ok, false);
-    assert.match(registered.detail, /copilot plugin uninstall copilot-pr-review/);
-    assert.equal((await gatePrototypeAbsent({ run: async () => ({ code: 1, stdout: "", stderr: "boom" }) })).ok, false);
   });
 });
 

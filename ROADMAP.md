@@ -33,6 +33,21 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-10 (prototype-gate fix, after PR #13)** — the dev-loop's prototype-absent
+  preflight gate was removed (user decision; conventional fix PR outside the loop).
+  The gate predated the R1 rename and protected a real hazard then: the sibling
+  `copilot-pr-review` prototype registers `/pr-review` names, ours used to too, and
+  Copilot CLI dispatch is ambiguous on a shared command name (the I1 lesson). R1's
+  rename to `/z-pr-review` names made that collision structurally impossible, while
+  the prototype kept re-registering itself — the first real I3 loop run
+  (`--merge human`) stopped at preflight on that benign condition. The gate was also a
+  weak proxy regardless (registry state at preflight time, not dispatch time): the
+  robust protection is asserting at dispatch that our commands are registered with our
+  descriptions (the `waitForCommands` pattern in `tests/smoke-harness.mjs`), now owed
+  by I3's dogfood wiring. Historical rows above keep the gate as written at the time.
+  Evidence: 137 unit tests + smoke-i1/i2/l1 green with the sibling prototype still
+  registered (deliberately left installed).
+
 - **2026-09-10 (C1 design, approved in conversation)** — new post-I4 increment
   **C1 — custom review roles** added to the plan: the user wants pluggable extra
   reviewer roles defined by a prompt, a preferred model, and a preferred reasoning

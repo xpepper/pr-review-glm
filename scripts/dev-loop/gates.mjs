@@ -81,15 +81,6 @@ export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buil
   return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), and zcode login`);
 }
 
-export async function gatePrototypeAbsent({ run }) {
-  const list = await run("copilot", ["plugins", "list"]);
-  if (list.code !== 0) return bad("prototype-absent", `copilot plugins list failed: ${list.stderr.slice(0, 200)}`);
-  if (list.stdout.includes("copilot-pr-review")) {
-    return bad("prototype-absent", "copilot-pr-review registered again; run: copilot plugin uninstall copilot-pr-review");
-  }
-  return ok("prototype-absent", "prior prototype not registered");
-}
-
 export async function gateTests({ run, repoRoot }) {
   const files = testFiles(repoRoot);
   if (!files.length) return bad("tests", "no tests/*.test.mjs discovered");

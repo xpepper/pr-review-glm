@@ -16,35 +16,35 @@ The `STATUS:` line above is machine-owned (dev-loop protocol,
 · `done`. The worker writes it when rewriting this file; `scripts/dev-loop.mjs` only
 parses and validates it. Keep it directly under the H1 title.
 
-## Recorded state (2026-09-10, after R1)
+## Recorded state (2026-09-10, after the prototype-gate fix)
 
-- `main` = R1 complete (plugin identity rename, PR #12), assuming that PR merges.
-  Working tree clean. No open PRs should remain.
-- **The plugin's identity is now z-pr-review** (R1, mechanical rename): commands
+- `main` = prototype-absent-gate fix complete (conventional fix PR after #13), assuming
+  that PR merges. Working tree clean. No open PRs should remain.
+- **The dev-loop's prototype-absent preflight gate is gone** (user decision 2026-09-10,
+  fix PR): it predated the R1 rename and hard-failed every loop run on the benign
+  condition of the sibling `copilot-pr-review` prototype being registered (it keeps
+  re-registering). With R1's `/z-pr-review` command names, that registration cannot
+  collide with this plugin's dispatch — the prototype may stay installed; it is NOT a
+  loop remedy to uninstall it. The robust protection is a dispatch-time assertion (see
+  I3's obligations below). R1's note "at I3 decide whether the gate stays required" is
+  resolved: removed.
+- **The plugin's identity is z-pr-review** (R1, mechanical rename): commands
   `/z-pr-review` and `/z-pr-review-config`, extension dir `extensions/z-pr-review/`,
-  config store `~/.copilot/z-pr-review/config.json` (amends the settled config-path
-  decision; user-local + schema-versioned, starts fresh — the old
-  `~/.copilot/pr-review-glm/` directory is simply ignored, no migration). Capture
-  envelope kind is `z-pr-review-capture`; capture temp dirs are prefixed `z-pr-review-`.
-  The **GitHub repo name stays `pr-review-glm`** (history, links); spec amendment in the
-  port design spec's Amendments section.
+  config store `~/.copilot/z-pr-review/config.json` (user-local + schema-versioned,
+  starts fresh — the old `~/.copilot/pr-review-glm/` directory is simply ignored, no
+  migration). Capture envelope kind is `z-pr-review-capture`; capture temp dirs are
+  prefixed `z-pr-review-`. The **GitHub repo name stays `pr-review-glm`** (history,
+  links).
 - L1/L2 loop facts unchanged and current: `--merge human|auto` (default human; auto =
   loop-owned squash merge on green gates + clean active reviews + pinned headRefOid,
   re-checked immediately before `gh pr merge`); workers/reviewer/fixer stay merge-denied;
-  `--dogfood on` still refuses to run pre-I3. Suite: 138 unit tests + smoke-i1/i2/l1
-  green (verified under the new names in R1).
+  `--dogfood on` still refuses to run pre-I3. Suite: 137 unit tests + smoke-i1/i2/l1
+  green (verified with the sibling prototype registered — the dry-run no longer cares).
 - zcode headless auth remains resolved via `ZAI_API_KEY` (env) + keyless
   `~/.zcode/cli/config.json`; launch the loop from a shell where the var is set
   (`echo ${ZAI_API_KEY:+set}`). The `zcode-headless` preflight gate fails fast if that
   regresses. zcode 0.16.5 still rejects `--max-turns`/`--settings` at parse time.
-- The prior `copilot-pr-review` prototype keeps re-registering itself (happened again at
-  R1 state verification — third time); remedy remains `copilot plugin uninstall
-  copilot-pr-review`. **Note for I3:** the prototype-absent gate was deliberately left
-  exactly as is by R1 — with unique command names the sibling ports (prototype,
-  gem-pr-review) no longer collide with this plugin's dispatch, so at I3's dogfood
-  wiring decide whether that gate stays required (it currently hard-fails on any
-  prototype registration even without a name collision). Decide then; don't build now.
-- Tests: `node --test tests/*.test.mjs` (138). Smokes: `tests/smoke-i1.mjs`,
+- Tests: `node --test tests/*.test.mjs` (137). Smokes: `tests/smoke-i1.mjs`,
   `tests/smoke-i2.mjs` (SDK dispatch, share `tests/smoke-harness.mjs`),
   `tests/smoke-l1.mjs` (script smoke: dev-loop `--dry-run`; transitively runs the
   full suite + both SDK smokes — allow a few minutes). All must pass before merge.
@@ -63,10 +63,13 @@ I3 additionally owes the dev-loop:
   SDK-dispatched review (`--no-comment`) — the dispatched command is `/z-pr-review`
   under the new names — map validated P0/P1 findings into the review-file contract,
   and make `--dogfood on` runnable.
+- **Assert at dispatch that our commands are registered with OUR descriptions** (reuse
+  the `waitForCommands` name+description pattern from `tests/smoke-harness.mjs`): with
+  the prototype-absent gate gone, this dispatch-time check is the real protection
+  against command-name ambiguity — sibling plugins may be registered at any time.
 - **Enforce `--merge auto` ⇒ `--dogfood on`** (refuse to run otherwise).
 - Calibrate `PHASE_LIMITS` empirically in the supervised first run (spec open items
   1–3; also settle the zcode completion signal if still open).
-- Decide the prototype-absent gate's fate (see the note above).
 
 Run I3 **through the dev-loop** (it is the first fully automated increment and the
 first the plugin reviews itself). For I3's own supervised run, `--merge human` is
