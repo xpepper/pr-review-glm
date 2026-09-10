@@ -76,6 +76,31 @@ path) · COMMENT-only publication in v1 · upstream `lib/` reused with attributi
   `~/.copilot/pkg/<arch>/<version>/copilot-sdk` (derive from `copilot --version`); see
   `tests/smoke-i1.mjs`.
 
+## Environment facts — zcode CLI (loop worker; verified 2026-09-10, 0.16.5 in ZCode.app 3.11.2)
+
+- Binary: `/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs` (executable,
+  spawns directly); `ZCODE_CLI` env overrides; `zcode doctor` inspects packaging.
+- `--max-turns` and `--settings` are listed by `--help` but **rejected by the
+  parser** (exit 1 + usage dump) — the dev-loop sends neither; per-phase bounds
+  are wall-clock timeouts only. Re-check after app updates.
+- Standalone headless `--prompt` ignores the running app's OAuth; it needs model
+  config + auth of its own:
+  - `~/.zcode/cli/config.json` is read strictly: any schema violation unloads the
+    whole file (surfacing as a generic "Model config is missing"). Working shape:
+    `"model": "zai/glm-5.3"` (a `provider/model` string), plus a top-level
+    `"provider": {"zai": {"kind": "anthropic", "options": {"baseURL":
+    "https://api.z.ai/api/anthropic"}}}` for the Z.AI coding-plan endpoint
+    (`kind` is required; `anthropic|openai|openai-compatible`; bigmodel uses
+    `https://open.bigmodel.cn/api/anthropic`).
+  - Auth: verified working so far is an API key (`provider.<id>.options.apiKey`,
+    or env `ZAI_API_KEY` / `ANTHROPIC_API_KEY` / `ZCODE_API_KEY`); the keyless
+    route is presumably one interactive `zcode login` (Z.AI OAuth, "for model
+    access") — NOT yet verified, it needs the user's browser. The loop's
+    preflight `zcode-headless` gate runs a one-turn probe and fails fast with the
+    CLI's own error line when any of this is missing.
+- `--mode yolo` (default for `--prompt`), `--cwd`, `--disallowed-tools` parse and
+  work as the loop uses them.
+
 ## Conventions
 
 - Plain ESM JavaScript (`.mjs`) for the extension and modules; no build step in v1.

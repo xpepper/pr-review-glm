@@ -1,5 +1,6 @@
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
+import { buildZcodeArgs } from "./phases.mjs";
 import { parseStatusLine, roadmapIncrementState } from "./status.mjs";
 
 const ok = (name, detail) => ({ name, ok: true, detail });
@@ -64,6 +65,20 @@ export async function gateRepoIdle({ run, repoRoot }) {
   try { open = JSON.parse(prs.stdout || "[]"); } catch { return bad("repo-idle", `gh pr list output unparseable: ${prs.stdout.slice(0, 200)}`); }
   if (prs.code !== 0 || open.length) return bad("repo-idle", `open PRs: ${open.map((p) => `#${p.number} (${p.headRefName})`).join(", ") || prs.stderr.slice(0, 200)}`);
   return ok("repo-idle", "main clean, synced, no open PRs");
+}
+
+// Proves the exact headless worker invocation runs BEFORE dispatching a real
+// phase: one cheap probe turn catches CLI flag drift (0.16.5 rejected
+// --max-turns while still listing it in --help) and missing model config/auth
+// ("zcode login", ~/.zcode/cli/config.json) without burning a worker run.
+export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buildZcodeArgs }) {
+  const args = buildArgs({ prompt: "Reply with the single word: ok", repoRoot });
+  const result = await run(zcode, args, { cwd: repoRoot, timeoutMs: 3 * 60_000 });
+  if (result.code === 0 && !result.timedOut) {
+    return ok("zcode-headless", "probe turn completed with the worker arg set");
+  }
+  const firstLine = (result.stderr || result.stdout).split("\n").find((l) => l.trim()) ?? "";
+  return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), and zcode login`);
 }
 
 export async function gatePrototypeAbsent({ run }) {

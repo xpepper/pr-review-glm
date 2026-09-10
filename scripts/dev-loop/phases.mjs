@@ -2,6 +2,9 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 
 export const PHASE_LIMITS = Object.freeze({
+  // maxTurns is retained for I3 calibration only: zcode 0.16.5 rejects
+  // --max-turns at parse time (its own --help still lists it), so the
+  // wall-clock timeoutMs is the only bound actually enforced per phase.
   worker: { maxTurns: 300, timeoutMs: 90 * 60_000 },
   reviewer: { maxTurns: 80, timeoutMs: 20 * 60_000 },
   fixer: { maxTurns: 150, timeoutMs: 45 * 60_000 },
@@ -22,12 +25,14 @@ export function renderPrompt(template, vars) {
   return template.replace(/\{([A-Z_]+)\}/g, (marker, key) => (key in vars ? String(vars[key]) : marker));
 }
 
-export function buildZcodeArgs({ prompt, repoRoot, maxTurns }) {
+// No --max-turns here: zcode 0.16.5's parser rejects it (exit 1 + usage dump)
+// even though --help lists it; --settings is dead the same way. The runCommand
+// timeout is the enforced bound.
+export function buildZcodeArgs({ prompt, repoRoot }) {
   return [
     "--prompt", prompt,
     "--cwd", repoRoot,
     "--mode", "yolo",
-    "--max-turns", String(maxTurns),
     "--disallowed-tools", DENIED_TOOLS,
   ];
 }

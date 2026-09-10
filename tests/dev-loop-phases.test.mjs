@@ -38,14 +38,14 @@ describe("renderPrompt", () => {
 });
 
 describe("buildZcodeArgs", () => {
-  it("denies merge and pins cwd, mode, and turns", () => {
-    const args = buildZcodeArgs({ prompt: "work", repoRoot: "/repo", maxTurns: 42 });
+  it("denies merge and pins cwd and mode — no --max-turns (zcode 0.16.5 rejects it)", () => {
+    const args = buildZcodeArgs({ prompt: "work", repoRoot: "/repo" });
     const joined = args.join(" ");
     assert.match(joined, /--prompt work /);
     assert.match(joined, /--cwd \/repo /);
     assert.match(joined, /--mode yolo /);
-    assert.match(joined, /--max-turns 42 /);
     assert.match(joined, /--disallowed-tools Bash\(gh pr merge \*\)/);
+    assert.doesNotMatch(joined, /--max-turns/);
   });
 });
 

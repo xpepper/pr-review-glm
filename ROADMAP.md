@@ -31,6 +31,21 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-10 (loop first-run fix, after PR #9)** — the first real
+  `node scripts/dev-loop.mjs --merge human` run failed in the worker phase: zcode
+  0.16.5's parser rejects `--max-turns` (exit 1 + usage dump) though `--help`
+  still lists it (`--settings` is dead the same way). Deeper: standalone headless
+  zcode ignores the running app's OAuth and needs its own model config + auth —
+  `~/.zcode/cli/config.json` is read with a strict schema (a violation unloads the
+  whole file into a generic "Model config is missing"), custom providers require
+  `kind` + `options.baseURL`, and an API key is mandatory until `zcode login` is
+  proven otherwise (unverified — needs the user's browser). Fixes: the loop stops
+  sending `--max-turns` (wall-clock timeouts are the bound; PHASE_LIMITS keeps
+  maxTurns for I3 calibration), and a new preflight gate `zcode-headless` runs a
+  one-turn probe with the exact worker arg set so flag drift or missing auth fails
+  in seconds, before any phase is dispatched. User action still owed before the
+  next run: provide zcode headless auth (AGENTS.md has the recipe).
+
 - **2026-09-10 (L2)** — autopilot merge mode landed (PR #9): `--merge human|auto`
   (default human, explicit value required, exit 2 otherwise) decoupled merging from
   the dogfood flag — the loop now merges in `auto` mode on green gates + clean

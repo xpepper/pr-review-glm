@@ -36,6 +36,16 @@ parses and validates it. Keep it directly under the H1 title.
 - Runtime fact that keeps recurring: the prior `copilot-pr-review` prototype can
   re-register itself any session (I1 hazard). The prototype-absent gate catches it;
   remedy remains `copilot plugin uninstall copilot-pr-review`.
+- **First real loop run failed (2026-09-10) and was root-caused** — two causes,
+  both now handled: (1) zcode 0.16.5 rejects `--max-turns` at parse time (its
+  `--help` still lists it; `--settings` is dead the same way) → the loop no longer
+  sends it, wall-clock timeouts bound phases; (2) standalone headless zcode needs
+  its own model config + auth (the app's OAuth is ignored) — config shape and the
+  key/login options are documented in AGENTS.md ("Environment facts — zcode CLI").
+  **Before the next loop run the user must provide auth** (a `zai` API key via
+  `~/.zcode/cli/config.json`/env, or one interactive `zcode login` — the keyless
+  route is unverified). A new preflight gate (`zcode-headless`, one cheap probe
+  turn) fails fast with the CLI's own error instead of burning a worker phase.
 - Tests: `node --test tests/*.test.mjs` (135). Smokes: `tests/smoke-i1.mjs`,
   `tests/smoke-i2.mjs` (SDK dispatch, share `tests/smoke-harness.mjs`),
   `tests/smoke-l1.mjs` (script smoke: dev-loop `--dry-run`; transitively runs the

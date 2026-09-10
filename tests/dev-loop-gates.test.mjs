@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
-  gateRepoIdle, gateSmokes, gateTests, reportGates,
+  gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, reportGates,
 } from "../scripts/dev-loop/gates.mjs";
 
 const repoRoot = "/repo"; // never touched: all commands are faked
@@ -86,6 +86,30 @@ describe("gateSmokes", () => {
     assert(calls.some((c) => c.includes("smoke-i1.mjs")));
     const failing = await gateSmokes({ run: async () => ({ code: 2, stdout: "", stderr: "x" }), repoRoot: realRoot, exclude: [] });
     assert.equal(failing.ok, false);
+  });
+});
+
+describe("gateZcodeHeadless", () => {
+  it("passes when a probe turn exits 0, using the real worker arg builder", async () => {
+    const calls = [];
+    const buildArgs = (vars) => { calls.push(vars); return ["--prompt", vars.prompt]; };
+    const run = async (command, args) => (command === "node" ? { code: 0, stdout: "ok\n", stderr: "" } : { code: 1, stdout: "", stderr: "unexpected command" });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, buildArgs });
+    assert.equal(gate.ok, true);
+    assert.match(calls[0].prompt, /single word/);
+  });
+  it("fails with the CLI's first error line when the probe exits nonzero (flags, config, auth)", async () => {
+    const run = async () => ({ code: 1, stdout: "", stderr: "Error: Model config is missing. Create ~/.zcode/cli/config.json ...\n" });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /Model config is missing/);
+    assert.match(gate.detail, /zcode login/);
+  });
+  it("fails on a timed-out probe", async () => {
+    const run = async () => ({ code: null, stdout: "", stderr: "", timedOut: true });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /timedOut=true/);
   });
 });
 
