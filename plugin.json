@@ -1,5 +1,5 @@
 {
-  "name": "pr-review-glm",
+  "name": "z-pr-review",
   "description": "Parallel tiered pull-request review for GitHub Copilot CLI (port of pi-pr-review).",
   "version": "0.1.0",
   "extensions": ["./extensions"]

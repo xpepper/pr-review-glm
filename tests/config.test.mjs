@@ -6,7 +6,7 @@ import {
   REVIEW_MODES,
   defaultConfig,
   validateConfig,
-} from "../extensions/pr-review/config.mjs";
+} from "../extensions/z-pr-review/config.mjs";
 
 describe("defaultConfig", () => {
   it("returns the spec's default configuration", () => {
@@ -198,10 +198,10 @@ describe("validateConfig", () => {
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConfigError, ConfigStore } from "../extensions/pr-review/config.mjs";
+import { ConfigError, ConfigStore } from "../extensions/z-pr-review/config.mjs";
 
 function newStore() {
-  const dir = mkdtempSync(join(tmpdir(), "pr-review-glm-test-"));
+  const dir = mkdtempSync(join(tmpdir(), "z-pr-review-test-"));
   return { store: new ConfigStore(join(dir, "nested", "config.json")), dir };
 }
 

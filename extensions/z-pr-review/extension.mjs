@@ -1,4 +1,4 @@
-// Extension entry: registers the /pr-review and /pr-review-config commands.
+// Extension entry: registers the /z-pr-review and /z-pr-review-config commands.
 // I2 scope: status/help, read-only PR capture (--capture-only), and
 // configuration — no lanes, no model calls. The session LLM never orchestrates
 // anything here (spec: "Architecture A"); every handler is plain code.
@@ -16,14 +16,14 @@ import {
 } from "./commands.mjs";
 
 const store = new ConfigStore();
-// Last successful capture in this session; /pr-review status reports it and
+// Last successful capture in this session; /z-pr-review status reports it and
 // later increments (lanes, publication) will check against its frozen binding.
 let lastCapture = null;
 
 const session = await joinSession({
   commands: [
     {
-      name: "pr-review",
+      name: "z-pr-review",
       description: "Read-only PR capture (--capture-only) plus status and help",
       handler: async ({ args }) => {
         const parsed = parseReviewArgs(args);
@@ -42,7 +42,7 @@ const session = await joinSession({
         if (!parsed.flags.captureOnly) {
           throw new Error(
             "Reviews are not implemented yet (they arrive with increment I3). " +
-              `Today only capture works: /pr-review ${parsed.number} --capture-only`,
+              `Today only capture works: /z-pr-review ${parsed.number} --capture-only`,
           );
         }
         try {
@@ -67,8 +67,8 @@ const session = await joinSession({
       },
     },
     {
-      name: "pr-review-config",
-      description: "Inspect or update pr-review-glm configuration (show | key=value | unset)",
+      name: "z-pr-review-config",
+      description: "Inspect or update z-pr-review configuration (show | key=value | unset)",
       handler: async ({ args }) => {
         const parsed = parseConfigArgs(args);
         if (parsed.kind === "error") {
@@ -100,7 +100,7 @@ function describeConfigError(error) {
     return [
       "Configuration not changed. The whole file is validated as a unit:",
       ...error.problems.map((problem) => `- ${problem}`),
-      "Run /pr-review-config show to see the active (last valid) configuration.",
+      "Run /z-pr-review-config show to see the active (last valid) configuration.",
     ].join("\n");
   }
   return `Configuration not changed: ${String(error)}`;

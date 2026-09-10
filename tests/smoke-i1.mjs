@@ -7,14 +7,14 @@
 //   node tests/smoke-i1.mjs
 // Optional env: COPILOT_CLI_PATH, COPILOT_SDK_PATH (see smoke-harness.mjs).
 //
-// The script snapshots ~/.copilot/pr-review-glm/config.json and restores it
+// The script snapshots ~/.copilot/z-pr-review/config.json and restores it
 // (or removes it, if it did not exist) before exiting.
 
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defaultConfigPath } from "../extensions/pr-review/config.mjs";
+import { defaultConfigPath } from "../extensions/z-pr-review/config.mjs";
 import { runCommand, snapshotFile, startPluginSession, stopClient, waitForCommands } from "./smoke-harness.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -62,21 +62,21 @@ try {
   const session = started.session;
 
   await waitForCommands(session, {
-    "pr-review": "Read-only PR capture (--capture-only) plus status and help",
-    "pr-review-config": "Inspect or update pr-review-glm configuration",
+    "z-pr-review": "Read-only PR capture (--capture-only) plus status and help",
+    "z-pr-review-config": "Inspect or update z-pr-review configuration",
   });
-  console.log("PASS /pr-review and /pr-review-config are registered by the plugin extension");
+  console.log("PASS /z-pr-review and /z-pr-review-config are registered by the plugin extension");
 
-  const statusMessages = await runCommand(session, "pr-review", "");
-  assert(statusMessages.some((m) => m.includes("pr-review-glm — parallel tiered PR review")), "bare /pr-review must print the status");
+  const statusMessages = await runCommand(session, "z-pr-review", "");
+  assert(statusMessages.some((m) => m.includes("z-pr-review — parallel tiered PR review")), "bare /z-pr-review must print the status");
   assert(statusMessages.some((m) => m.includes("no model calls")), "status must state it makes no model calls");
-  console.log("PASS bare /pr-review prints the capability boundary");
+  console.log("PASS bare /z-pr-review prints the capability boundary");
 
-  const helpMessages = await runCommand(session, "pr-review", "help");
-  assert(helpMessages.some((m) => m.includes("/pr-review — parallel tiered PR review")), "/pr-review help must print usage");
-  console.log("PASS /pr-review help prints usage");
+  const helpMessages = await runCommand(session, "z-pr-review", "help");
+  assert(helpMessages.some((m) => m.includes("/z-pr-review — parallel tiered PR review")), "/z-pr-review help must print usage");
+  console.log("PASS /z-pr-review help prints usage");
 
-  const initialShow = await runCommand(session, "pr-review-config", "show");
+  const initialShow = await runCommand(session, "z-pr-review-config", "show");
   const pristineConfig = !snapshot.existed;
   if (pristineConfig) {
     assert(initialShow.some((m) => m.includes("defaultMode: balanced")), "initial show must show defaults");
@@ -85,10 +85,10 @@ try {
   } else {
     // A pre-existing user config (possibly with its own values or a warning)
     // must still render without inference; the round-trip below restores it.
-    assert(initialShow.some((m) => m.includes("pr-review-glm configuration")), "show must render");
+    assert(initialShow.some((m) => m.includes("z-pr-review configuration")), "show must render");
   }
 
-  const afterSet = await runCommand(session, "pr-review-config", "defaultMode=deep tiers.heavy.model=gpt-5.6-terra");
+  const afterSet = await runCommand(session, "z-pr-review-config", "defaultMode=deep tiers.heavy.model=gpt-5.6-terra");
   assert(afterSet.some((m) => m.includes("defaultMode: deep")), "set must persist defaultMode");
   assert(afterSet.some((m) => m.includes("tiers.heavy.model: gpt-5.6-terra")), "set must persist the tier model");
   const onDisk = JSON.parse(readFileSync(configPath, "utf8"));
@@ -101,12 +101,12 @@ try {
   );
   console.log("PASS config set writes a 0600 file with the changed values");
 
-  const badSet = await runCommand(session, "pr-review-config", "defaultMode=turbo");
+  const badSet = await runCommand(session, "z-pr-review-config", "defaultMode=turbo");
   assert(badSet.some((m) => m.includes("Configuration not changed")), "invalid set must be rejected");
   assert.equal(JSON.parse(readFileSync(configPath, "utf8")).defaultMode, "deep", "rejected set must leave the file untouched");
   console.log("PASS invalid set is rejected and keeps the last valid file");
 
-  const afterUnset = await runCommand(session, "pr-review-config", "unset defaultMode tiers.heavy.model");
+  const afterUnset = await runCommand(session, "z-pr-review-config", "unset defaultMode tiers.heavy.model");
   assert(afterUnset.some((m) => m.includes("defaultMode: balanced")), "unset must restore defaults");
   assert(afterUnset.some((m) => m.includes("tiers.heavy.model: null")), "unset must restore the tier model");
   assert.equal(JSON.parse(readFileSync(configPath, "utf8")).defaultMode, "balanced");

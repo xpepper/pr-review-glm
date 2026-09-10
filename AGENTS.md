@@ -4,9 +4,12 @@ Read this before doing anything. It evolves with the project; keep it current.
 
 ## What this project is
 
-`pr-review-glm` is a personal-use GitHub Copilot CLI plugin porting the review workflow of
+The `pr-review-glm` repository (repo name unchanged) hosts **z-pr-review**, a
+personal-use GitHub Copilot CLI plugin porting the review workflow of
 [pi-pr-review](https://github.com/10ego/pi-pr-review) (upstream, MIT-declared): parallel
 tiered reviewer lanes, host-validated findings, and gated GitHub COMMENT publication.
+The plugin identity was renamed to z-pr-review by R1 (2026-09-10); commands are
+`/z-pr-review` and `/z-pr-review-config`.
 
 - Design spec (authoritative for behavior and settled decisions):
   `docs/superpowers/specs/2026-09-09-copilot-pr-review-port-design.md`
@@ -45,8 +48,13 @@ tiered reviewer lanes, host-validated findings, and gated GitHub COMMENT publica
 Architecture A (code-owned orchestrator in a plugin extension; reviewer lanes as Copilot
 SDK child runtimes) · envelope-marker output contract (structured output is broken on
 Copilot CLI 1.0.83) · lane read-only tools `view`/`rg`/`glob` confined by permission
-handler · config at `~/.copilot/pr-review-glm/config.json` (not the prior prototype's
-path) · COMMENT-only publication in v1 · upstream `lib/` reused with attribution.
+handler · plugin identity **z-pr-review** (R1, 2026-09-10: plugin name, commands
+`/z-pr-review` + `/z-pr-review-config`, extension dir `extensions/z-pr-review/` — command
+names are the collision surface across sibling pr-review ports on this machine; repo name
+stays `pr-review-glm`) · config at `~/.copilot/z-pr-review/config.json` (amended by R1
+from `~/.copilot/pr-review-glm/`; user-local and schema-versioned, starts fresh — no
+migration — and not the prior prototype's path) · COMMENT-only publication in v1 ·
+upstream `lib/` reused with attribution.
 
 ## Environment facts (verified 2026-09-09, Copilot CLI 1.0.83)
 
@@ -58,15 +66,19 @@ path) · COMMENT-only publication in v1 · upstream `lib/` reused with attributi
 - Headless: `copilot -p "…" --output-format json` (JSONL events: `assistant.message`,
   `model.call_finished`, `session.usage_checkpoint`, …); per-invocation `--model` and
   `--effort none|minimal|low|medium|high|xhigh|max`.
-- The prior clean-room prototype was **uninstalled** on 2026-09-09 (I1): it registers the
-  same `/pr-review` command names and dispatch with both loaded is ambiguous (last
-  registrant wins, order unspecified). Its source checkout at
+- The prior clean-room prototype was **uninstalled** on 2026-09-09 (I1): it registers
+  `/pr-review` command names — the names this plugin used until the R1 rename — and with
+  both loaded, dispatch is ambiguous (last registrant wins, order unspecified). Since R1
+  this plugin registers `/z-pr-review` names, so sibling ports (the prototype,
+  gem-pr-review) no longer collide with it by name; the prototype has kept re-registering
+  itself (I1 hazard, recurred at L1 and R1 — remedy: `copilot plugin uninstall
+  copilot-pr-review`, which does not trip on gem-pr-review). Its source checkout at
   `~/Documents/workspace/ai/pr-review` is untouched and remains a reference for runtime
   facts only, never a code source. Direct (`_direct`) installs cannot be disabled, only
   uninstalled; `plugins uninstall` removes the cache copy, not the source.
 - Markdown prompt slash-commands exist only via plugin `commands/` dirs; our commands
   are extension-registered code.
-- Headless command dispatch (learned I1): `copilot -p "/pr-review" …` does NOT execute
+- Headless command dispatch (learned I1): `copilot -p "/z-pr-review" …` does NOT execute
   the command — the slash text goes to the model as an ambient turn. Direct, inference-
   free dispatch is via the SDK: spawn `RuntimeConnection.forStdio({ path, args:
   ["--plugin-dir", repo, "--experimental"] })`, `client.createSession({ …,

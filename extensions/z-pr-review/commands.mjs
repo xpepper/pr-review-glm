@@ -2,7 +2,7 @@
 // runtime dependency so it stays unit-testable. extension.mjs wires these to
 // joinSession and the config store.
 
-// /pr-review review-invocation grammar (spec "Review pipeline"):
+// /z-pr-review review-invocation grammar (spec "Review pipeline"):
 //   <PR number> [--quick|--balanced|--full|--deep] [--comment|--no-comment]
 //   [--all] [--include-closed|--include-drafts] [--capture-only]
 // Parsing is total — the whole grammar is accepted here even before every flag
@@ -21,7 +21,7 @@ export function parseReviewArgs(args) {
   const tokens = trimmed.split(/\s+/);
   if (!/^[1-9][0-9]*$/.test(tokens[0])) {
     return reviewUsageError(
-      `"${trimmed}" is not a review invocation. Give a PR number: /pr-review <PR number> [flags]`,
+      `"${trimmed}" is not a review invocation. Give a PR number: /z-pr-review <PR number> [flags]`,
     );
   }
   const number = Number(tokens[0]);
@@ -82,19 +82,19 @@ export function parseReviewArgs(args) {
 function reviewUsageError(detail) {
   return {
     kind: "error",
-    message: `${detail}.\nUsage: /pr-review [status|help] | /pr-review <PR number> [flags]. Run /pr-review help.`,
+    message: `${detail}.\nUsage: /z-pr-review [status|help] | /z-pr-review <PR number> [flags]. Run /z-pr-review help.`,
   };
 }
 
 export function renderStatus(lastCapture = null) {
   const lines = [
-    "pr-review-glm — parallel tiered PR review for GitHub Copilot CLI (port of pi-pr-review)",
+    "z-pr-review — parallel tiered PR review for GitHub Copilot CLI (port of pi-pr-review)",
     "",
     "Implemented today:",
-    "- /pr-review status | help — this capability boundary. These commands make no model calls.",
-    "- /pr-review N --capture-only — read-only PR capture via gh (metadata, base/head, diff).",
+    "- /z-pr-review status | help — this capability boundary. These commands make no model calls.",
+    "- /z-pr-review N --capture-only — read-only PR capture via gh (metadata, base/head, diff).",
     "  No model calls.",
-    "- /pr-review-config — inspect and edit personal configuration.",
+    "- /z-pr-review-config — inspect and edit personal configuration.",
     "",
     "Not implemented yet (ROADMAP order):",
     "- I3: first review lane and in-chat findings (dogfood entry point)",
@@ -104,7 +104,7 @@ export function renderStatus(lastCapture = null) {
     "- I7: gated COMMENT publication",
     "- I8: hardening (large diffs, telemetry)",
     "",
-    "Configuration lives outside the repository and is validated as a unit; see /pr-review-config.",
+    "Configuration lives outside the repository and is validated as a unit; see /z-pr-review-config.",
   ];
   if (lastCapture !== null) {
     lines.push(
@@ -138,18 +138,18 @@ function shortOid(oid) {
 
 export function renderHelp() {
   return [
-    "/pr-review — parallel tiered PR review (under construction)",
+    "/z-pr-review — parallel tiered PR review (under construction)",
     "",
     "Usage:",
-    "  /pr-review status                     Show the capability boundary (default)",
-    "  /pr-review help                       Show this help",
-    "  /pr-review <N> --capture-only         Capture PR N read-only (metadata + diff via gh)",
-    "                                         [--include-drafts] [--include-closed]",
+    "  /z-pr-review status                     Show the capability boundary (default)",
+    "  /z-pr-review help                       Show this help",
+    "  /z-pr-review <N> --capture-only         Capture PR N read-only (metadata + diff via gh)",
+    "                                           [--include-drafts] [--include-closed]",
     "",
     "Reviews (lanes, findings, publication) are not implemented yet; they arrive with",
     "increment I3 onward. Full review flags: [--quick|--balanced|--full|--deep]",
     "[--comment|--no-comment] [--all] — accepted later, not today.",
-    "Configuration: /pr-review-config [show] | key=value ... | unset key ...",
+    "Configuration: /z-pr-review-config [show] | key=value ... | unset key ...",
   ].join("\n");
 }
 
@@ -193,14 +193,14 @@ export function parseConfigArgs(args) {
 function usageError(detail) {
   return {
     kind: "error",
-    message: `${detail}.\nUsage: /pr-review-config [show] | key=value ... | unset key ...`,
+    message: `${detail}.\nUsage: /z-pr-review-config [show] | key=value ... | unset key ...`,
   };
 }
 
 export function renderConfigShow(store) {
   const config = store.get();
   const lines = [
-    "pr-review-glm configuration",
+    "z-pr-review configuration",
     `File: ${store.path}`,
     `Source: ${store.source}${store.source === "defaults" ? " (no valid file yet; defaults are active)" : ""}`,
   ];
@@ -242,13 +242,13 @@ function formatFallback(fallback) {
 
 export function renderConfigHelp(store) {
   return [
-    "/pr-review-config — inspect or change pr-review-glm configuration",
+    "/z-pr-review-config — inspect or change z-pr-review configuration",
     "",
     "Usage:",
-    "  /pr-review-config                          Show the current configuration",
-    "  /pr-review-config show                     Same as above",
-    "  /pr-review-config key=value [key=value …]  Set values (validated as a unit)",
-    "  /pr-review-config unset key [key …]        Reset keys to their defaults",
+    "  /z-pr-review-config                          Show the current configuration",
+    "  /z-pr-review-config show                     Same as above",
+    "  /z-pr-review-config key=value [key=value …]  Set values (validated as a unit)",
+    "  /z-pr-review-config unset key [key …]        Reset keys to their defaults",
     "",
     `File: ${store.path}`,
     "Settable keys: tiers.{light,medium,heavy}.{model,effort,fallback}, defaultMode,",

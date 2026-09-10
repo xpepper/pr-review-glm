@@ -11,8 +11,8 @@ import {
   renderConfigShow,
   renderHelp,
   renderStatus,
-} from "../extensions/pr-review/commands.mjs";
-import { CONFIG_SCHEMA_VERSION, ConfigStore } from "../extensions/pr-review/config.mjs";
+} from "../extensions/z-pr-review/commands.mjs";
+import { CONFIG_SCHEMA_VERSION, ConfigStore } from "../extensions/z-pr-review/config.mjs";
 
 describe("parseReviewArgs", () => {
   it("treats empty args and status as the status subcommand", () => {
@@ -80,7 +80,7 @@ describe("parseReviewArgs", () => {
     for (const args of ["5 --bogus", "5 --capture-only --capture-only", "5 --quick --quick", "5 --include-drafts --include-drafts"]) {
       const result = parseReviewArgs(args);
       assert.equal(result.kind, "error", args);
-      assert(result.message.includes("Run /pr-review help"), args);
+      assert(result.message.includes("Run /z-pr-review help"), args);
     }
   });
 
@@ -118,12 +118,12 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     baseOid: "8b476fd4741afc65f17d829fd307ebc62c276167",
     diffBytes: 70965,
     capturedAt: "2026-09-10T10:00:00.000Z",
-    capturePath: "/tmp/pr-review-glm-abc/capture-xpepper-pr-review-glm-3-2026-09-10T10-00-00-000Z.json",
+    capturePath: "/tmp/z-pr-review-abc/capture-xpepper-pr-review-glm-3-2026-09-10T10-00-00-000Z.json",
   };
 
   it("status states the capability boundary without promising a review", () => {
     const text = renderStatus();
-    assert(text.includes("pr-review-glm"));
+    assert(text.includes("z-pr-review"));
     assert(text.includes("no model calls"), "must state that it makes no model calls");
     assert(text.includes("--capture-only"), "must name capture as implemented");
     assert(text.includes("I3"), "must name the next increment");
@@ -156,12 +156,12 @@ describe("renderStatus / renderHelp / renderCapture", () => {
 
   it("help shows usage for status, help, and capture", () => {
     const text = renderHelp();
-    assert(text.includes("/pr-review status"));
-    assert(text.includes("/pr-review help"));
+    assert(text.includes("/z-pr-review status"));
+    assert(text.includes("/z-pr-review help"));
     assert(text.includes("--capture-only"));
     assert(text.includes("--include-drafts"));
     assert(text.includes("--include-closed"));
-    assert(text.includes("/pr-review-config"));
+    assert(text.includes("/z-pr-review-config"));
   });
 });
 
@@ -220,7 +220,7 @@ describe("parseConfigArgs", () => {
 
 describe("renderConfigShow / renderConfigHelp", () => {
   async function makeStore() {
-    const dir = mkdtempSync(join(tmpdir(), "pr-review-glm-cmd-"));
+    const dir = mkdtempSync(join(tmpdir(), "z-pr-review-cmd-"));
     const store = new ConfigStore(join(dir, "config.json"));
     await store.load();
     return store;
@@ -251,7 +251,7 @@ describe("renderConfigShow / renderConfigHelp", () => {
   it("config help documents show, set, and unset with the config path", async () => {
     const store = await makeStore();
     const text = renderConfigHelp(store);
-    assert(text.includes("/pr-review-config show"));
+    assert(text.includes("/z-pr-review-config show"));
     assert(text.includes("key=value"));
     assert(text.includes("unset key"));
     assert(text.includes(store.path));
@@ -260,7 +260,7 @@ describe("renderConfigShow / renderConfigHelp", () => {
 
 describe("renderConfigShow with a rejected file", () => {
   it("surfaces the load warning alongside the active defaults", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "pr-review-glm-warn-"));
+    const dir = mkdtempSync(join(tmpdir(), "z-pr-review-warn-"));
     const store = new ConfigStore(join(dir, "config.json"));
     mkdirSync(join(store.path, ".."), { recursive: true });
     writeFileSync(store.path, "{ broken", { mode: 0o600 });
