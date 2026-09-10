@@ -28,7 +28,7 @@ parses and validates it. Keep it directly under the H1 title.
   Pre-I3 `auto` merges on the independent review alone. The assessment path also
   checkout+ff-only-syncs the PR branch to origin so gates/reviews test the exact head
   the pin records (as the extracted `gateBranchHead` gate: checkout → ff-only sync →
-  rev-parse == headRefOid). Suite: 135 unit tests + smoke-i1/i2/l1 green.
+  rev-parse == headRefOid). Suite: 138 unit tests + smoke-i1/i2/l1 green.
 - `--dogfood on` still refuses to run pre-I3, and **enforcing `--merge auto` ⇒
   `--dogfood on` is I3's obligation** (L2 deliberately did not build it).
 - Workers/reviewer/fixer stay merge-denied (`--disallowed-tools "Bash(gh pr merge *)"`
@@ -46,7 +46,7 @@ parses and validates it. Keep it directly under the H1 title.
   `~/.zcode/cli/config.json`/env, or one interactive `zcode login` — the keyless
   route is unverified). A new preflight gate (`zcode-headless`, one cheap probe
   turn) fails fast with the CLI's own error instead of burning a worker phase.
-- Tests: `node --test tests/*.test.mjs` (135). Smokes: `tests/smoke-i1.mjs`,
+- Tests: `node --test tests/*.test.mjs` (138). Smokes: `tests/smoke-i1.mjs`,
   `tests/smoke-i2.mjs` (SDK dispatch, share `tests/smoke-harness.mjs`),
   `tests/smoke-l1.mjs` (script smoke: dev-loop `--dry-run`; transitively runs the
   full suite + both SDK smokes — allow a few minutes). All must pass before merge.
