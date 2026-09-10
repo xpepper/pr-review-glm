@@ -32,6 +32,10 @@ tiered reviewer lanes, host-validated findings, and gated GitHub COMMENT publica
 4. Update `ROADMAP.md` (status + journey log) and rewrite `HANDOFF.md` for the next
    session as part of the same PR.
 5. Open a PR referencing the increment ID; after review, squash merge and delete the branch.
+6. Automation (from L1): the sequence above can be driven by `node scripts/dev-loop.mjs`
+   (spec: docs/superpowers/specs/2026-09-10-dev-loop-design.md). The loop owns merging;
+   agents working increments never merge. Default is one iteration per run with human
+   merge until the dogfood review exists.
 
 ## Settled decisions — do not reopen
 
@@ -72,8 +76,9 @@ path) · COMMENT-only publication in v1 · upstream `lib/` reused with attributi
 ## Conventions
 
 - Plain ESM JavaScript (`.mjs`) for the extension and modules; no build step in v1.
-- Tests: `node --test` unit tests + no-inference smoke scripts under `tests/` (all
-  smoke scripts share `tests/smoke-harness.mjs` — extend it, don't fork it).
+- Tests: `node --test` unit tests + no-inference smoke scripts under `tests/` (SDK-dispatch
+  smoke scripts share `tests/smoke-harness.mjs` — extend it, don't fork it; script smokes
+  that never touch the Copilot SDK, like `tests/smoke-l1.mjs`, don't use the harness).
 - Any code ported from upstream pi-pr-review keeps provenance: note it in
   `docs/ATTRIBUTION.md` (module, upstream version, commit) — see the attribution policy there.
 - Keep model-influenced output out of authority paths: gates, anchors, publication
