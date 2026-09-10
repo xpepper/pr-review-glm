@@ -27,7 +27,8 @@ parses and validates it. Keep it directly under the H1 title.
   before `gh pr merge`; a moved head re-enters assessment once, a second move stops).
   Pre-I3 `auto` merges on the independent review alone. The assessment path also
   checkout+ff-only-syncs the PR branch to origin so gates/reviews test the exact head
-  the pin records. Suite: 131 unit tests + smoke-i1/i2/l1 green.
+  the pin records (as the extracted `gateBranchHead` gate: checkout → ff-only sync →
+  rev-parse == headRefOid). Suite: 135 unit tests + smoke-i1/i2/l1 green.
 - `--dogfood on` still refuses to run pre-I3, and **enforcing `--merge auto` ⇒
   `--dogfood on` is I3's obligation** (L2 deliberately did not build it).
 - Workers/reviewer/fixer stay merge-denied (`--disallowed-tools "Bash(gh pr merge *)"`
@@ -35,7 +36,7 @@ parses and validates it. Keep it directly under the H1 title.
 - Runtime fact that keeps recurring: the prior `copilot-pr-review` prototype can
   re-register itself any session (I1 hazard). The prototype-absent gate catches it;
   remedy remains `copilot plugin uninstall copilot-pr-review`.
-- Tests: `node --test tests/*.test.mjs` (131). Smokes: `tests/smoke-i1.mjs`,
+- Tests: `node --test tests/*.test.mjs` (135). Smokes: `tests/smoke-i1.mjs`,
   `tests/smoke-i2.mjs` (SDK dispatch, share `tests/smoke-harness.mjs`),
   `tests/smoke-l1.mjs` (script smoke: dev-loop `--dry-run`; transitively runs the
   full suite + both SDK smokes — allow a few minutes). All must pass before merge.

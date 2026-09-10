@@ -17,6 +17,35 @@ function smokeFiles(repoRoot, exclude = []) {
   );
 }
 
+// Full 40-hex git OID, the shape gh reports for headRefOid (same shape the I2
+// capture validates; kept local so the loop never imports from extensions/).
+const OID_PATTERN = /^[0-9a-f]{40}$/i;
+
+export const isFullOid = (value) => typeof value === "string" && OID_PATTERN.test(value);
+
+// Establishes the PR head in the checkout: check out the branch, ff-only-sync
+// it to origin, and verify the result IS the assessed head. Gates and reviews
+// run against this checkout, so without the equality check the head pin could
+// certify a stale or locally-ahead tree while the loop merges the remote head.
+export async function gateBranchHead({ run, repoRoot, headRefName, headRefOid }) {
+  if (!isFullOid(headRefOid)) {
+    return bad("branch-checkout", `no valid headRefOid for the open PR (${String(headRefOid ?? "missing")}); cannot establish the reviewed head`);
+  }
+  const checkout = await run("git", ["checkout", headRefName], { cwd: repoRoot });
+  if (checkout.code !== 0) {
+    return bad("branch-checkout", `git checkout ${headRefName} failed: ${checkout.stderr.slice(0, 200)}`);
+  }
+  const fetched = await run("git", ["fetch", "--quiet", "origin"], { cwd: repoRoot });
+  const synced = fetched.code === 0
+    ? await run("git", ["merge", "--ff-only", `origin/${headRefName}`], { cwd: repoRoot })
+    : fetched;
+  const localHead = await run("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
+  if (fetched.code !== 0 || synced.code !== 0 || localHead.code !== 0 || localHead.stdout.trim() !== headRefOid) {
+    return bad("branch-checkout", `checkout is not at PR head ${headRefOid.slice(0, 7)} (at ${localHead.stdout.trim().slice(0, 7) || "?"}): ${(synced.stderr || fetched.stderr || localHead.stderr || "").slice(0, 200)}`);
+  }
+  return ok("branch-checkout", `checkout at PR head ${headRefOid.slice(0, 7)} (${headRefName})`);
+}
+
 export async function gateRepoIdle({ run, repoRoot }) {
   const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot });
   if (branch.code !== 0 || branch.stdout.trim() !== "main") {

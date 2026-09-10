@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
-  gateDocsUpdated, gateMainGreen, gatePrototypeAbsent, gateRepoIdle,
-  gateSmokes, gateTests, reportGates,
+  gateBranchHead, gateDocsUpdated, gateMainGreen, gatePrototypeAbsent, gateRepoIdle,
+  gateSmokes, gateTests, isFullOid, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 
@@ -143,25 +143,12 @@ async function main() {
         prNumber = open[0].number;
         headRefOid = open[0].headRefOid ?? null;
         // The worker may leave the checkout anywhere; gates and the reviewer must
-        // see the PR head, so establish it here (zero-trust: never assume). The
-        // ff-only sync plus the rev-parse equality check pin the checkout to the
-        // exact headRefOid the assessment records — without them, a moved or
-        // locally-ahead branch would be gates-tested against a different tree
-        // than the head the loop would merge.
-        const checkout = await run("git", ["checkout", open[0].headRefName], { cwd: repoRoot });
-        if (checkout.code !== 0) {
-          results.push({ name: "branch-checkout", ok: false, detail: `git checkout ${open[0].headRefName} failed: ${checkout.stderr.slice(0, 200)}` });
-          return { results, prNumber, headRefOid };
-        }
-        const fetched = await run("git", ["fetch", "--quiet", "origin"], { cwd: repoRoot });
-        const synced = fetched.code === 0
-          ? await run("git", ["merge", "--ff-only", `origin/${open[0].headRefName}`], { cwd: repoRoot })
-          : fetched;
-        const localHead = await run("git", ["rev-parse", "HEAD"], { cwd: repoRoot });
-        if (fetched.code !== 0 || synced.code !== 0 || localHead.code !== 0 || localHead.stdout.trim() !== headRefOid) {
-          results.push({ name: "branch-checkout", ok: false, detail: `checkout is not at PR head ${String(headRefOid).slice(0, 7)} (at ${localHead.stdout.trim().slice(0, 7) || "?"}): ${(synced.stderr || fetched.stderr || "").slice(0, 200)}` });
-          return { results, prNumber, headRefOid };
-        }
+        // see the exact PR head, so establish it before anything runs (zero-trust:
+        // never assume the worker left it there or that it matches the remote
+        // head the pin records).
+        const branchHead = await gateBranchHead({ run, repoRoot, headRefName: open[0].headRefName, headRefOid });
+        if (!branchHead.ok) return { results: [branchHead], prNumber, headRefOid };
+        results.push(branchHead);
         results.push(await gateTests({ run, repoRoot }));
         results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
         results.push(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement }));
@@ -218,7 +205,7 @@ async function main() {
         const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefOid"], { cwd: repoRoot });
         let headRefOid = null;
         try { headRefOid = JSON.parse(pr.stdout || "{}").headRefOid ?? null; } catch { /* error below */ }
-        if (pr.code !== 0 || !/^[0-9a-f]{40}$/i.test(headRefOid ?? "")) {
+        if (pr.code !== 0 || !isFullOid(headRefOid)) {
           return { error: `gh pr view headRefOid failed: ${(pr.stderr || pr.stdout || "").slice(0, 200)}` };
         }
         return { headRefOid };

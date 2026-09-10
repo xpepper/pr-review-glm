@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
+  gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen, gatePrototypeAbsent,
   gateRepoIdle, gateSmokes, gateTests, reportGates,
 } from "../scripts/dev-loop/gates.mjs";
 
@@ -86,6 +86,43 @@ describe("gateSmokes", () => {
     assert(calls.some((c) => c.includes("smoke-i1.mjs")));
     const failing = await gateSmokes({ run: async () => ({ code: 2, stdout: "", stderr: "x" }), repoRoot: realRoot, exclude: [] });
     assert.equal(failing.ok, false);
+  });
+});
+
+describe("gateBranchHead", () => {
+  const OID = "a".repeat(40);
+  // Unlisted commands succeed silently; each case pins only what it exercises.
+  const dispatch = (outputs) => async (command, args) =>
+    outputs[`${command} ${args.join(" ")}`] ?? { code: 0, stdout: "", stderr: "" };
+  it("passes when the checkout lands exactly on the assessed head", async () => {
+    const run = dispatch({ "git rev-parse HEAD": { code: 0, stdout: `${OID}\n`, stderr: "" } });
+    const gate = await gateBranchHead({ run, repoRoot, headRefName: "i3-lanes", headRefOid: OID });
+    assert.equal(gate.ok, true);
+    assert.match(gate.detail, /at PR head/);
+  });
+  it("fails on checkout, fetch, or ff-only sync failures", async () => {
+    const cases = [
+      dispatch({ "git checkout i3-lanes": { code: 1, stdout: "", stderr: "no such branch" } }),
+      dispatch({ "git fetch --quiet origin": { code: 1, stdout: "", stderr: "network down" } }),
+      dispatch({ "git merge --ff-only origin/i3-lanes": { code: 1, stdout: "", stderr: "not possible to fast-forward" } }),
+    ];
+    for (const run of cases) {
+      const gate = await gateBranchHead({ run, repoRoot, headRefName: "i3-lanes", headRefOid: OID });
+      assert.equal(gate.ok, false, gate.detail);
+    }
+  });
+  it("fails when the local head differs from the assessed head (stale or ahead)", async () => {
+    const run = dispatch({ "git rev-parse HEAD": { code: 0, stdout: `${"b".repeat(40)}\n`, stderr: "" } });
+    const gate = await gateBranchHead({ run, repoRoot, headRefName: "i3-lanes", headRefOid: OID });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /not at PR head/);
+  });
+  it("fails with a precise message when the PR has no valid headRefOid", async () => {
+    for (const headRefOid of [undefined, null, "too-short"]) {
+      const gate = await gateBranchHead({ run: dispatch({}), repoRoot, headRefName: "i3-lanes", headRefOid });
+      assert.equal(gate.ok, false);
+      assert.match(gate.detail, /no valid headRefOid/);
+    }
   });
 });
 
