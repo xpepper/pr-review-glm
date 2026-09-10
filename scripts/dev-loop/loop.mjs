@@ -15,15 +15,23 @@ export function reviewBlocking(reviewResult) {
   return { blocking: false, findings };
 }
 
+// A moved head gets one re-assessment; a second move means something is racing
+// the loop and merging would ship unreviewed commits — stop instead.
+const HEAD_REASSESSMENT_LIMIT = 1;
+
 export async function runLoop(deps) {
   const {
     readStatus, preflight, runWorker, workerGates, runReviewer, runDogfood, runFixer,
     merge, postMergeGates,
-    dogfood = false, maxIterations = 1, cooldownSeconds = 60,
+    // Not wiring a head re-fetch fails closed: the loop refuses to merge a head
+    // it cannot pin.
+    fetchPrHead = async () => ({ error: "fetchPrHead not wired" }),
+    dogfood = false, mergeMode = "human", maxIterations = 1, cooldownSeconds = 60,
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     log = () => {},
   } = deps;
   const summary = { stopped: "failure", reason: "", iterations: [] };
+  const short = (value) => String(value).slice(0, 7);
 
   const fail = (reason) => { summary.reason = reason; return summary; };
   const finishAs = (stopped, reason) => { summary.stopped = stopped; summary.reason = reason; return summary; };
@@ -73,29 +81,50 @@ export async function runLoop(deps) {
                  reason: blocking.map((j) => `${j.name}: ${j.judgment.reason}`).join("; "),
                  findings: blocking.flatMap((j) => j.judgment.findings) };
       }
-      return { kind: "clean" };
+      return { kind: "clean", headRefOid: gates.headRefOid ?? null };
     };
 
     let state = await assess();
-    while (state.kind === "blocking") {
-      // Gate failures with no known PR (e.g. increment-pr: 0 or ≥2 open PRs) are
-      // not fixable by a PR-scoped fixer — stop instead of dispatching garbage.
-      if (iteration.prNumber === null) return fail(`blocking state with no known PR, not fixable: ${state.reason}`);
-      if (fixerBudget === 0) return fail(`unresolved after fixer budget: ${state.reason}`);
-      fixerBudget -= 1;
-      iteration.fixerRounds += 1;
-      log(`fixer round ${iteration.fixerRounds}: ${state.reason}`);
-      const fixed = await runFixer(iteration.prNumber, state.findings);
-      if (fixed.code !== 0 || fixed.timedOut) return fail(`fixer failed (code=${fixed.code}, timedOut=${fixed.timedOut})`);
-      state = await assess();
-    }
-    if (state.kind === "fatal") return fail(state.reason);
-    iteration.outcome = "clean";
+    let headMoves = 0;
+    // Clean assessment → merge decision. In auto mode the loop merges only the
+    // exact head the reviews assessed (spec, architecture step 7): a moved head
+    // re-enters assessment instead of merging unreviewed commits.
+    for (;;) {
+      while (state.kind === "blocking") {
+        // Gate failures with no known PR (e.g. increment-pr: 0 or ≥2 open PRs) are
+        // not fixable by a PR-scoped fixer — stop instead of dispatching garbage.
+        if (iteration.prNumber === null) return fail(`blocking state with no known PR, not fixable: ${state.reason}`);
+        if (fixerBudget === 0) return fail(`unresolved after fixer budget: ${state.reason}`);
+        fixerBudget -= 1;
+        iteration.fixerRounds += 1;
+        log(`fixer round ${iteration.fixerRounds}: ${state.reason}`);
+        const fixed = await runFixer(iteration.prNumber, state.findings);
+        if (fixed.code !== 0 || fixed.timedOut) return fail(`fixer failed (code=${fixed.code}, timedOut=${fixed.timedOut})`);
+        state = await assess();
+      }
+      if (state.kind === "fatal") return fail(state.reason);
+      iteration.outcome = "clean";
 
-    if (!dogfood) {
-      summary.stopped = "awaiting-human-merge";
-      summary.reason = `PR #${iteration.prNumber} gates+review clean; dogfood off — human merges`;
-      return summary;
+      if (mergeMode !== "auto") {
+        summary.stopped = "awaiting-human-merge";
+        summary.reason = `PR #${iteration.prNumber} gates+review clean; merge=${mergeMode} — human merges`;
+        return summary;
+      }
+      if (state.headRefOid == null) return fail(`PR #${iteration.prNumber} assessed with unknown head; refusing to merge`);
+      const current = await fetchPrHead(iteration.prNumber);
+      if (!current || current.error || !current.headRefOid) {
+        return fail(`cannot pin PR #${iteration.prNumber} head before merge: ${current?.error ?? "headRefOid missing"}`);
+      }
+      if (current.headRefOid === state.headRefOid) {
+        iteration.reviewedHeadOid = state.headRefOid;
+        break;
+      }
+      headMoves += 1;
+      if (headMoves > HEAD_REASSESSMENT_LIMIT) {
+        return fail(`PR #${iteration.prNumber} head moved again after re-assessment (${short(state.headRefOid)} → ${short(current.headRefOid)}); not merging unreviewed commits`);
+      }
+      log(`PR #${iteration.prNumber} head moved ${short(state.headRefOid)} → ${short(current.headRefOid)} after assessment; re-assessing`);
+      state = await assess();
     }
     const merged = await merge(iteration.prNumber);
     if (merged.code !== 0) return fail(`merge failed for PR #${iteration.prNumber}: ${merged.stderr.slice(0, 200)}`);

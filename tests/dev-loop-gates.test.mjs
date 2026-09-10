@@ -90,11 +90,19 @@ describe("gateSmokes", () => {
 });
 
 describe("gateIncrementPr", () => {
-  it("requires exactly one open PR and surfaces its number and branch", async () => {
-    const one = await gateIncrementPr({ run: runOk('[{"number":7,"headRefName":"i3-lanes"}]'), repoRoot });
+  it("requires exactly one open PR and surfaces its number, branch, and reviewed head", async () => {
+    const seen = [];
+    const run = async (command, args) => {
+      seen.push(args.join(" "));
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}"}]`, stderr: "" };
+    };
+    const one = await gateIncrementPr({ run, repoRoot });
     assert.equal(one.ok, true);
     assert.equal(one.prNumber, 7);
     assert.equal(one.headRefName, "i3-lanes");
+    assert.equal(one.headRefOid, "a".repeat(40));
+    // The head pin (L2) depends on gh returning headRefOid, so the field must be requested.
+    assert.match(seen[0], /--json number,headRefName,url,headRefOid/);
     for (const stdout of ["[]", '[{"number":1,"headRefName":"a"},{"number":2,"headRefName":"b"}]']) {
       assert.equal((await gateIncrementPr({ run: runOk(stdout), repoRoot })).ok, false);
     }

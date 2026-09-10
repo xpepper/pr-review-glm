@@ -35,9 +35,10 @@ tiered reviewer lanes, host-validated findings, and gated GitHub COMMENT publica
 6. Automation (from L1): the sequence above can be driven by `node scripts/dev-loop.mjs`
    (spec: docs/superpowers/specs/2026-09-10-dev-loop-design.md). The loop owns merging;
    agents working increments never merge. Default is one iteration per run and
-   `--merge human`; `--merge auto` (from L2) is a loop-owned merge on green gates +
-   clean active reviews — never an agent-discretion merge — and, once the dogfood
-   review exists (I3+), additionally requires it.
+   `--merge human`; `--merge auto` (landed L2) is a loop-owned merge on green gates +
+   clean active reviews and an unchanged reviewed head (headRefOid pinned at
+   assessment, re-checked immediately before merging) — never an agent-discretion
+   merge — and, once the dogfood review exists (I3+), additionally requires it.
 
 ## Settled decisions — do not reopen
 

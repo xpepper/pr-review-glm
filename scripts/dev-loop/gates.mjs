@@ -64,14 +64,14 @@ export async function gateSmokes({ run, repoRoot, exclude = [] }) {
 }
 
 export async function gateIncrementPr({ run, repoRoot }) {
-  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url"], { cwd: repoRoot });
+  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid"], { cwd: repoRoot });
   let open = [];
   try { open = JSON.parse(prs.stdout || "[]"); } catch { /* handled below */ }
   if (prs.code !== 0 || open.length !== 1) {
     return bad("increment-pr", `expected exactly one open PR, found ${open.length}${prs.code !== 0 ? ` (gh exit ${prs.code})` : ""}`);
   }
   const [pr] = open;
-  return { name: "increment-pr", ok: true, detail: `PR #${pr.number} (${pr.headRefName})`, prNumber: pr.number, headRefName: pr.headRefName };
+  return { name: "increment-pr", ok: true, detail: `PR #${pr.number} (${pr.headRefName})`, prNumber: pr.number, headRefName: pr.headRefName, headRefOid: pr.headRefOid };
 }
 
 export async function gateDocsUpdated({ readFileSync, repoRoot, increment }) {
