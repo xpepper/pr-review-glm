@@ -18,7 +18,7 @@ parses and validates it. Keep it directly under the H1 title.
 
 ## Recorded state (2026-09-10, after R1)
 
-- `main` = R1 complete (plugin identity rename, PR #TBD), assuming that PR merges.
+- `main` = R1 complete (plugin identity rename, PR #12), assuming that PR merges.
   Working tree clean. No open PRs should remain.
 - **The plugin's identity is now z-pr-review** (R1, mechanical rename): commands
   `/z-pr-review` and `/z-pr-review-config`, extension dir `extensions/z-pr-review/`,
