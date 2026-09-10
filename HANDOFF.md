@@ -1,5 +1,7 @@
 # HANDOFF.md — instructions for the next session
 
+STATUS: next=I3
+
 Written for a **fresh session** continuing this project. This file is rewritten at the
 end of every increment; it is the single source of "where we stopped".
 
