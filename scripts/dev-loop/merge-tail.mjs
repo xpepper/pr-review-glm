@@ -8,8 +8,11 @@ import { tagMergedRelease } from "./version.mjs";
 
 // A merge can report success while GitHub still shows OPEN for a moment, or sit
 // in QUEUED on a merge queue. Poll instead of failing on the first non-MERGED
-// view; only after this window does the tail fail closed for a human to retry.
-const MERGE_CONFIRM_ATTEMPTS = 12;
+// view; after this window the tail fails closed for a human to retry — the
+// squash-merge itself may already have completed, so the failure must say
+// exactly what did and did not happen (release tag NOT created, post-merge
+// checks NOT run).
+const MERGE_CONFIRM_ATTEMPTS = 30;
 const MERGE_CONFIRM_DELAY_MS = 10_000;
 
 export async function mergeTail({ run, repoRoot, merged, prNumber, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
@@ -33,7 +36,7 @@ export async function mergeTail({ run, repoRoot, merged, prNumber, sleep = (ms) 
     }
     if (attempt < MERGE_CONFIRM_ATTEMPTS) await sleep(MERGE_CONFIRM_DELAY_MS);
   }
-  return { code: 1, stdout: "", stderr: `PR ${prNumber} not confirmed MERGED by GitHub after ${MERGE_CONFIRM_ATTEMPTS} attempts over ~${Math.round((MERGE_CONFIRM_ATTEMPTS * MERGE_CONFIRM_DELAY_MS) / 1000)}s (state=${state ?? "unknown"}): ${viewError}`, timedOut: false };
+  return { code: 1, stdout: "", stderr: `PR ${prNumber} not confirmed MERGED by GitHub after ${MERGE_CONFIRM_ATTEMPTS} attempts over ~${Math.round((MERGE_CONFIRM_ATTEMPTS * MERGE_CONFIRM_DELAY_MS) / 1000)}s (state=${state ?? "unknown"}): ${viewError} — the squash-merge may already have completed; the release tag was NOT created and post-merge checks did NOT run: verify the PR state, tag vX.Y.Z manually if merged, and run the post-merge gates by hand`, timedOut: false };
 }
 
 async function tagConfirmedMerge({ run, repoRoot, merged, prNumber, mergeOid }) {

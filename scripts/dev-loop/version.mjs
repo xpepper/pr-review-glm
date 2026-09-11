@@ -82,6 +82,37 @@ export async function gateVersionBump({ run, repoRoot }) {
   return { name: "version-bump", ok: true, detail: `version ${main.version} → ${branch.version}` };
 }
 
+// Pre-merge bump re-check: the bump gate compared the PR's version against
+// origin/main at assessment time, and that baseline can go stale — another
+// release merging in between could already carry this PR's version, landing an
+// "unchanged" version after all. The version-side twin of the headRefOid pin:
+// fetch main and re-verify the ordering against the exact checked-out PR head
+// immediately before gh pr merge. Fail-closed aborts the merge; the next run
+// re-assesses against the moved main.
+export async function verifyBumpAtMerge({ run, repoRoot }) {
+  const fetched = await run("git", ["fetch", "--quiet", "origin", "main"], { cwd: repoRoot });
+  if (fetched.code !== 0) {
+    return { ok: false, detail: `git fetch origin main failed (merge aborted): ${(fetched.stderr || fetched.stdout || "").slice(0, 200)}` };
+  }
+  const mainText = await run("git", ["show", "origin/main:plugin.json"], { cwd: repoRoot });
+  if (mainText.code !== 0) {
+    return { ok: false, detail: `cannot read plugin.json on origin/main (merge aborted): ${mainText.stderr.slice(0, 200)}` };
+  }
+  const headText = await run("git", ["show", "HEAD:plugin.json"], { cwd: repoRoot });
+  if (headText.code !== 0) {
+    return { ok: false, detail: `cannot read plugin.json at the checked-out PR head (merge aborted): ${headText.stderr.slice(0, 200)}` };
+  }
+  const main = parseVersion(mainText.stdout, "origin/main:plugin.json");
+  if (main.error) return { ok: false, detail: `${main.error} (merge aborted)` };
+  const head = parseVersion(headText.stdout, "HEAD:plugin.json");
+  if (head.error) return { ok: false, detail: `${head.error} (merge aborted)` };
+  const ordering = compareVersions(head.version, main.version);
+  if (ordering <= 0) {
+    return { ok: false, detail: `plugin.json version ${head.version} is ${ordering === 0 ? "unchanged vs" : "not greater than"} main's ${main.version} at merge time — main moved since assessment; merge aborted, re-run the loop to re-assess` };
+  }
+  return { ok: true, detail: `version ${main.version} → ${head.version} confirmed at merge time` };
+}
+
 // Tagging tail of the merge path: after squash-merge + checkout main + ff-only
 // pull, tag the merged main vX.Y.Z from plugin.json and push the tag. The merge
 // already happened, so failure here cannot un-merge — it stops the loop with a

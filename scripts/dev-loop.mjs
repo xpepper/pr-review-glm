@@ -12,7 +12,7 @@ import {
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
-import { gateVersionBump } from "./dev-loop/version.mjs";
+import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
 import { mergeTail } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
@@ -253,6 +253,12 @@ async function main() {
       }
     },
     merge: async (prNumber) => {
+      // V1 pre-merge bump re-check: the gate's origin/main baseline was read at
+      // assessment time; re-verify against a fresh main so a release landing in
+      // between cannot turn this PR's bump into an unchanged version (the
+      // version-side twin of the headRefOid pin).
+      const bump = await verifyBumpAtMerge({ run, repoRoot });
+      if (!bump.ok) return { code: 1, stdout: "", stderr: bump.detail, timedOut: false };
       const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
       if (merged.code !== 0) return merged;
       // V1 tagging tail: GitHub confirms the merge, main is checked out and

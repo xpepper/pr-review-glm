@@ -74,7 +74,8 @@ describe("mergeTail", () => {
     const result = await mergeTail({ run, repoRoot, merged: ok("merged"), prNumber: 23, sleep: noSleep });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /not confirmed MERGED/);
-    assert.match(result.stderr, /12 attempts/);
+    assert.match(result.stderr, /30 attempts/);
+    assert.match(result.stderr, /release tag was NOT created/, "must disclose the tag was not created");
     assert.ok(!calls.some(([command, , arg]) => command === "git" && arg === "v0.3.1"), "must not tag");
   }));
   it("fails closed (after polling) when gh pr view itself keeps failing", withManifest(async (repoRoot) => {

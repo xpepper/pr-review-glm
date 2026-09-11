@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compareVersions, gateVersionBump, parseVersion, tagMergedRelease } from "../scripts/dev-loop/version.mjs";
+import { compareVersions, gateVersionBump, parseVersion, tagMergedRelease, verifyBumpAtMerge } from "../scripts/dev-loop/version.mjs";
 
 const manifest = (version) => `${JSON.stringify({ name: "z-pr-review", version }, null, 2)}\n`;
 const ok = (stdout = "") => async () => ({ code: 0, stdout, stderr: "" });
@@ -93,6 +93,61 @@ describe("compareVersions", () => {
     assert.equal(compareVersions("0.1.9007199254740993", "0.1.9007199254740993"), 0);
     // Length-first comparison, not lexical: "10" > "9" even though "1" < "9".
     assert.equal(compareVersions("0.10.0", "0.9.0"), 1);
+  });
+});
+
+describe("verifyBumpAtMerge", () => {
+  // All input reaches the helper through git (fetch + show), so a dispatching
+  // fake covers every case without touching the working tree. (Local `res`
+  // because the file-level `ok` is a run factory, not a result object.)
+  const res = (stdout = "", code = 0, stderr = "") => ({ code, stdout, stderr });
+  const fake = ({ main = "0.1.0", head = "0.2.0", overrides = {} } = {}) => {
+    const calls = [];
+    const run = async (command, args) => {
+      const key = [command, ...args].join(" ");
+      calls.push(key);
+      if (overrides[key]) return overrides[key];
+      if (key === "git show origin/main:plugin.json") return res(manifest(main));
+      if (key === "git show HEAD:plugin.json") return res(manifest(head));
+      return res();
+    };
+    return { calls, run };
+  };
+  it("confirms the bump against a freshly fetched main", async () => {
+    const { run } = fake({ main: "0.1.0", head: "0.2.0" });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any" });
+    assert.deepEqual(result, { ok: true, detail: "version 0.1.0 → 0.2.0 confirmed at merge time" });
+  });
+  it("aborts the merge when main moved to the PR's version (stale gate baseline)", async () => {
+    const { run } = fake({ main: "0.2.0", head: "0.2.0" });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /unchanged vs main's 0\.2\.0 at merge time/);
+    assert.match(result.detail, /merge aborted/);
+  });
+  it("aborts the merge when main moved past the PR's version", async () => {
+    const { run } = fake({ main: "0.3.0", head: "0.2.0" });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /not greater than main's 0\.3\.0 at merge time/);
+  });
+  it("fails closed when the fetch fails", async () => {
+    const { run } = fake({ overrides: { "git fetch --quiet origin main": res("", 1, "network") } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /git fetch origin main failed/);
+  });
+  it("fails closed when main's manifest cannot be read at merge time", async () => {
+    const { run } = fake({ overrides: { "git show origin/main:plugin.json": res("", 128, "bad object") } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /cannot read plugin\.json on origin\/main/);
+  });
+  it("fails closed when the PR head's manifest is not valid semver", async () => {
+    const { run } = fake({ overrides: { "git show HEAD:plugin.json": res("not json") } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /HEAD:plugin\.json is not parseable JSON/);
   });
 });
 
