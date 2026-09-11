@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 export const PHASE_LIMITS = Object.freeze({
   // maxTurns is retained for I3 calibration only: zcode 0.16.5 rejects
@@ -14,23 +16,50 @@ export const PHASE_LIMITS = Object.freeze({
 });
 
 export const DEFAULT_ZCODE_CLI = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
-// Merge denial is the authority rule (agents never merge). The mcp__* denies
-// exist because headless phases inherit the user's full MCP/plugin config
-// (observed 2026-09-11: a reviewer agent invoked a playwright browser tool and
-// a visible automation Chrome popped up mid-run). Phase agents need files, git,
-// and gh — never MCP servers — so everything mcp__-prefixed is denied, with the
-// known server names spelled out in case the bare wildcard is matched
-// literally. Parser acceptance verified against zcode 0.16.5 (an unknown flag
-// value would exit 1 with a usage dump, as --max-turns does); the match effect
-// is verified by the next supervised run staying Chrome-free.
-const DENIED_TOOLS = [
-  "Bash(gh pr merge *)",
-  "mcp__*",
-  "mcp__plugin_playwright_playwright",
-  "mcp__playwright_playwright",
-  "mcp__computer-use",
-  "mcp__node_repl",
-].join(",");
+// Merge denial stays a denylist rule (the help's own example shape). MCP/tools
+// isolation moved OUT of this flag: observed twice (I4 2026-09-11, V1 2026-09-11
+// — reviewer agents invoked playwright MCP tools and popped a visible
+// automation Chrome) that no denylist shape matches MCP tools on zcode 0.16.5 —
+// `mcp__*`, bare server names, and exact server names are all parser-accepted
+// and all ineffective, and the `--allowed-tools` allowlist the help lists is
+// parser-dead exactly like --max-turns/--settings. The structural fix is
+// buildPhaseEnv below: an isolated HOME with only the model config, so MCP
+// servers, plugins, and skills never exist in a phase environment.
+const DENIED_TOOLS = "Bash(gh pr merge *)";
+
+// Phase agents run headless with an isolated HOME containing ONLY
+// ~/.zcode/cli/config.json (the verified model+provider config). Everything
+// else the operator's HOME carries — MCP servers, plugins, skills — never
+// exists for a phase, so none can spawn (the Chrome incident class is
+// structurally impossible rather than denied-and-hoped). Git identity and gh
+// auth stay real through documented env redirection, and the API key rides the
+// environment as before. The zcode-headless preflight gate probes this exact
+// env shape before any phase is dispatched.
+export function buildPhaseEnv({
+  home = process.env.HOME,
+  env = process.env,
+  mkdtemp = mkdtempSync,
+} = {}) {
+  const sourceConfig = join(home, ".zcode", "cli", "config.json");
+  let configText;
+  try {
+    configText = readFileSync(sourceConfig, "utf8");
+  } catch {
+    return { error: `cannot read ${sourceConfig} — headless phases need the operator's model config; see AGENTS.md (Environment facts — zcode CLI)` };
+  }
+  const phaseHome = mkdtemp(join(tmpdir(), "zpr-phase-home-"));
+  mkdirSync(join(phaseHome, ".zcode", "cli"), { recursive: true });
+  writeFileSync(join(phaseHome, ".zcode", "cli", "config.json"), configText);
+  return {
+    env: {
+      ...env,
+      HOME: phaseHome,
+      GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
+      GH_CONFIG_DIR: join(home, ".config", "gh"),
+    },
+    cleanup: () => rmSync(phaseHome, { recursive: true, force: true }),
+  };
+}
 
 export function resolveZcodeCli(env = process.env, defaultCli = DEFAULT_ZCODE_CLI) {
   if (env.ZCODE_CLI) return env.ZCODE_CLI;
@@ -56,11 +85,13 @@ export function buildZcodeArgs({ prompt, repoRoot }) {
   ];
 }
 
-export function runCommand(command, args, { cwd, timeoutMs } = {}) {
+export function runCommand(command, args, { cwd, timeoutMs, env } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+      // env omitted → inherit the operator's environment (git/gh/plain tests);
+      // phase invocations pass the isolated-HOME env from buildPhaseEnv.
+      child = spawn(command, args, { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     } catch (error) {
       resolve({ code: null, stdout: "", stderr: String(error), timedOut: false });
       return;
