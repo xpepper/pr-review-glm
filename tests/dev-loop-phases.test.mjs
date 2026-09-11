@@ -38,13 +38,18 @@ describe("renderPrompt", () => {
 });
 
 describe("buildZcodeArgs", () => {
-  it("denies merge and pins cwd and mode — no --max-turns (zcode 0.16.5 rejects it)", () => {
+  it("denies merge and MCP tools, pins cwd and mode — no --max-turns (zcode 0.16.5 rejects it)", () => {
     const args = buildZcodeArgs({ prompt: "work", repoRoot: "/repo" });
     const joined = args.join(" ");
     assert.match(joined, /--prompt work /);
     assert.match(joined, /--cwd \/repo /);
     assert.match(joined, /--mode yolo /);
-    assert.match(joined, /--disallowed-tools Bash\(gh pr merge \*\)/);
+    assert.match(joined, /--disallowed-tools Bash\(gh pr merge \*\),mcp__\*/);
+    // Phase agents never need MCP servers (the playwright-Chrome incident):
+    // the known server names are spelled out in case the bare wildcard is
+    // matched literally.
+    assert.match(joined, /mcp__plugin_playwright_playwright/);
+    assert.match(joined, /mcp__computer-use/);
     assert.doesNotMatch(joined, /--max-turns/);
   });
 });

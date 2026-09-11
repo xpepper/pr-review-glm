@@ -34,6 +34,26 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-11 (I4 landed; post-I4 loop calibration + hardening):** I4 merged as
+  8c1cdbb in the loop's first full `--merge auto` completion (adopt → gates →
+  independent + dogfood reviews → merge of the pinned head b6955e8 → post-merge
+  main-green), closing a five-run landing saga that taught the loop three
+  lessons now landed (conventional fix PR, outside the loop): (1) per-phase
+  duration capture — `phaseTimings` on every iteration in the report, the
+  calibration data that was always missing; (2) a `mergeable` assessment gate —
+  a CONFLICTING PR fails before reviews burn a cycle on it (the merge-time
+  conflict cost one full run: gates + both reviews + a merge attempt);
+  UNKNOWN passes and the pre-merge head pin stays the backstop; (3) MCP tool
+  denial for loop phases — a reviewer agent's playwright tool call popped a
+  visible automation Chrome mid-run (parent chain dev-loop → zcode-cli →
+  playwright-mcp → Chrome), so `DENIED_TOOLS` now denies `mcp__*` and the known
+  server names (parser acceptance verified on zcode 0.16.5; effect verified by
+  Chrome-free runs). Calibration conclusions (spec open item 3): no
+  PHASE_LIMITS change — observed worker 35–40m vs 90m, reviewer ≤~15m vs 20m
+  (tightest margin), fixer 10–20m vs 45m, dogfood dispatch 1–3m vs 20m, heavy
+  lane attempts ≤~2m vs 12m; timeouts protect, they don't bound throughput, and
+  tuning now has data.
+
 - **2026-09-11 (I4)** — topologies and tiers landed (PR #18): the I3 single
   heavy lane became a concurrent tiered batch. `topologies.mjs` records the
   four fixed mode lane sets with upstream-documented ids/objectives (verified

@@ -60,6 +60,25 @@ export async function runLoop(deps) {
     const iteration = { increment: status.increment, prNumber: null, fixerRounds: 0, merged: false, outcome: "" };
     summary.iterations.push(iteration);
 
+    // Per-phase wall-clock capture (post-I4 calibration, spec open item 3):
+    // every dispatched phase records its duration on the iteration, so
+    // report-last.json finally carries the data future PHASE_LIMITS tuning
+    // needs. Each phase name accumulates one entry per dispatch (reviews and
+    // gates repeat across assessments and fixer rounds).
+    const phaseRunners = { worker: runWorker, gates: workerGates, reviewer: runReviewer, dogfood: runDogfood, fixer: runFixer, merge };
+    const timed = Object.fromEntries(Object.entries(phaseRunners).map(([name, fn]) => [
+      name,
+      async (...args) => {
+        const startedAt = Date.now();
+        try {
+          return await fn(...args);
+        } finally {
+          iteration.phaseTimings ??= {};
+          (iteration.phaseTimings[name] ??= []).push(Date.now() - startedAt);
+        }
+      },
+    ]));
+
     // Mid-iteration resume: adopting the checkpoint skips only the worker
     // re-dispatch and the idle-repo preflight (the probe verified clean synced
     // main, one open PR, the increment's branch). Everything downstream is
@@ -75,22 +94,22 @@ export async function runLoop(deps) {
       const preFail = pre.find((g) => !g.ok);
       if (preFail) return fail(`preflight gate ${preFail.name}: ${preFail.detail}`);
 
-      const worker = await runWorker(status);
+      const worker = await timed.worker(status);
       if (worker.code !== 0 || worker.timedOut) return fail(`worker failed (code=${worker.code}, timedOut=${worker.timedOut})`);
     }
 
     let fixerBudget = 2;
     // assess(): gates + all active reviews. Returns fatal / blocking / clean.
     const assess = async () => {
-      const gates = await workerGates();
+      const gates = await timed.gates();
       const gateFail = gates.results.find((g) => !g.ok);
       if (gateFail) {
         return { kind: "blocking", reason: `gate ${gateFail.name}: ${gateFail.detail}`,
                  findings: gates.results.filter((g) => !g.ok).map((g) => ({ severity: "P0", title: `${g.name}: ${g.detail}` })) };
       }
       iteration.prNumber = gates.prNumber;
-      const reviewRuns = [{ name: "independent", result: await runReviewer(gates.prNumber) }];
-      if (dogfood) reviewRuns.push({ name: "dogfood", result: await runDogfood(gates.prNumber) });
+      const reviewRuns = [{ name: "independent", result: await timed.reviewer(gates.prNumber) }];
+      if (dogfood) reviewRuns.push({ name: "dogfood", result: await timed.dogfood(gates.prNumber) });
       for (const run of reviewRuns) {
         if (run.result.code !== 0 || run.result.timedOut) {
           // Carry the invocation's first error line: a bare exit code turned the
@@ -126,7 +145,7 @@ export async function runLoop(deps) {
         fixerBudget -= 1;
         iteration.fixerRounds += 1;
         log(`fixer round ${iteration.fixerRounds}: ${state.reason}`);
-        const fixed = await runFixer(iteration.prNumber, state.findings);
+        const fixed = await timed.fixer(iteration.prNumber, state.findings);
         if (fixed.code !== 0 || fixed.timedOut) return fail(`fixer failed (code=${fixed.code}, timedOut=${fixed.timedOut})`);
         state = await assess();
       }
@@ -154,7 +173,7 @@ export async function runLoop(deps) {
       log(`PR #${iteration.prNumber} head moved ${short(state.headRefOid)} → ${short(current.headRefOid)} after assessment; re-assessing`);
       state = await assess();
     }
-    const merged = await merge(iteration.prNumber);
+    const merged = await timed.merge(iteration.prNumber);
     if (merged.code !== 0) return fail(`merge failed for PR #${iteration.prNumber}: ${merged.stderr.slice(0, 200)}`);
     iteration.merged = true;
     const post = await postMergeGates();

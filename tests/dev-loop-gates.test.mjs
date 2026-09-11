@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen,
-  gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, reportGates,
+  gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, mergeabilityGate, reportGates,
 } from "../scripts/dev-loop/gates.mjs";
 
 const repoRoot = "/repo"; // never touched: all commands are faked
@@ -165,6 +165,22 @@ describe("gateIncrementPr", () => {
     assert.match(seen[0], /--json number,headRefName,url,headRefOid/);
     for (const stdout of ["[]", '[{"number":1,"headRefName":"a"},{"number":2,"headRefName":"b"}]']) {
       assert.equal((await gateIncrementPr({ run: runOk(stdout), repoRoot })).ok, false);
+    }
+  });
+});
+
+describe("mergeabilityGate", () => {
+  const pr = { number: 18, headRefName: "i4-topologies-tiers" };
+  it("fails CONFLICTING early, before a review cycle can burn on an unmergeable head", () => {
+    const gate = mergeabilityGate({ ...pr, mergeable: "CONFLICTING" });
+    assert.equal(gate.ok, false);
+    assert.equal(gate.name, "mergeable");
+    assert.match(gate.detail, /CONFLICTING.*merge main into i4-topologies-tiers/);
+  });
+  it("passes MERGEABLE, UNKNOWN (gh computes it async), and missing state — the pre-merge pin stays the backstop", () => {
+    for (const mergeable of ["MERGEABLE", "UNKNOWN", undefined, null]) {
+      const gate = mergeabilityGate({ ...pr, mergeable });
+      assert.equal(gate.ok, true, `mergeable=${String(mergeable)}`);
     }
   });
 });

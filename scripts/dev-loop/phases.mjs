@@ -14,7 +14,23 @@ export const PHASE_LIMITS = Object.freeze({
 });
 
 export const DEFAULT_ZCODE_CLI = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
-const DENIED_TOOLS = "Bash(gh pr merge *)";
+// Merge denial is the authority rule (agents never merge). The mcp__* denies
+// exist because headless phases inherit the user's full MCP/plugin config
+// (observed 2026-09-11: a reviewer agent invoked a playwright browser tool and
+// a visible automation Chrome popped up mid-run). Phase agents need files, git,
+// and gh — never MCP servers — so everything mcp__-prefixed is denied, with the
+// known server names spelled out in case the bare wildcard is matched
+// literally. Parser acceptance verified against zcode 0.16.5 (an unknown flag
+// value would exit 1 with a usage dump, as --max-turns does); the match effect
+// is verified by the next supervised run staying Chrome-free.
+const DENIED_TOOLS = [
+  "Bash(gh pr merge *)",
+  "mcp__*",
+  "mcp__plugin_playwright_playwright",
+  "mcp__playwright_playwright",
+  "mcp__computer-use",
+  "mcp__node_repl",
+].join(",");
 
 export function resolveZcodeCli(env = process.env, defaultCli = DEFAULT_ZCODE_CLI) {
   if (env.ZCODE_CLI) return env.ZCODE_CLI;

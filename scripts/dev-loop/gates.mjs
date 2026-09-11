@@ -109,6 +109,18 @@ export async function gateIncrementPr({ run, repoRoot }) {
   return { name: "increment-pr", ok: true, detail: `PR #${pr.number} (${pr.headRefName})`, prNumber: pr.number, headRefName: pr.headRefName, headRefOid: pr.headRefOid };
 }
 
+// Mergeability is checked at assessment time, not discovered at merge time: a
+// branch that drifted behind main (the I4 landing hit exactly this — the loop
+// burned a full review cycle and failed only at `gh pr merge`) must fail the
+// cheap gate instead. UNKNOWN passes: GitHub computes this asynchronously, and
+// the pre-merge head pin still catches the rare late conflict fail-closed.
+export function mergeabilityGate(pr) {
+  if (pr?.mergeable === "CONFLICTING") {
+    return bad("mergeable", `PR #${pr.number} is CONFLICTING — merge main into ${pr.headRefName}, resolve, and push before re-assessment`);
+  }
+  return ok("mergeable", `PR #${pr.number} mergeable: ${pr?.mergeable ?? "unknown"}`);
+}
+
 export async function gateDocsUpdated({ readFileSync, repoRoot, increment }) {
   const roadmap = readFileSync(join(repoRoot, "ROADMAP.md"), "utf8");
   if (roadmapIncrementState(roadmap, increment) !== "done") {
