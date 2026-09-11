@@ -190,3 +190,46 @@ automatic ROADMAP re-planning.
   asserting at dispatch that our commands are registered with our descriptions (the
   `waitForCommands` name+description pattern in `tests/smoke-harness.mjs`) — is owed by
   I3's dogfood wiring. Architecture step 1 updated accordingly.
+
+- **2026-09-11 (mid-iteration resume + full-series STATUS ids, post-I4-run fix):**
+  the first I4 run stopped after its worker had completed and opened its PR (46
+  minutes in): the worker correctly wrote `STATUS: next=V1` — the ROADMAP's
+  post-I4 order names V1, the first non-I/L id — and even carried the planned
+  grammar extension on its own branch with tests, but the running loop validates
+  docs with the grammar it imported from `main` at launch (still `[IL]`), so the
+  docs-updated gate failed and the run stopped as "blocking state with no known
+  PR, not fixable" (`prNumber` is recorded only after the whole gate batch
+  passes). Two changes landed on `main` as a fix PR outside the loop: (1)
+  `parseStatusLine` accepts every ROADMAP series (`I/L/V/C`) — the extension the
+  V1/C1 rows already required, landed on `main` rather than inside an increment
+  PR precisely because the validating loop must know a grammar before any worker
+  writes it; (2) a resume path: at startup the loop recovers a checkout
+  stranded on an increment branch back to synced `main` (fail-closed on a dirty
+  tree; non-increment branches still fail repo-idle loudly as before), and when
+  the checkpoint a previous run left is unambiguous — clean synced main, exactly
+  one open PR, its branch carrying the increment's `i<N>-` prefix — the
+  iteration resumes at assessment, skipping only the worker re-dispatch and the
+  idle-repo preflight. Everything else is unchanged: the resumed PR faces the
+  full gates, both reviews, the fixer path, and head pinning before any merge,
+  and blocking gates with no known PR still stop loudly rather than dispatching
+  a fixer.
+
+- **2026-09-11 (loop↔plugin protocol surfaces must change on main first — dogfood
+  description skew, second post-I4-run fix):** the resumed I4 run (post-resume
+  fix) adopted the increment PR cleanly and ran gates + the independent review,
+  then stopped at the dogfood invocation (bare `code=1`): the running loop's
+  `dogfood.mjs`, imported from `main` at launch, asserts the `/z-pr-review`
+  registration description at dispatch — and the I4 branch registers a new
+  description ("concurrent tiered reviewer lanes" vs main's "a heavy reviewer
+  lane"); the worker had updated the expected string only on its own branch,
+  invisible to the validating process. Together with the STATUS-grammar skew
+  this generalizes into a rule: every surface the running loop validates or
+  parses out of the increment PR — the `STATUS:` grammar, the command
+  descriptions, the machine-summary shape — is protocol between main's loop
+  code and the branch's plugin, and must change ON MAIN (a supervisor fix PR)
+  before the increment that emits it lands; the worker prompt now forbids
+  changing these inside an increment PR and directs the worker to flag the need
+  instead. Landed with it: the dogfood expected-description and verdict-title
+  updates ported from the I4 branch, and fatal review-invocation reasons now
+  carry the invocation's first error line so the `stopped=` line names the
+  actual failure.

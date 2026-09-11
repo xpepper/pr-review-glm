@@ -125,10 +125,24 @@ describe("runLoop merge modes (L2)", () => {
     assert.equal(calls.merge, 0);
   });
   it("auto: a crashed reviewer is fatal and never merges", async () => {
-    const { deps: d, calls } = deps({ mergeMode: "auto", runReviewer: async () => ({ code: 1, timedOut: false, review: undefined }) });
+    const { deps: d, calls } = deps({ mergeMode: "auto", runReviewer: async () => ({ code: 1, stdout: "", stderr: "", timedOut: false, review: undefined }) });
     const summary = await runLoop(d);
     assert.equal(summary.stopped, "failure");
     assert.equal(calls.fixer, 0);
+    assert.equal(calls.merge, 0);
+  });
+  it("fatal review invocations carry the invocation's first error line in the reason", async () => {
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      runReviewer: async () => ({
+        code: 1, stdout: "",
+        stderr: "Error: Timed out waiting for plugin commands; registered: z-pr-review (unexpected description)\n    at somewhere",
+        timedOut: false, review: undefined,
+      }),
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "failure");
+    assert.match(summary.reason, /review invocation failed \(code=1, timedOut=false\): Error: Timed out waiting for plugin commands/);
     assert.equal(calls.merge, 0);
   });
   it("auto: gate blocking with no known PR fails fast instead of dispatching the fixer", async () => {
@@ -208,6 +222,56 @@ describe("runLoop head pinning (auto only)", () => {
     delete d.fetchPrHead;
     const summary = await runLoop(d);
     assert.equal(summary.stopped, "failure");
+    assert.equal(calls.merge, 0);
+  });
+});
+
+describe("runLoop mid-iteration resume", () => {
+  it("adopts a resumable PR: no preflight, no worker dispatch, assessment proceeds to merge", async () => {
+    let preflights = 0;
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      findResumablePr: async () => ({ prNumber: 18, headRefName: "i4-topologies-tiers" }),
+      preflight: async () => { preflights++; return [gate("idle")]; },
+      workerGates: async () => {
+        calls.assessments++;
+        return { results: [gate("pr", true, "PR #18")], prNumber: 18, headRefOid: HEAD_A };
+      },
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "completed");
+    assert.equal(preflights, 0);
+    assert.equal(calls.worker, 0);
+    assert.equal(calls.reviewer, 1);
+    assert.equal(calls.dogfood, 1);
+    assert.equal(calls.merge, 1);
+    assert.equal(calls.mergedPr, 18);
+    assert.equal(summary.iterations[0].adopted, true);
+    assert.equal(summary.iterations[0].merged, true);
+  });
+  it("probe returns null: normal path with preflight and worker", async () => {
+    let preflights = 0;
+    const { deps: d, calls } = deps({
+      findResumablePr: async () => null,
+      preflight: async () => { preflights++; return [gate("idle")]; },
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "awaiting-human-merge");
+    assert.equal(preflights, 1);
+    assert.equal(calls.worker, 1);
+    assert.equal(summary.iterations[0].adopted, undefined);
+  });
+  it("adoption keeps the protective fail-stop: blocking gates with no PR number never dispatch a fixer", async () => {
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      findResumablePr: async () => ({ prNumber: 18, headRefName: "i4-x" }),
+      workerGates: async () => ({ results: [gate("docs-updated", false, "HANDOFF STATUS is invalid")], prNumber: null }),
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "failure");
+    assert.match(summary.reason, /no known PR/);
+    assert.equal(calls.worker, 0);
+    assert.equal(calls.fixer, 0);
     assert.equal(calls.merge, 0);
   });
 });

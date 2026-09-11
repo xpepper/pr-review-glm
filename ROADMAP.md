@@ -56,6 +56,54 @@ the development workflow itself.
   the balanced batch (5 lanes) under the 12m batch cap versus
   `PHASE_LIMITS.dogfood` (20m) and the per-tier attempt defaults — adjust
   from observed loop timings.
+  **Landing saga (same day):** landing took three resumed loop runs, two
+  supervisor fix PRs for loop↔plugin protocol skew (below), and seven dogfood
+  review rounds in total — rounds 5 (supervisor-folded) and 6–7 (loop fixer)
+  hardened the lane lifecycle: null model-override semantics, synchronous
+  stop-throw cleanup classification, cancellation awaiting the late child's
+  bounded cleanup, abort-after-complete relabeling, parent cancellation
+  propagation, a send-rejection relabel guard, and a final child-stop sweep
+  clipped to the budgets. Final reviews: independent approve-with-nits (P2s
+  only), dogfood approve-with-nits (3 P2s recorded: cancellation can leave a
+  batch pending until the attempt deadline; hung child-stop promises retained
+  for the extension lifetime; unconfirmed stops can accumulate live children
+  across batches — hardening candidates for I5/I8).
+
+- **2026-09-11 (I4 resumed run stopped on dogfood description skew — protocol
+  rule):** run #2 (13 min) adopted PR #18 cleanly (the resume path from the
+  previous fix worked: no worker re-dispatch, gates green, independent review
+  ran) but stopped at the dogfood invocation: main's in-memory `dogfood.mjs`
+  asserts the `/z-pr-review` registration description at dispatch, and the I4
+  branch registers a new one ("concurrent tiered reviewer lanes") — the worker
+  had updated the expected string only inside its own PR, invisible to the
+  running loop. Same skew class as the STATUS grammar, now generalized into a
+  rule: loop↔plugin protocol surfaces (STATUS grammar, command descriptions,
+  machine-summary shape) change on `main` first, never inside the increment PR
+  being validated — the worker prompt now says so. Fix (this PR): the branch's
+  `dogfood.mjs` string/comment updates ported to main, and fatal
+  review-invocation reasons carry the invocation's first error line (this
+  failure surfaced as a bare `code=1`). Notable: the independent review
+  completed — approve-with-nits with 1 P1 (a runtime-creation race loser never
+  stops the late-resolving child) + 4 P2s — so the next resumed run should
+  route into a fixer round on PR #18 before merge.
+
+- **2026-09-11 (I4 first run stopped — loop resume + full-series STATUS ids):**
+  the first I4 `--merge auto --dogfood on` run (46 min) stopped after its worker
+  had completed and opened PR #18: the worker wrote `STATUS: next=V1` — the
+  ROADMAP's post-I4 order is now V1, the first non-I/L id — and even folded the
+  planned grammar extension into its own branch with tests, but the running loop
+  validates docs against the grammar imported from `main` at launch, which still
+  accepted only I/L ids → docs-updated gate failure → "blocking state with no
+  known PR, not fixable" (the loop records the PR number only after the whole
+  gate batch passes). Fix-forward on `main` (conventional PR, outside the loop):
+  the STATUS grammar accepts `I/L/V/C` on `main` itself — the validating loop
+  must know a grammar before any worker writes it (the extension the V1/C1 rows
+  already required) — plus a resume path: startup recovers a checkout stranded
+  on an increment branch to synced `main` (fail-closed on a dirty tree), and an
+  unambiguous checkpoint (clean synced main, exactly one open PR, the
+  increment's branch prefix) resumes at assessment, skipping only the worker
+  re-dispatch — gates, both reviews, fixer, and head pinning all still judge the
+  resumed PR. PR #18 itself stays untouched for the resumed run to assess.
 
 - **2026-09-11 (V1 design, requested in conversation)** — new small increment
   **V1 — plugin release versioning** added to the plan (user request 2026-09-11,

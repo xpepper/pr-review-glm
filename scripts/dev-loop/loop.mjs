@@ -26,6 +26,10 @@ export async function runLoop(deps) {
     // Not wiring a head re-fetch fails closed: the loop refuses to merge a head
     // it cannot pin.
     fetchPrHead = async () => ({ error: "fetchPrHead not wired" }),
+    // Optional mid-iteration resume probe (spec Amendments): when it recognizes
+    // the checkpoint a previous run left (worker done, increment PR open), the
+    // iteration resumes at assessment instead of re-dispatching a worker.
+    findResumablePr = null,
     dogfood = false, mergeMode = "human", maxIterations = 1, cooldownSeconds = 60,
     sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     log = () => {},
@@ -55,14 +59,25 @@ export async function runLoop(deps) {
 
     const iteration = { increment: status.increment, prNumber: null, fixerRounds: 0, merged: false, outcome: "" };
     summary.iterations.push(iteration);
-    log(`increment ${iteration.increment}: preflight`);
 
-    const pre = await preflight(status);
-    const preFail = pre.find((g) => !g.ok);
-    if (preFail) return fail(`preflight gate ${preFail.name}: ${preFail.detail}`);
+    // Mid-iteration resume: adopting the checkpoint skips only the worker
+    // re-dispatch and the idle-repo preflight (the probe verified clean synced
+    // main, one open PR, the increment's branch). Everything downstream is
+    // unchanged — the resumed PR faces the full gates, both reviews, the fixer
+    // path, and head pinning before any merge.
+    const adopt = findResumablePr ? await findResumablePr(status) : null;
+    if (adopt) {
+      iteration.adopted = true;
+      log(`increment ${iteration.increment}: resuming — adopting open PR #${adopt.prNumber} (${adopt.headRefName})`);
+    } else {
+      log(`increment ${iteration.increment}: preflight`);
+      const pre = await preflight(status);
+      const preFail = pre.find((g) => !g.ok);
+      if (preFail) return fail(`preflight gate ${preFail.name}: ${preFail.detail}`);
 
-    const worker = await runWorker(status);
-    if (worker.code !== 0 || worker.timedOut) return fail(`worker failed (code=${worker.code}, timedOut=${worker.timedOut})`);
+      const worker = await runWorker(status);
+      if (worker.code !== 0 || worker.timedOut) return fail(`worker failed (code=${worker.code}, timedOut=${worker.timedOut})`);
+    }
 
     let fixerBudget = 2;
     // assess(): gates + all active reviews. Returns fatal / blocking / clean.
@@ -78,7 +93,11 @@ export async function runLoop(deps) {
       if (dogfood) reviewRuns.push({ name: "dogfood", result: await runDogfood(gates.prNumber) });
       for (const run of reviewRuns) {
         if (run.result.code !== 0 || run.result.timedOut) {
-          return { kind: "fatal", reason: `${run.name} review invocation failed (code=${run.result.code}, timedOut=${run.result.timedOut})` };
+          // Carry the invocation's first error line: a bare exit code turned the
+          // dogfood description skew into a root-cause hunt.
+          const firstLine = (run.result.stderr || run.result.stdout || "")
+            .split("\n").find((line) => line.trim()) ?? "";
+          return { kind: "fatal", reason: `${run.name} review invocation failed (code=${run.result.code}, timedOut=${run.result.timedOut})${firstLine ? `: ${firstLine.slice(0, 200)}` : ""}` };
         }
       }
       const judgments = reviewRuns.map((run) => ({ name: run.name, judgment: reviewBlocking(run.result.review) }));

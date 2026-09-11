@@ -13,6 +13,7 @@ import {
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
+import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
 
 const repoRoot = process.cwd();
 const artDir = join(repoRoot, ".dev-loop");
@@ -114,6 +115,20 @@ async function main() {
   const zcode = resolveZcodeCli();
   mkdirSync(artDir, { recursive: true });
   const run = (command, args, opts) => runCommand(command, args, opts);
+  // A previous run may have stopped mid-iteration (gate failure, killed
+  // process), leaving the checkout stranded on the increment branch: recover to
+  // synced main before anything reads HANDOFF — fail-closed on debris we cannot
+  // safely move (dirty tree, git failures) instead of dispatching phases.
+  const recovery = await recoverCheckout({ run, repoRoot });
+  if (recovery) {
+    if (recovery.ok) console.log(`[dev-loop] ${recovery.detail}`);
+    else {
+      const summary = { stopped: "failure", reason: `${recovery.name}: ${recovery.detail}`, iterations: [] };
+      console.error(`\n[dev-loop] stopped=failure reason=${summary.reason}`);
+      writeFileSync(join(artDir, "report-last.json"), `${JSON.stringify(summary, null, 2)}\n`);
+      process.exit(1);
+    }
+  }
   // The increment under work is captured from the pre-worker STATUS: after the
   // worker rewrites HANDOFF, its STATUS names the NEXT increment, which is not
   // what gateDocsUpdated must validate.
@@ -127,6 +142,15 @@ async function main() {
       await gateTests({ run, repoRoot }),
       await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }),
     ],
+    // Mid-iteration resume (spec Amendments): recognize the checkpoint a
+    // previous run left after its worker completed and skip straight to
+    // assessment. On adoption no worker runs, so the increment under work is
+    // this one — the resumed PR already carries its docs rewrite.
+    findResumablePr: async (status) => {
+      const adopt = await findResumablePr({ run, repoRoot, increment: status.increment });
+      if (adopt) workedIncrement = status.increment;
+      return adopt;
+    },
     runWorker: (status) => {
       workedIncrement = status.increment;
       return phaseRunner({
