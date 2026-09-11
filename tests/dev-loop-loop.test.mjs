@@ -31,6 +31,12 @@ function deps(overrides = {}) {
     sleep: async (ms) => calls.sleeps.push(ms),
     log: () => {},
   };
+  // Since I3, --merge auto requires the dogfood review; tests that opt into
+  // auto without saying otherwise run with it on (the one refusal test below
+  // passes dogfood:false explicitly).
+  if (overrides.mergeMode === "auto" && overrides.dogfood === undefined) {
+    overrides = { ...overrides, dogfood: true };
+  }
   return { deps: { ...base, ...overrides }, calls };
 }
 
@@ -84,16 +90,20 @@ describe("runLoop merge modes (L2)", () => {
     assert.equal(calls.dogfood, 1);
     assert.equal(calls.merge, 0);
   });
-  it("auto with dogfood off: merges on the independent review alone, runs post-merge gates", async () => {
-    const { deps: d, calls } = deps({ mergeMode: "auto" });
+  it("auto with dogfood off (pre-I3 behavior, now refused): stops before dispatching anything", async () => {
+    const { deps: d, calls } = deps({ mergeMode: "auto", dogfood: false });
     const summary = await runLoop(d);
-    assert.equal(summary.stopped, "completed");
-    assert.equal(calls.merge, 1);
-    assert.equal(calls.mergedPr, 7);
-    assert.equal(calls.postMerge, 1);
-    assert.equal(calls.dogfood, 0);
-    assert.equal(summary.iterations[0].merged, true);
-    assert.equal(summary.iterations[0].outcome, "merged");
+    assert.equal(summary.stopped, "failure");
+    assert.match(summary.reason, /requires --dogfood on/);
+    assert.equal(calls.worker, 0, "nothing must be dispatched");
+  });
+  it("dogfood on without a dogfood runner wired: fails closed", async () => {
+    const { deps: d, calls } = deps({ dogfood: true });
+    delete d.runDogfood;
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "failure");
+    assert.match(summary.reason, /not wired/);
+    assert.equal(calls.worker, 0);
   });
   it("auto with dogfood on: requires both reviews clean, then merges", async () => {
     const { deps: d, calls } = deps({ mergeMode: "auto", dogfood: true });

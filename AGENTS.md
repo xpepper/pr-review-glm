@@ -120,9 +120,12 @@ upstream `lib/` reused with attribution.
 ## Conventions
 
 - Plain ESM JavaScript (`.mjs`) for the extension and modules; no build step in v1.
-- Tests: `node --test` unit tests + no-inference smoke scripts under `tests/` (SDK-dispatch
+- Tests: `node --test` unit tests + smoke scripts under `tests/` (SDK-dispatch
   smoke scripts share `tests/smoke-harness.mjs` — extend it, don't fork it; script smokes
   that never touch the Copilot SDK, like `tests/smoke-l1.mjs`, don't use the harness).
+  smoke-i1/i2 are no-inference; `tests/smoke-i3.mjs` dispatches a real review whose lane
+  child performs inference **by design** — the harness still asserts the parent session
+  stream stays inference-free.
 - Any code ported from upstream pi-pr-review keeps provenance: note it in
   `docs/ATTRIBUTION.md` (module, upstream version, commit) — see the attribution policy there.
 - Keep model-influenced output out of authority paths: gates, anchors, publication
