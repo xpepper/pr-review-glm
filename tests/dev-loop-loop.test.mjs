@@ -125,10 +125,24 @@ describe("runLoop merge modes (L2)", () => {
     assert.equal(calls.merge, 0);
   });
   it("auto: a crashed reviewer is fatal and never merges", async () => {
-    const { deps: d, calls } = deps({ mergeMode: "auto", runReviewer: async () => ({ code: 1, timedOut: false, review: undefined }) });
+    const { deps: d, calls } = deps({ mergeMode: "auto", runReviewer: async () => ({ code: 1, stdout: "", stderr: "", timedOut: false, review: undefined }) });
     const summary = await runLoop(d);
     assert.equal(summary.stopped, "failure");
     assert.equal(calls.fixer, 0);
+    assert.equal(calls.merge, 0);
+  });
+  it("fatal review invocations carry the invocation's first error line in the reason", async () => {
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      runReviewer: async () => ({
+        code: 1, stdout: "",
+        stderr: "Error: Timed out waiting for plugin commands; registered: z-pr-review (unexpected description)\n    at somewhere",
+        timedOut: false, review: undefined,
+      }),
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "failure");
+    assert.match(summary.reason, /review invocation failed \(code=1, timedOut=false\): Error: Timed out waiting for plugin commands/);
     assert.equal(calls.merge, 0);
   });
   it("auto: gate blocking with no known PR fails fast instead of dispatching the fixer", async () => {

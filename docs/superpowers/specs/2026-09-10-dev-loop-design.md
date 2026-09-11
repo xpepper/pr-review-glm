@@ -213,3 +213,23 @@ automatic ROADMAP re-planning.
   full gates, both reviews, the fixer path, and head pinning before any merge,
   and blocking gates with no known PR still stop loudly rather than dispatching
   a fixer.
+
+- **2026-09-11 (loop↔plugin protocol surfaces must change on main first — dogfood
+  description skew, second post-I4-run fix):** the resumed I4 run (post-resume
+  fix) adopted the increment PR cleanly and ran gates + the independent review,
+  then stopped at the dogfood invocation (bare `code=1`): the running loop's
+  `dogfood.mjs`, imported from `main` at launch, asserts the `/z-pr-review`
+  registration description at dispatch — and the I4 branch registers a new
+  description ("concurrent tiered reviewer lanes" vs main's "a heavy reviewer
+  lane"); the worker had updated the expected string only on its own branch,
+  invisible to the validating process. Together with the STATUS-grammar skew
+  this generalizes into a rule: every surface the running loop validates or
+  parses out of the increment PR — the `STATUS:` grammar, the command
+  descriptions, the machine-summary shape — is protocol between main's loop
+  code and the branch's plugin, and must change ON MAIN (a supervisor fix PR)
+  before the increment that emits it lands; the worker prompt now forbids
+  changing these inside an increment PR and directs the worker to flag the need
+  instead. Landed with it: the dogfood expected-description and verdict-title
+  updates ported from the I4 branch, and fatal review-invocation reasons now
+  carry the invocation's first error line so the `stopped=` line names the
+  actual failure.
