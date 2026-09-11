@@ -212,6 +212,56 @@ describe("runLoop head pinning (auto only)", () => {
   });
 });
 
+describe("runLoop mid-iteration resume", () => {
+  it("adopts a resumable PR: no preflight, no worker dispatch, assessment proceeds to merge", async () => {
+    let preflights = 0;
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      findResumablePr: async () => ({ prNumber: 18, headRefName: "i4-topologies-tiers" }),
+      preflight: async () => { preflights++; return [gate("idle")]; },
+      workerGates: async () => {
+        calls.assessments++;
+        return { results: [gate("pr", true, "PR #18")], prNumber: 18, headRefOid: HEAD_A };
+      },
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "completed");
+    assert.equal(preflights, 0);
+    assert.equal(calls.worker, 0);
+    assert.equal(calls.reviewer, 1);
+    assert.equal(calls.dogfood, 1);
+    assert.equal(calls.merge, 1);
+    assert.equal(calls.mergedPr, 18);
+    assert.equal(summary.iterations[0].adopted, true);
+    assert.equal(summary.iterations[0].merged, true);
+  });
+  it("probe returns null: normal path with preflight and worker", async () => {
+    let preflights = 0;
+    const { deps: d, calls } = deps({
+      findResumablePr: async () => null,
+      preflight: async () => { preflights++; return [gate("idle")]; },
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "awaiting-human-merge");
+    assert.equal(preflights, 1);
+    assert.equal(calls.worker, 1);
+    assert.equal(summary.iterations[0].adopted, undefined);
+  });
+  it("adoption keeps the protective fail-stop: blocking gates with no PR number never dispatch a fixer", async () => {
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      findResumablePr: async () => ({ prNumber: 18, headRefName: "i4-x" }),
+      workerGates: async () => ({ results: [gate("docs-updated", false, "HANDOFF STATUS is invalid")], prNumber: null }),
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "failure");
+    assert.match(summary.reason, /no known PR/);
+    assert.equal(calls.worker, 0);
+    assert.equal(calls.fixer, 0);
+    assert.equal(calls.merge, 0);
+  });
+});
+
 describe("runLoop fixer and iteration flow", () => {
   it("routes blocking findings to the fixer, then re-assesses", async () => {
     let reviews = 0;
