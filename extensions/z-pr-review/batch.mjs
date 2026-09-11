@@ -39,7 +39,7 @@ async function runLaneUnderBudget({
       attempts.push({ model: attempt.model, label: attempt.label, status: "failed", reason: "budget expired before dispatch" });
       break;
     }
-    const outcome = await runLane({
+    let outcome = await runLane({
       lane,
       envelope,
       config,
@@ -53,10 +53,13 @@ async function runLaneUnderBudget({
       // A child-runtime startup failure (spawn, auth, SDK construction) is a
       // failed lane attempt, never a batch-wide rejection: sibling lanes keep
       // their classification and the report stays an incomplete-review
-      // disclosure instead of disappearing.
+      // disclosure instead of disappearing. An error carrying a cleanup status
+      // (a creation whose late child could not be confirmed stopped) keeps it,
+      // so the fallback-skip rule below applies.
       const failed = {
         status: "failed",
         reason: `lane error: ${String(error?.message ?? error)}`,
+        cleanup: error?.cleanup,
         findings: [],
         dropped: [],
         laneText: "",
@@ -65,6 +68,19 @@ async function runLaneUnderBudget({
       };
       return failed;
     });
+    // A completed lane whose child cleanup timed out or failed is NOT a
+    // completed lane: its findings are not claimed and the run is disclosed
+    // as incomplete (one live runtime per lane — a lane that did not shut its
+    // child down cleanly did not cleanly finish).
+    if (outcome.status === "complete" && (outcome.cleanup === "timed-out" || outcome.cleanup === "failed")) {
+      outcome = {
+        ...outcome,
+        status: "failed",
+        reason: `child cleanup ${outcome.cleanup} after lane completion`,
+        findings: [],
+        dropped: [],
+      };
+    }
     // A prior child whose stop failed or hung must not be walked over by a
     // fallback attempt: one live runtime per lane, so an unresolved cleanup
     // ends the lane (disclosed) instead of risking two live children.
@@ -105,7 +121,8 @@ export function batchStatus(laneResults) {
   if (failed.length === laneResults.length) {
     return { status: "failed", reason: `every lane failed: ${incomplete}` };
   }
-  return { status: "partial", reason: `${failed.length} of ${laneResults.length} lane(s) failed: ${incomplete}` };
+  const lanes = `${laneResults.length} lane${laneResults.length === 1 ? "" : "s"}`;
+  return { status: "partial", reason: `${failed.length} of ${lanes} failed: ${incomplete}` };
 }
 
 // Runs the mode's lanes concurrently (concurrency = topology size, upstream
@@ -143,13 +160,28 @@ export async function runLaneBatch({
         totalEndAt,
         signal,
       });
-      // Progress reporting is not a lane result: a throwing onLaneDone is
-      // recorded on the lane (disclosed) instead of rejecting the batch and
-      // discarding the already-settled lane results.
-      try {
-        await onLaneDone?.(lane, result);
-      } catch (error) {
-        result.progressError = `progress reporting failed: ${String(error?.message ?? error)}`;
+      if (onLaneDone) {
+        // Progress reporting is not a lane result: a throwing or hanging
+        // onLaneDone is recorded on the lane (disclosed) instead of rejecting
+        // the batch or holding it past the total budget. The callback is
+        // bounded by totalEndAt — never awaited beyond the review's hard cap.
+        const PROGRESS_TIMEOUT = Symbol("progress-timeout");
+        let progressTimer;
+        try {
+          const reported = await Promise.race([
+            Promise.resolve(onLaneDone(lane, result)),
+            new Promise((resolve) => {
+              progressTimer = setTimeout(() => resolve(PROGRESS_TIMEOUT), Math.max(1, totalEndAt - Date.now()));
+            }),
+          ]);
+          if (reported === PROGRESS_TIMEOUT) {
+            result.progressError = "progress reporting exceeded the total budget; not awaited further";
+          }
+        } catch (error) {
+          result.progressError = `progress reporting failed: ${String(error?.message ?? error)}`;
+        } finally {
+          clearTimeout(progressTimer);
+        }
       }
       return result;
     }),

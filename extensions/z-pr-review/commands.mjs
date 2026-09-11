@@ -163,10 +163,11 @@ export function renderReview(capture, batch) {
   const dropped = batch.lanes.reduce((total, lane) => total + (lane.status === "complete" ? lane.dropped.length : 0), 0);
   const lines = [
     `Reviewed PR #${capture.number} — "${capture.title}" (${capture.repo})`,
-    `Mode: ${batch.mode} — ${batch.lanes.length} lane(s), ${Math.round(batch.elapsedMs / 100) / 10}s`,
+    `Mode: ${batch.mode} — ${batch.lanes.length} lane${batch.lanes.length === 1 ? "" : "s"}, ${Math.round(batch.elapsedMs / 100) / 10}s`,
   ];
   for (const lane of batch.lanes) {
-    const tail = lane.status === "complete" ? `complete — ${lane.findings.length} finding(s)` : `FAILED (${lane.reason})`;
+    const findingsWord = `${lane.findings.length} finding${lane.findings.length === 1 ? "" : "s"}`;
+    const tail = lane.status === "complete" ? `complete — ${findingsWord}` : `FAILED (${lane.reason})`;
     lines.push(`- ${lane.laneId} (${lane.tier}, ${lane.modelLabel}): ${tail}`);
   }
   if (batch.status === "complete") {
@@ -183,11 +184,11 @@ export function renderReview(capture, batch) {
       }
     }
     if (dropped > 0) {
-      lines.push(`Dropped ${dropped} malformed candidate finding(s) — disclosed, not hidden.`);
+      lines.push(`Dropped ${dropped} malformed candidate finding${dropped === 1 ? "" : "s"} — disclosed, not hidden.`);
     }
   } else {
     lines.push(
-      `Coverage: ${batch.lanes.filter((lane) => lane.status === "complete").length}/${batch.lanes.length} lane(s) completed — ${batch.reason}`,
+      `Coverage: ${batch.lanes.filter((lane) => lane.status === "complete").length}/${batch.lanes.length} lane${batch.lanes.length === 1 ? "" : "s"} completed — ${batch.reason}`,
     );
     lines.push("This is an incomplete review, never a clean one; failed lanes' findings are not claimed.");
   }

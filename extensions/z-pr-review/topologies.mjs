@@ -118,5 +118,5 @@ export function describeTopology(mode) {
   const parts = ["light", "medium", "heavy"]
     .filter((tier) => counts.has(tier))
     .map((tier) => `${counts.get(tier)} ${tier}`);
-  return `${lanes.length} lanes (${parts.join(", ")})`;
+  return `${lanes.length} lane${lanes.length === 1 ? "" : "s"} (${parts.join(", ")})`;
 }

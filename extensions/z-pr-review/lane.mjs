@@ -190,15 +190,18 @@ export async function runLane({
   });
   // A child runtime that never finishes spawning must not eat past the
   // attempt budget uncounted; parent cancellation must not wait out the
-  // creation window either. And a runtime that finishes spawning AFTER the
-  // race below was lost (deadline or cancellation) must not survive as a
-  // second live child next to whatever attempt follows — it is stopped the
-  // moment it resolves. `abandoned` flips only when the race is lost, so a
-  // creation that wins is never stopped here.
+  // creation window either. The creation race fires one cleanup grace BEFORE
+  // deadlineAt, so a creation that loses the deadline race still has until
+  // deadlineAt to settle and be stopped inside the budget. And a runtime that
+  // finishes spawning AFTER the race below was lost (deadline or cancellation)
+  // must not survive as a second live child next to whatever attempt follows —
+  // it is stopped the moment it resolves. `abandoned` flips only when the race
+  // is lost, so a creation that wins is never stopped here.
   let abandoned = false;
+  let lateStop = null;
   creation.then(
     ({ client: lateClient }) => {
-      if (abandoned) lateClient.stop().catch(() => {});
+      if (abandoned) lateStop = stopBounded(() => lateClient.stop(), deadlineAt);
     },
     () => {},
   );
@@ -209,7 +212,7 @@ export async function runLane({
     new Promise((_, reject) => {
       creationTimer = setTimeout(
         () => reject(new Error("runtime creation exceeded the attempt budget")),
-        Math.max(1, deadlineAt - Date.now()),
+        Math.max(1, deadlineAt - Date.now() - CLEANUP_GRACE_MS),
       );
     }),
     ...(signal
@@ -229,7 +232,31 @@ export async function runLane({
   } catch (error) {
     abandoned = true;
     if (error instanceof LaneError) {
+      // Cancellation: the batch's loop breaks on the aborted signal, so no
+      // fallback follows this lane and there is nothing to wait for here — a
+      // creation that resolves later is stopped best-effort by the handler above.
       return { status: "failed", reason: error.reason, findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
+    }
+    // Deadline lost: the creation may still resolve into a live child. Wait
+    // (bounded by deadlineAt — the grace the race reserved above) for it to
+    // settle and be stopped, so a fallback attempt never starts beside a
+    // possibly-live child (one live runtime per lane). `lateStop` is assigned
+    // by the handler registered before this await, synchronously when the
+    // creation resolves.
+    const late = await Promise.race([
+      creation.then(
+        () => lateStop ?? Promise.resolve("settled"),
+        () => "settled",
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("timed-out"), Math.max(1, deadlineAt - Date.now()))),
+    ]);
+    if (late !== "settled") {
+      // The child could not be confirmed stopped: carry a cleanup status the
+      // batch reads to skip the fallback (same rule as a failed post-drive
+      // cleanup) and disclose why.
+      const failure = new Error(`runtime creation exceeded the attempt budget; late child cleanup ${late}, fallback skipped`);
+      failure.cleanup = late;
+      throw failure;
     }
     throw error;
   } finally {
@@ -237,11 +264,15 @@ export async function runLane({
     for (const detach of detachCreationAbort) detach();
   }
   // An abort that arrived while the runtime was being created must not be
-  // swallowed: the freshly created child is stopped before it is ever sent a
-  // prompt (adding a listener to an already-aborted signal replays nothing).
+  // swallowed: the freshly created child is stopped (bounded — never past
+  // deadlineAt) before it is ever sent a prompt (adding a listener to an
+  // already-aborted signal replays nothing).
   if (signal?.aborted) {
-    await client.stop().catch(() => {});
-    return { status: "failed", reason: "cancelled during runtime creation", findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
+    const cleanup = await stopBounded(() => client.stop(), deadlineAt);
+    const reason = cleanup === "settled"
+      ? "cancelled during runtime creation"
+      : `cancelled during runtime creation (child cleanup ${cleanup})`;
+    return { status: "failed", reason, cleanup, findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
   }
   const result = await driveLane(session, {
     prompt,
@@ -276,15 +307,53 @@ async function defaultCreateRuntime({ cliPath, repoRoot, model, reasoningEffort,
 // possibly-live prior child (one live runtime per lane).
 const CLEANUP_GRACE_MS = 5_000;
 
+// Runs a child stop and reports how it went, never waiting past `until`
+// (epoch ms). The stop itself keeps running best-effort if it outlives the
+// window, but no caller ever blocks on it past the attempt budget.
+async function stopBounded(stop, until) {
+  const graceMs = Math.max(1, Math.min(CLEANUP_GRACE_MS, until - Date.now()));
+  return new Promise((settled) => {
+    let done = false;
+    const grace = setTimeout(() => {
+      if (done) return;
+      done = true;
+      settled("timed-out");
+    }, graceMs);
+    Promise.resolve(stop()).then(
+      () => {
+        if (done) return;
+        done = true;
+        clearTimeout(grace);
+        settled("settled");
+      },
+      () => {
+        if (done) return;
+        done = true;
+        clearTimeout(grace);
+        settled("failed");
+      },
+    );
+  });
+}
+
 async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }) {
   const outcome = { status: "failed", reason: "", findings: [], dropped: [], laneText: "", cleanup: "none" };
   const { promise, resolve, reject } = Promise.withResolvers();
   promise.catch(() => {});
+  // A session.send that never settles (e.g. it hangs after the child already
+  // emitted session.idle) must not hold the attempt open past its deadline:
+  // once the outcome settles, send is no longer awaited. A send rejection
+  // before that still fails the attempt.
+  let outcomeSettled = false;
+  const settle = (settleWith) => {
+    outcomeSettled = true;
+    settleWith();
+  };
   let timer = null;
   const onAbort = () => {
     outcome.reason = "cancelled";
     session.abort?.().catch(() => {});
-    reject(new LaneError("cancelled"));
+    settle(() => reject(new LaneError("cancelled")));
   };
   // Cleanup is awaited (within its grace) before the attempt settles so a
   // fallback attempt never starts while the prior child runtime is still
@@ -294,35 +363,10 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
     if (!cleanup) return;
-    await new Promise((settled) => {
-      let done = false;
-      // Clip the grace to the attempt's remaining budget: cleanup may be
-      // started (the stop still runs, best-effort) but is never awaited past
-      // deadlineAt.
-      const graceMs = Math.max(1, Math.min(CLEANUP_GRACE_MS, deadlineAt - Date.now()));
-      const grace = setTimeout(() => {
-        if (done) return;
-        done = true;
-        outcome.cleanup = "timed-out";
-        settled();
-      }, graceMs);
-      cleanup().then(
-        () => {
-          if (done) return;
-          done = true;
-          clearTimeout(grace);
-          outcome.cleanup = "settled";
-          settled();
-        },
-        () => {
-          if (done) return;
-          done = true;
-          clearTimeout(grace);
-          outcome.cleanup = "failed";
-          settled();
-        },
-      );
-    });
+    // The stop grace is clipped to the attempt's remaining budget: cleanup may
+    // be started (the stop still runs, best-effort) but is never awaited past
+    // deadlineAt.
+    outcome.cleanup = await stopBounded(cleanup, deadlineAt);
   };
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
   // Reserve the cleanup grace inside the attempt window so the drive deadline
@@ -331,7 +375,7 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
   timer = setTimeout(() => {
     outcome.reason = `deadline exceeded after ${deadlineMs}ms`;
     session.abort?.().catch(() => {});
-    reject(new LaneError(outcome.reason));
+    settle(() => reject(new LaneError(outcome.reason)));
   }, deadlineMs);
   const unsubscribe = session.on((event) => {
     switch (event.type) {
@@ -340,35 +384,50 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
         break;
       case "session.error":
         outcome.reason = event.data.message ?? "session error";
-        reject(new LaneError(outcome.reason));
+        settle(() => reject(new LaneError(outcome.reason)));
         break;
       case "session.shutdown":
         outcome.reason = "session shut down before completion";
-        reject(new LaneError(outcome.reason));
+        settle(() => reject(new LaneError(outcome.reason)));
         break;
       case "session.idle": {
         const unwrapped = unwrapLaneOutput(outcome.laneText);
         if (unwrapped.status === "malformed") {
           outcome.reason = `output contract violated: ${unwrapped.reason}`;
-          reject(new LaneError(outcome.reason));
+          settle(() => reject(new LaneError(outcome.reason)));
           break;
         }
         const parsed = parseFindings(unwrapped.payload);
         if (parsed.status === "malformed") {
           outcome.reason = `output contract violated: ${parsed.reason}`;
-          reject(new LaneError(outcome.reason));
+          settle(() => reject(new LaneError(outcome.reason)));
           break;
         }
         outcome.status = "complete";
         outcome.findings = parsed.findings;
         outcome.dropped = parsed.dropped;
-        resolve(outcome);
+        settle(() => resolve(outcome));
         break;
       }
     }
   });
   try {
-    await Promise.all([session.send({ prompt }), promise]);
+    const sendPromise = session.send({ prompt });
+    const sendGuard = sendPromise.catch((error) => {
+      if (outcomeSettled) return;
+      throw error;
+    });
+    // sendGuard's rejection is consumed by the await below; keep an
+    // observation on sendPromise itself so a post-settlement rejection never
+    // surfaces as an unhandled rejection.
+    sendPromise.catch(() => {});
+    // Resolves only when the outcome settles; a send rejection before that
+    // fails the attempt early. A send that merely succeeds (or hangs) never
+    // ends the attempt — only the outcome or the deadline does.
+    await new Promise((resolveAttempt, rejectAttempt) => {
+      promise.then(resolveAttempt, rejectAttempt);
+      sendGuard.catch((error) => rejectAttempt(error));
+    });
     return outcome;
   } catch (error) {
     // A session.send rejection arriving after the outcome already settled as

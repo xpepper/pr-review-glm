@@ -142,7 +142,7 @@ async function runReview(parsed) {
       repoRoot: process.cwd(),
       onLaneDone: async (lane, result) => {
         const tail = result.status === "complete"
-          ? `complete — ${result.findings.length} finding(s)`
+          ? `complete — ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}`
           : `FAILED (${result.reason})`;
         await session.log(`Lane ${lane.id} (${lane.tier}): ${tail}`);
       },
@@ -165,11 +165,14 @@ async function runReview(parsed) {
 }
 
 function modelLabelFor(config, laneResult) {
-  // The label names the model that actually produced the lane's findings —
-  // the completing attempt's model (a fallback completion is not misreported
-  // as the primary); failed lanes fall back to the tier's configured model.
-  const completing = laneResult.attempts?.filter((attempt) => attempt.status === "complete").at(-1);
-  if (completing !== undefined) return completing.model ?? "session default model";
+  // The label names the model that actually ran for this lane — the most
+  // recent attempt's model. For a completed lane that is the completing
+  // attempt; for a failed lane it is whichever model the lane was last run on
+  // (the fallback when it got that far), never a misreport of the tier
+  // default. Lanes without attempt records (none today) fall back to the
+  // tier's configured model.
+  const last = laneResult.attempts?.at(-1);
+  if (last !== undefined) return last.model ?? "session default model";
   return config.tiers[laneResult.tier].model ?? "session default model";
 }
 

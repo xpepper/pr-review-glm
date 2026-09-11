@@ -318,6 +318,50 @@ describe("runLane (driven child runtime, any tier)", () => {
     await new Promise((resolve) => setTimeout(resolve, 60));
     assert.equal(stopped, true, "the runtime created after cancellation is stopped");
   });
+  it("settles a complete attempt on session.idle without waiting for session.send to settle", async () => {
+    // A child that emits its answer and then hangs inside send must not hold
+    // the attempt open: once the outcome settles (idle), send is no longer
+    // awaited and the attempt deadline cannot be bypassed indefinitely.
+    const listeners = [];
+    const session = {
+      send: () => {
+        for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([{ severity: "P2", title: "t" }]) } });
+        for (const fn of listeners) fn({ type: "session.idle" });
+        return new Promise(() => {});
+      },
+      abort: async () => {},
+      on: (fn) => (listeners.push(fn), () => {}),
+    };
+    const startedAt = Date.now();
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime: async () => ({ client: { stop: async () => [] }, session }),
+    });
+    assert.equal(outcome.status, "complete");
+    assert.deepEqual(outcome.findings, [{ severity: "P2", title: "t" }]);
+    assert.ok(Date.now() - startedAt < 5_000, "a hanging send after idle must not delay the attempt");
+  });
+  it("fails the attempt when session.send rejects before the outcome settles", async () => {
+    const session = {
+      send: () => Promise.reject(new Error("send refused")),
+      abort: async () => {},
+      on: () => () => {},
+    };
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime: async () => ({ client: { stop: async () => [] }, session }),
+    });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /send refused/);
+  });
   it("keeps a complete outcome's reason intact when session.send rejects after session.idle", async () => {
     const listeners = [];
     const session = {
@@ -432,9 +476,9 @@ describe("topologies (mode lane sets)", () => {
       }
     }
   });
-  it("describes and recognizes modes", () => {
+  it("describes and recognizes modes, singular when a topology has one lane", () => {
     assert.equal(describeTopology("balanced"), "5 lanes (1 light, 4 heavy)");
-    assert.equal(describeTopology("deep"), "1 lanes (1 heavy)");
+    assert.equal(describeTopology("deep"), "1 lane (1 heavy)");
     assert.ok(isReviewMode("full"));
     assert.ok(!isReviewMode("mega"));
   });
@@ -448,7 +492,7 @@ describe("batchStatus (lifecycle classification)", () => {
   it("is partial when some lanes completed, failed when none did, always disclosing reasons", () => {
     const partial = batchStatus([done("a"), done("b", { status: "failed", reason: "deadline exceeded" })]);
     assert.equal(partial.status, "partial");
-    assert.match(partial.reason, /1 of 2 lane\(s\) failed: b \(deadline exceeded\)/);
+    assert.match(partial.reason, /1 of 2 lanes failed: b \(deadline exceeded\)/);
     const failed = batchStatus([done("a", { status: "failed", reason: "boom" }), done("b", { status: "failed", reason: "bam" })]);
     assert.equal(failed.status, "failed");
     assert.match(failed.reason, /every lane failed: a \(boom\); b \(bam\)/);
@@ -649,6 +693,88 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     assert.equal(runtimes, 1, "no second child is created over a possibly-live first");
     assert.match(batch.reason, /overloaded; child cleanup timed-out, fallback skipped/);
   });
+  it("classifies a completed lane whose child cleanup timed out as failed, never complete", async () => {
+    // The lane's child answers cleanly but its stop hangs: the lane did not
+    // shut its child down, so its findings are not claimed and the fallback
+    // is skipped (one live runtime per lane).
+    let runtimes = 0;
+    const createRuntime = async () => {
+      runtimes += 1;
+      const listeners = [];
+      const session = {
+        send: async () => {
+          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([{ severity: "P1", title: "t" }]) } });
+          for (const fn of listeners) fn({ type: "session.idle" });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: () => new Promise(() => {}) }, session };
+    };
+    const config = structuredClone(laneConfig);
+    config.tiers.heavy.fallback = "zai/glm-4.6-air";
+    config.deadlines.attemptMs.heavy = 60;
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "failed");
+    assert.equal(runtimes, 1, "no fallback attempt over a child whose cleanup hung");
+    assert.match(batch.reason, /child cleanup timed-out after lane completion.*fallback skipped/);
+    assert.deepEqual(batch.lanes[0].findings, [], "findings from a lane with unresolved cleanup are not claimed");
+  });
+  it("does not dispatch a fallback while a timed-out runtime creation may still produce a live child", async () => {
+    let runtimes = 0;
+    const createRuntime = () => {
+      runtimes += 1;
+      return new Promise(() => {}); // never settles — may still spawn a child
+    };
+    const config = structuredClone(laneConfig);
+    config.tiers.heavy.fallback = "zai/glm-4.6-air";
+    config.deadlines.attemptMs.heavy = 40;
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "failed");
+    assert.equal(runtimes, 1, "no fallback child is created while the primary creation is unresolved");
+    assert.match(batch.reason, /late child cleanup timed-out, fallback skipped/);
+  });
+  it("bounds a hanging progress callback by the total budget, disclosing it on the lane", async () => {
+    const createRuntime = async () => {
+      const listeners = [];
+      const session = {
+        send: async () => {
+          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([]) } });
+          for (const fn of listeners) fn({ type: "session.idle" });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: async () => [] }, session };
+    };
+    const config = structuredClone(laneConfig);
+    config.deadlines.totalMs = 80;
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config,
+      repoRoot: process.cwd(),
+      createRuntime,
+      onLaneDone: () => new Promise(() => {}), // never reports
+    });
+    assert.equal(batch.status, "complete", "lane results are not discarded by a hanging progress callback");
+    assert.match(batch.lanes[0].progressError, /exceeded the total budget/);
+  });
   it("refuses an empty topology", async () => {
     await assert.rejects(
       runLaneBatch({ mode: "empty", lanes: [], envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), createRuntime: async () => { throw new Error("nope"); } }),
@@ -823,9 +949,9 @@ describe("renderReview (lane batch)", () => {
   it("renders the mode, per-lane lines, findings with lane attribution, and the machine summary", () => {
     const text = renderReview(capture, completeBatch);
     assert.match(text, /Reviewed PR #15 — "I4"/);
-    assert.match(text, /^Mode: balanced — 2 lane\(s\)/m);
-    assert.match(text, /^- overview \(light, session default model\): complete — 0 finding\(s\)$/m);
-    assert.match(text, /^- correctness \(heavy, zai\/glm-4\.7\): complete — 1 finding\(s\)$/m);
+    assert.match(text, /^Mode: balanced — 2 lanes/m);
+    assert.match(text, /^- overview \(light, session default model\): complete — 0 findings$/m);
+    assert.match(text, /^- correctness \(heavy, zai\/glm-4\.7\): complete — 1 finding$/m);
     assert.match(text, /- \[P1\] leaks the key \[correctness\] — a\.mjs:4/);
     assert.match(text, /Dropped 1 malformed candidate finding/);
     const machine = /```z-pr-review-findings\n([\s\S]*?)```/.exec(text);
@@ -882,10 +1008,10 @@ describe("renderReview (lane batch)", () => {
       dropped: [],
     };
     batch.status = "partial";
-    batch.reason = "1 of 2 lane(s) failed: correctness (deadline exceeded after 1ms)";
+    batch.reason = "1 of 2 lanes failed: correctness (deadline exceeded after 1ms)";
     const text = renderReview(capture, batch);
     assert.match(text, /^- correctness \(heavy, zai\/glm-4\.7\): FAILED \(deadline exceeded/m);
-    assert.match(text, /Coverage: 1\/2 lane\(s\) completed/);
+    assert.match(text, /Coverage: 1\/2 lanes completed/);
     assert.match(text, /incomplete review, never a clean one/);
     const machine = JSON.parse(/```z-pr-review-findings\n([\s\S]*?)```/.exec(text)[1]);
     assert.equal(machine.status, "partial");
