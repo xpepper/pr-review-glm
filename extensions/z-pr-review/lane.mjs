@@ -477,6 +477,10 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
     const sendPromise = session.send({ prompt });
     const sendGuard = sendPromise.catch((error) => {
       if (outcomeSettled) return;
+      // A send rejection is terminal for the attempt: flipping the guard here
+      // keeps an already-queued session.idle from relabeling the failed send
+      // as a completed lane after the await below has already moved on.
+      outcomeSettled = true;
       throw error;
     });
     // sendGuard's rejection is consumed by the await below; keep an

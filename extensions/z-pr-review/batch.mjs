@@ -192,10 +192,14 @@ export async function runLaneBatch({
     }),
   );
   // Stops whose bounded grace expired during the batch keep running
-  // best-effort; one final bounded sweep retires any that settled since,
-  // inside the total budget. What still remains is reported, not hidden — a
-  // hung child runtime is never silently forgotten.
-  const unconfirmedStops = await drainUnconfirmedStops(Date.now() + FINAL_STOP_SWEEP_MS);
+  // best-effort; one final bounded sweep retires any that settled since. The
+  // sweep deadline is clipped to the batch and total budgets — the caps bound
+  // the whole run including this sweep, so it never adds time past them. What
+  // still remains is reported, not hidden — a hung child runtime is never
+  // silently forgotten.
+  const unconfirmedStops = await drainUnconfirmedStops(
+    Math.min(Date.now() + FINAL_STOP_SWEEP_MS, batchEndAt, totalEndAt),
+  );
   return {
     mode,
     lanes: laneResults,

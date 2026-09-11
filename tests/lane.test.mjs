@@ -366,6 +366,42 @@ describe("runLane (driven child runtime, any tier)", () => {
     assert.equal(outcome.status, "failed");
     assert.match(outcome.reason, /send refused/);
   });
+  it("does not relabel a rejected send as a completed lane when a later idle event arrives", async () => {
+    // Regression: the send rejection used to settle the attempt without
+    // flipping the outcome guard, so a queued session.idle could still run and
+    // mark the failed attempt complete.
+    const listeners = [];
+    const session = {
+      send: () =>
+        new Promise((_, reject) => {
+          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([{ severity: "P2", title: "t" }]) } });
+          reject(new Error("send refused"));
+          // The idle arrives after the rejection has been observed (as the SDK
+          // would deliver it) — it must not relabel the failed attempt.
+          setTimeout(() => {
+            for (const fn of listeners) fn({ type: "session.idle" });
+          }, 1);
+        }),
+      abort: async () => {},
+      on: (fn) => (listeners.push(fn), () => {}),
+    };
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime: async () => ({
+        // Cleanup takes a moment so the deferred idle fires while the listener
+        // is still subscribed — the exact window the relabel bug lived in.
+        client: { stop: () => new Promise((resolve) => setTimeout(resolve, 20)) },
+        session,
+      }),
+    });
+    assert.equal(outcome.status, "failed", "a rejected send stays a failed attempt");
+    assert.match(outcome.reason, /send refused/);
+    assert.deepEqual(outcome.findings, [], "a lane whose send rejected claims no findings");
+  });
   it("keeps a complete outcome's reason intact when session.send rejects after session.idle", async () => {
     const listeners = [];
     const session = {
@@ -1226,5 +1262,39 @@ describe("lane lifecycle regressions (PR #18 review round)", () => {
       "a hung stop is still registered after the batch's final sweep, never silently dropped",
     );
     assert.ok(pendingUnconfirmedStops() >= 1);
+  });
+
+  it("the final stop sweep never extends the batch past its configured budgets", async () => {
+    // Regression: the sweep used to grant itself a fresh FINAL_STOP_SWEEP_MS
+    // after the lanes settled, which could run past batchEndAt/totalEndAt. Here
+    // the lane's hung stop times out its clipped grace well inside a short
+    // batch window; the sweep may only wait until batchEndAt, never a further
+    // second on top.
+    const createRuntime = async () => {
+      const listeners = [];
+      const session = {
+        send: () => new Promise(() => {}),
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: () => new Promise(() => {}) }, session }; // hangs forever
+    };
+    const config = structuredClone(laneConfig);
+    config.deadlines.attemptMs.heavy = 40;
+    config.deadlines.batchMs = 200;
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "failed");
+    assert.ok(batch.unconfirmedStops >= 1, "the hung stop is still disclosed");
+    assert.ok(
+      batch.elapsedMs < 900,
+      `the sweep must not add its full grace past the batch window (took ${batch.elapsedMs}ms)`,
+    );
   });
 });
