@@ -1,8 +1,11 @@
 // tests/dev-loop-phases.test.mjs
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { describe, it } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
-  DEFAULT_ZCODE_CLI, PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand,
+  DEFAULT_ZCODE_CLI, PHASE_LIMITS, buildPhaseEnv, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand,
 } from "../scripts/dev-loop/phases.mjs";
 
 describe("runCommand", () => {
@@ -28,6 +31,46 @@ describe("runCommand", () => {
     assert.equal(result.code, null);
     assert.ok(result.stderr.length > 0);
   });
+  it("passes env through to the child when given (isolated phase HOME reaches zcode)", async () => {
+    // process.execPath: an absolute binary, so the case doesn't depend on PATH
+    // being present in the (deliberately minimal) child env.
+    const result = await runCommand(process.execPath, ["-e", "console.log(process.env.ZPR_PHASE_PROBE)"], { env: { ZPR_PHASE_PROBE: "isolated" } });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout.trim(), "isolated");
+  });
+});
+
+describe("buildPhaseEnv", () => {
+  // A minimal fake operator HOME with just the model config.
+  const withFakeHome = (fn) => async () => {
+    const home = join(tmpdir(), `zpr-phase-env-test-${process.pid}-${Date.now()}`);
+    const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    mkdirSync(join(home, ".zcode", "cli"), { recursive: true });
+    writeFileSync(join(home, ".zcode", "cli", "config.json"), '{"model":"zai/glm-5.3"}');
+    try {
+      await fn(home);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  };
+  it("builds an isolated HOME carrying only the model config, with git/gh redirected to the real home", withFakeHome(async (home) => {
+    const phase = buildPhaseEnv({ home, env: { HOME: home, ZAI_API_KEY: "k", PATH: "/usr/bin" } });
+    assert.equal(phase.error, undefined);
+    assert.ok(phase.env.HOME.startsWith(join(tmpdir(), "zpr-phase-home-")), "phase HOME must be a fresh temp dir");
+    assert.notEqual(phase.env.HOME, home);
+    assert.ok(existsSync(join(phase.env.HOME, ".zcode", "cli", "config.json")), "model config must be copied");
+    assert.equal(phase.env.GIT_CONFIG_GLOBAL, join(home, ".gitconfig"));
+    assert.equal(phase.env.GH_CONFIG_DIR, join(home, ".config", "gh"));
+    assert.equal(phase.env.ZAI_API_KEY, "k", "auth env passes through");
+    assert.equal(phase.env.PATH, "/usr/bin");
+    phase.cleanup();
+    assert.equal(existsSync(phase.env.HOME), false, "cleanup removes the phase HOME");
+  }));
+  it("fails closed with a pointer to AGENTS.md when the model config is unreadable", async () => {
+    const phase = buildPhaseEnv({ home: "/nonexistent-home-xyz", env: {} });
+    assert.match(phase.error, /cannot read .*config\.json/);
+    assert.match(phase.error, /AGENTS\.md/);
+  });
 });
 
 describe("renderPrompt", () => {
@@ -38,18 +81,17 @@ describe("renderPrompt", () => {
 });
 
 describe("buildZcodeArgs", () => {
-  it("denies merge and MCP tools, pins cwd and mode — no --max-turns (zcode 0.16.5 rejects it)", () => {
+  it("denies merge, pins cwd and mode — no --max-turns (zcode 0.16.5 rejects it)", () => {
     const args = buildZcodeArgs({ prompt: "work", repoRoot: "/repo" });
     const joined = args.join(" ");
     assert.match(joined, /--prompt work /);
     assert.match(joined, /--cwd \/repo /);
     assert.match(joined, /--mode yolo /);
-    assert.match(joined, /--disallowed-tools Bash\(gh pr merge \*\),mcp__\*/);
-    // Phase agents never need MCP servers (the playwright-Chrome incident):
-    // the known server names are spelled out in case the bare wildcard is
-    // matched literally.
-    assert.match(joined, /mcp__plugin_playwright_playwright/);
-    assert.match(joined, /mcp__computer-use/);
+    // Only the merge rule remains in the denylist: no denylist shape matches
+    // MCP tools on zcode 0.16.5 (twice observed — I4, V1), so MCP isolation is
+    // structural via buildPhaseEnv's isolated HOME, not a deny pattern.
+    assert.match(joined, /--disallowed-tools Bash\(gh pr merge \*\)/);
+    assert.doesNotMatch(joined, /mcp__/);
     assert.doesNotMatch(joined, /--max-turns/);
   });
 });

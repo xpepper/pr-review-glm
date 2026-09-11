@@ -71,9 +71,11 @@ export async function gateRepoIdle({ run, repoRoot }) {
 // phase: one cheap probe turn catches CLI flag drift (0.16.5 rejected
 // --max-turns while still listing it in --help) and missing model config/auth
 // ("zcode login", ~/.zcode/cli/config.json) without burning a worker run.
-export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buildZcodeArgs }) {
+// Pass the isolated phase env (buildPhaseEnv) so the probe exercises the exact
+// environment phases run under — including its copied model config.
+export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buildZcodeArgs, env }) {
   const args = buildArgs({ prompt: "Reply with the single word: ok", repoRoot });
-  const result = await run(zcode, args, { cwd: repoRoot, timeoutMs: 3 * 60_000 });
+  const result = await run(zcode, args, { cwd: repoRoot, timeoutMs: 3 * 60_000, env });
   if (result.code === 0 && !result.timedOut) {
     return ok("zcode-headless", "probe turn completed with the worker arg set");
   }

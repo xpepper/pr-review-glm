@@ -6,7 +6,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
-import { PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
+import { buildPhaseEnv, PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
   gateBranchHead, gateDocsUpdated, gateMainGreen, gateRepoIdle,
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
@@ -99,11 +99,11 @@ function loadTemplate(name) {
   return readFileSync(new URL(`./dev-loop/${name}`, import.meta.url), "utf8");
 }
 
-function phaseRunner({ zcode, template, vars, limits }) {
+function phaseRunner({ zcode, template, vars, limits, phaseEnv }) {
   const prompt = renderPrompt(template, vars);
   const args = buildZcodeArgs({ prompt, repoRoot });
   return async () => {
-    const result = await runCommand(zcode, args, { cwd: repoRoot, timeoutMs: limits.timeoutMs });
+    const result = await runCommand(zcode, args, { cwd: repoRoot, timeoutMs: limits.timeoutMs, env: phaseEnv });
     if (result.code !== 0 || result.timedOut) console.error(result.stdout.slice(-2000), result.stderr.slice(-2000));
     return result;
   };
@@ -114,6 +114,25 @@ async function main() {
   if (options.dryRun) return dryRun(options);
   const zcode = resolveZcodeCli();
   mkdirSync(artDir, { recursive: true });
+  // Isolated phase HOME (MCP/plugins/skills cannot exist for phase agents —
+  // see buildPhaseEnv): built once per run, probed by the zcode-headless
+  // preflight before any phase is dispatched, removed on the way out. A build
+  // failure (model config unreadable) stops before dispatching anything.
+  const phase = buildPhaseEnv();
+  if (phase.error) {
+    const summary = { stopped: "failure", reason: `phase-env: ${phase.error}`, iterations: [] };
+    console.error(`\n[dev-loop] stopped=failure reason=${summary.reason}`);
+    writeFileSync(join(artDir, "report-last.json"), `${JSON.stringify(summary, null, 2)}\n`);
+    process.exit(1);
+  }
+  try {
+    await runMain(options, { zcode, phaseEnv: phase.env });
+  } finally {
+    phase.cleanup();
+  }
+}
+
+async function runMain(options, { zcode, phaseEnv }) {
   const run = (command, args, opts) => runCommand(command, args, opts);
   // A previous run may have stopped mid-iteration (gate failure, killed
   // process), leaving the checkout stranded on the increment branch: recover to
@@ -138,7 +157,9 @@ async function main() {
     readStatus: async () => parseStatusLine(read("HANDOFF.md")),
     preflight: async () => [
       await gateRepoIdle({ run, repoRoot }),
-      await gateZcodeHeadless({ run, zcode, repoRoot }),
+      // Probes the exact worker arg set AND the isolated phase env: if the
+      // phase HOME breaks model config or auth, this fails in seconds.
+      await gateZcodeHeadless({ run, zcode, repoRoot, env: phaseEnv }),
       await gateTests({ run, repoRoot }),
       await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }),
     ],
@@ -155,7 +176,7 @@ async function main() {
       workedIncrement = status.increment;
       return phaseRunner({
         zcode, template: loadTemplate("worker-prompt.md"),
-        vars: { INCREMENT: status.increment }, limits: PHASE_LIMITS.worker,
+        vars: { INCREMENT: status.increment }, phaseEnv, limits: PHASE_LIMITS.worker,
       })();
     },
     workerGates: async () => {
@@ -200,7 +221,7 @@ async function main() {
         const invocation = await phaseRunner({
           zcode, template: loadTemplate("reviewer-prompt.md"),
           vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, REVIEW_FILE: reviewFile },
-          limits: PHASE_LIMITS.reviewer,
+          phaseEnv, limits: PHASE_LIMITS.reviewer,
         })();
         let review = null;
         try { review = JSON.parse(readFileSync(reviewFile, "utf8")); } catch { /* reviewBlocking treats null as fatal */ }
@@ -225,7 +246,7 @@ async function main() {
         return phaseRunner({
           zcode, template: loadTemplate("fixer-prompt.md"),
           vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, FINDINGS_JSON: JSON.stringify(findings) },
-          limits: PHASE_LIMITS.fixer,
+          phaseEnv, limits: PHASE_LIMITS.fixer,
         })();
       } catch (error) {
         return { code: 1, stdout: "", stderr: String(error), timedOut: false };
@@ -268,10 +289,13 @@ async function main() {
 
   console.log(`\n[dev-loop] stopped=${summary.stopped} reason=${summary.reason}`);
   writeFileSync(join(artDir, "report-last.json"), `${JSON.stringify(summary, null, 2)}\n`);
-  process.exit(summary.stopped === "failure" ? 1 : 0);
+  // Return (not process.exit) so main's finally removes the phase HOME first.
+  return summary.stopped === "failure" ? 1 : 0;
 }
 
-main().catch((error) => {
-  console.error(`[dev-loop] unexpected failure: ${String(error?.stack ?? error)}`);
-  process.exit(1);
-});
+main()
+  .then((code) => process.exit(code))
+  .catch((error) => {
+    console.error(`[dev-loop] unexpected failure: ${String(error?.stack ?? error)}`);
+    process.exit(1);
+  });
