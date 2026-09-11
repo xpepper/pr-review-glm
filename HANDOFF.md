@@ -63,9 +63,17 @@ The plugin follows semver so a user can tell which release they are running:
 `copilot plugin list`) bumped semantically per merged release, the squash merge
 tagged `vX.Y.Z` on `main`, and the running version reported by `/z-pr-review status`.
 Pre-1.0 (`0.x.y`) while increments land — breaking moves the minor, additive the
-patch — with `1.0.0` when the v1 scope (I8) completes. The exact bump gate (every
-increment vs behavior-affecting changes only) and whether the dev-loop enforces the
-bump as a gate are decided when V1 is designed — confirm boundaries if ambiguous.
+patch — with `1.0.0` when the v1 scope (I8) completes. Design settled 2026-09-11
+in conversation (see the V1 ROADMAP row + journey entry + the dev-loop spec's
+Amendments): **every merged increment bumps**, enforced by a new dev-loop gate
+that fails an increment PR whose `plugin.json` version is unchanged vs `main`
+(supervisor fix/docs PRs never bump); **the loop tags `vX.Y.Z`** in its merge
+path after the post-merge sync (read `plugin.json` on `main`, push the tag,
+fail-closed, unit-tested) — V1's own merge is tagged once by the supervisor as a
+bootstrap, since the running loop predates the code, and auto-tagging starts
+with the increment after V1; V1 itself lands as **0.2.0**. Adding a version line
+to `/z-pr-review status`'s in-chat text is in-scope; the protocol surfaces
+(STATUS grammar, command descriptions, machine-summary shape) are not.
 The `STATUS:` grammar already accepts `next=V1` (extended in I4, PR #18).
 
 After V1: C1 (custom review roles) or I5 (validation and adjudication) per ROADMAP
