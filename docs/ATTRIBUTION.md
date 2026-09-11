@@ -9,8 +9,9 @@ that project.
 
 - `pi-pr-review` declares `"license": "MIT"` in its `package.json`.
 - The repository ships **no standalone LICENSE file** at the inspected revision
-  (v1.18.1). An upstream issue/PR requesting the file is planned before or with the
-  first source reuse (increments I4+; not yet filed).
+  (v1.18.1; re-verified 2026-09-11 on the default branch). An issue requesting the
+  file was filed 2026-09-11, before the first source reuse (I4):
+  https://github.com/10ego/pi-pr-review/issues/150
 
 Policy: reuse upstream source under its declared MIT license with this file recording
 exactly what was reused, from which version and commit. Until the LICENSE file lands
