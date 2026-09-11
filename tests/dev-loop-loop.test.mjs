@@ -276,6 +276,29 @@ describe("runLoop mid-iteration resume", () => {
   });
 });
 
+describe("runLoop phase-timing capture (post-I4 calibration)", () => {
+  it("records one duration per dispatch on the iteration, including repeats across assessments", async () => {
+    let reviews = 0;
+    const { deps: d } = deps({
+      mergeMode: "auto",
+      runReviewer: async () => { reviews++; return { ...cleanRun, review: reviews === 1 ? review("approve", p01) : review("approve") }; },
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "completed");
+    const timings = summary.iterations[0].phaseTimings;
+    assert.deepEqual(Object.keys(timings).sort(), ["dogfood", "fixer", "gates", "merge", "reviewer", "worker"]);
+    assert.equal(timings.worker.length, 1);
+    assert.equal(timings.gates.length, 2, "re-assessed after the fixer round");
+    assert.equal(timings.reviewer.length, 2);
+    assert.equal(timings.dogfood.length, 2);
+    assert.equal(timings.fixer.length, 1);
+    assert.equal(timings.merge.length, 1);
+    for (const runs of Object.values(timings)) {
+      for (const ms of runs) assert.ok(Number.isFinite(ms) && ms >= 0, "durations are non-negative milliseconds");
+    }
+  });
+});
+
 describe("runLoop fixer and iteration flow", () => {
   it("routes blocking findings to the fixer, then re-assesses", async () => {
     let reviews = 0;

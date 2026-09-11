@@ -137,14 +137,25 @@ automatic ROADMAP re-planning.
 
 1. Headless `zcode --prompt` behavior: unattended git push / `gh pr create` in yolo
    mode; exit-code / `--json` completion signal (gates are the real truth either way).
+   **Settled by design (2026-09-11, post-I4):** every I3–I4 worker/fixer landed its
+   PR unattended in yolo mode, and the loop never trusted phase output beyond
+   nonzero-exit/timeout = fatal — gates and both reviews are the completion
+   signal. No `--json` channel needed.
 2. `ZCODE_CLI` path stability across app auto-updates; add a `doctor`-style resolution
-   with a clear error when the binary moves. Partially resolved (PR #10): the
+   with a clear error when the binary moves. Resolved (PR #10): the
    `zcode-headless` preflight gate probes the worker invocation before dispatch;
    the bare-binary resolution error remains as designed.
 3. Wall-clock defaults per phase, calibrated in the supervised run (worker,
    reviewer, fixer differ by an order of magnitude). `--max-turns` is
    parser-rejected by zcode 0.16.5 (see Amendments); `PHASE_LIMITS.maxTurns` stays
    as calibration data until a CLI release re-accepts a turn bound.
+   **Calibrated 2026-09-11 (post-I4, observed vs limit):** worker ~35–40m vs 90m,
+   reviewer up to ~15m vs 20m (the tightest margin), fixer rounds ~10–20m vs 45m,
+   dogfood dispatch ~1–3m vs 20m, heavy lane attempts ≤~2m vs the 12m
+   `attemptMs.heavy`. No limit was ever exceeded, so none changed: timeouts
+   protect, they don't bound throughput. The loop now records per-phase durations
+   on each iteration (`phaseTimings` in the report), so future tuning is
+   data-driven — re-examine `reviewer` first if its observed p95 approaches 15m.
 4. The dogfood review invocation contract (flags, output parsing) — fixed by I3's
    implementation; LOOP lands the harness with the flag off.
 
@@ -233,3 +244,24 @@ automatic ROADMAP re-planning.
   updates ported from the I4 branch, and fatal review-invocation reasons now
   carry the invocation's first error line so the `stopped=` line names the
   actual failure.
+
+- **2026-09-11 (post-I4 calibration + hardening — phase timings, mergeable
+  pre-check, MCP denial):** I4 landed through five loop runs (three genuine
+  stops: STATUS-grammar skew, dogfood description skew, fixer-budget
+  exhaustion; plus a merge-time conflict and a supervisor-checkout relapse),
+  and each failure taught the loop something. Landed in one fix PR: (1) every
+  dispatched phase now records its duration on the iteration (`phaseTimings`
+  in the report) — the calibration data open item 3 always lacked; (2) a
+  `mergeable` gate fails a CONFLICTING increment PR at assessment time instead
+  of at `gh pr merge` (the I4 landing burned a full review cycle — gates,
+  independent review, dogfood — on a head that could never merge; UNKNOWN
+  passes, gh computes it async, and the pre-merge head pin stays the backstop);
+  (3) `DENIED_TOOLS` now denies all `mcp__*` tools plus the known server names:
+  headless phases inherit the user's full MCP/plugin config, and an I4 reviewer
+  agent invoked a playwright browser tool mid-review, popping a visible
+  automation Chrome on the operator's desktop (parent chain dev-loop →
+  zcode-cli → npm exec @playwright/mcp → Chrome confirmed attribution). Phase
+  agents need files, git, and gh — never MCP servers. Parser acceptance
+  verified against zcode 0.16.5; the match effect is verified by the next
+  supervised run staying Chrome-free. Calibration conclusions recorded under
+  open item 3: no PHASE_LIMITS change — no limit was ever exceeded.

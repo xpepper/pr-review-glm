@@ -116,6 +116,14 @@ upstream `lib/` reused with attribution.
     any of this is missing.
 - `--mode yolo` (default for `--prompt`), `--cwd`, `--disallowed-tools` parse and
   work as the loop uses them.
+- Headless phases inherit the user's FULL MCP/plugin config (`enabledPlugins` —
+  e.g. `npm exec @playwright/mcp@latest` auto-spawns per phase), so a phase agent
+  can invoke browser MCP tools unless denied: observed 2026-09-11 when a reviewer
+  agent's playwright tool call popped a visible automation Chrome mid-run. The
+  dev-loop denies `mcp__*` plus the known server names in `DENIED_TOOLS`
+  (`scripts/dev-loop/phases.mjs`; parser acceptance verified on 0.16.5 — the
+  match effect rides on supervised runs staying Chrome-free). Re-verify deny
+  patterns after CLI updates, like every other flag.
 
 ## Conventions
 

@@ -9,7 +9,7 @@ import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
   gateBranchHead, gateDocsUpdated, gateMainGreen, gateRepoIdle,
-  gateSmokes, gateTests, gateZcodeHeadless, isFullOid, reportGates,
+  gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
@@ -159,7 +159,7 @@ async function main() {
       })();
     },
     workerGates: async () => {
-      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid"], { cwd: repoRoot });
+      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid,mergeable"], { cwd: repoRoot });
       let open = [];
       try { open = JSON.parse(prs.stdout || "[]"); } catch { /* gate below reports */ }
       const results = [];
@@ -168,6 +168,12 @@ async function main() {
       if (prs.code === 0 && open.length === 1) {
         prNumber = open[0].number;
         headRefOid = open[0].headRefOid ?? null;
+        // Cheapest check first: a CONFLICTING PR can never merge, so it fails
+        // before any local gate or review burns a cycle on it (the I4 landing
+        // learned this the expensive way, at `gh pr merge` time).
+        const mergeable = mergeabilityGate(open[0]);
+        if (!mergeable.ok) return { results: [mergeable], prNumber, headRefOid };
+        results.push(mergeable);
         // The worker may leave the checkout anywhere; gates and the reviewer must
         // see the exact PR head, so establish it before anything runs (zero-trust:
         // never assume the worker left it there or that it matches the remote
