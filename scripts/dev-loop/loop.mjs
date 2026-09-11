@@ -93,7 +93,11 @@ export async function runLoop(deps) {
       if (dogfood) reviewRuns.push({ name: "dogfood", result: await runDogfood(gates.prNumber) });
       for (const run of reviewRuns) {
         if (run.result.code !== 0 || run.result.timedOut) {
-          return { kind: "fatal", reason: `${run.name} review invocation failed (code=${run.result.code}, timedOut=${run.result.timedOut})` };
+          // Carry the invocation's first error line: a bare exit code turned the
+          // dogfood description skew into a root-cause hunt.
+          const firstLine = (run.result.stderr || run.result.stdout || "")
+            .split("\n").find((line) => line.trim()) ?? "";
+          return { kind: "fatal", reason: `${run.name} review invocation failed (code=${run.result.code}, timedOut=${run.result.timedOut})${firstLine ? `: ${firstLine.slice(0, 200)}` : ""}` };
         }
       }
       const judgments = reviewRuns.map((run) => ({ name: run.name, judgment: reviewBlocking(run.result.review) }));

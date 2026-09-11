@@ -34,6 +34,24 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-11 (I4 resumed run stopped on dogfood description skew — protocol
+  rule):** run #2 (13 min) adopted PR #18 cleanly (the resume path from the
+  previous fix worked: no worker re-dispatch, gates green, independent review
+  ran) but stopped at the dogfood invocation: main's in-memory `dogfood.mjs`
+  asserts the `/z-pr-review` registration description at dispatch, and the I4
+  branch registers a new one ("concurrent tiered reviewer lanes") — the worker
+  had updated the expected string only inside its own PR, invisible to the
+  running loop. Same skew class as the STATUS grammar, now generalized into a
+  rule: loop↔plugin protocol surfaces (STATUS grammar, command descriptions,
+  machine-summary shape) change on `main` first, never inside the increment PR
+  being validated — the worker prompt now says so. Fix (this PR): the branch's
+  `dogfood.mjs` string/comment updates ported to main, and fatal
+  review-invocation reasons carry the invocation's first error line (this
+  failure surfaced as a bare `code=1`). Notable: the independent review
+  completed — approve-with-nits with 1 P1 (a runtime-creation race loser never
+  stops the late-resolving child) + 4 P2s — so the next resumed run should
+  route into a fixer round on PR #18 before merge.
+
 - **2026-09-11 (I4 first run stopped — loop resume + full-series STATUS ids):**
   the first I4 `--merge auto --dogfood on` run (46 min) stopped after its worker
   had completed and opened PR #18: the worker wrote `STATUS: next=V1` — the
