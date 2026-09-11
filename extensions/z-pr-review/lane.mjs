@@ -187,6 +187,13 @@ export async function runLane({
     enableConfigDiscovery: false,
     permission: lanePermissionPolicy(repoRoot),
   });
+  // An abort that arrived while the runtime was being created must not be
+  // swallowed: the freshly created child is stopped before it is ever sent a
+  // prompt (adding a listener to an already-aborted signal replays nothing).
+  if (signal?.aborted) {
+    await client.stop().catch(() => {});
+    return { status: "failed", reason: "cancelled during runtime creation", findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
+  }
   const result = await driveLane(session, {
     prompt,
     deadlineMs,
@@ -221,10 +228,14 @@ async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }
     session.abort?.().catch(() => {});
     reject(new LaneError("cancelled"));
   };
-  const finish = () => {
+  // Cleanup is awaited before the attempt settles so a fallback attempt (or
+  // the batch's next move) never starts while the prior child runtime is
+  // still stopping — one live runtime per lane at any time, and the total
+  // budget genuinely includes cleanup (spec: "Degradation and budgets").
+  const finish = async () => {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
-    cleanup?.().catch(() => {});
+    await cleanup?.().catch(() => {});
   };
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
   timer = setTimeout(() => {
@@ -276,6 +287,6 @@ async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }
     return outcome;
   } finally {
     unsubscribe?.();
-    finish();
+    await finish();
   }
 }

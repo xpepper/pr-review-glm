@@ -165,8 +165,12 @@ async function runReview(parsed) {
 }
 
 function modelLabelFor(config, laneResult) {
-  const tier = config.tiers[laneResult.tier];
-  return tier.model ?? "session default model";
+  // The label names the model that actually produced the lane's findings —
+  // the completing attempt's model (a fallback completion is not misreported
+  // as the primary); failed lanes fall back to the tier's configured model.
+  const completing = laneResult.attempts?.filter((attempt) => attempt.status === "complete").at(-1);
+  if (completing !== undefined) return completing.model ?? "session default model";
+  return config.tiers[laneResult.tier].model ?? "session default model";
 }
 
 function describeConfigError(error) {

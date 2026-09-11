@@ -517,6 +517,110 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
       /empty topology/,
     );
   });
+  it("classifies a child-runtime startup failure as a failed lane, never a batch-wide rejection", async () => {
+    let dispatches = 0;
+    const createRuntime = async () => {
+      dispatches += 1;
+      if (dispatches === 1) throw new Error("spawn ENOENT");
+      const listeners = [];
+      const session = {
+        send: async () => {
+          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([]) } });
+          for (const fn of listeners) fn({ type: "session.idle" });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: async () => [] }, session };
+    };
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "failed");
+    assert.match(batch.reason, /lane error: spawn ENOENT/);
+    assert.equal(batch.lanes[0].attempts.length, 1, "no fallback model configured — one attempt");
+  });
+  it("stops a child created after cancellation instead of sending it a prompt", async () => {
+    const controller = new AbortController();
+    let stopped = false;
+    let sent = false;
+    const createRuntime = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const session = {
+        send: async () => {
+          sent = true;
+        },
+        abort: async () => {},
+        on: () => () => {},
+      };
+      return { client: { stop: async () => { stopped = true; } }, session };
+    };
+    const inFlight = runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineMs: 60_000,
+      signal: controller.signal,
+      createRuntime,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 3));
+    controller.abort();
+    const outcome = await inFlight;
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /cancelled during runtime creation/);
+    assert.equal(stopped, true, "the freshly created child is stopped");
+    assert.equal(sent, false, "a cancelled lane never sends a prompt");
+  });
+  it("awaits the prior child's cleanup before dispatching the fallback attempt", async () => {
+    const order = [];
+    let first = true;
+    const createRuntime = async () => {
+      order.push(`create-${first ? "primary" : "fallback"}`);
+      const listeners = [];
+      const isFirst = first;
+      first = false;
+      const session = {
+        send: async () => {
+          if (isFirst) {
+            for (const fn of listeners) fn({ type: "session.error", data: { message: "overloaded" } });
+          } else {
+            for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([]) } });
+            for (const fn of listeners) fn({ type: "session.idle" });
+          }
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      const client = {
+        stop: async () => {
+          if (isFirst) {
+            order.push("primary-stop-start");
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            order.push("primary-stop-end");
+          }
+        },
+      };
+      return { client, session };
+    };
+    const config = structuredClone(laneConfig);
+    config.tiers.heavy.fallback = "zai/glm-4.6-air";
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "complete");
+    assert.deepEqual(order, ["create-primary", "primary-stop-start", "primary-stop-end", "create-fallback"]);
+  });
 });
 
 describe("renderReview (lane batch)", () => {

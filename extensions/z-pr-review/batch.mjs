@@ -49,6 +49,21 @@ async function runLaneUnderBudget({
       modelOverride: attempt.model,
       signal,
       createRuntime,
+    }).catch((error) => {
+      // A child-runtime startup failure (spawn, auth, SDK construction) is a
+      // failed lane attempt, never a batch-wide rejection: sibling lanes keep
+      // their classification and the report stays an incomplete-review
+      // disclosure instead of disappearing.
+      const failed = {
+        status: "failed",
+        reason: `lane error: ${String(error?.message ?? error)}`,
+        findings: [],
+        dropped: [],
+        laneText: "",
+        laneId: lane.id,
+        tier: lane.tier,
+      };
+      return failed;
     });
     attempts.push({
       model: attempt.model,
