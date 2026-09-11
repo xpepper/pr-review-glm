@@ -1146,6 +1146,29 @@ describe("lane contract-flake resilience (PR #23 dogfood round)", () => {
     assert.doesNotMatch(outcome.reason, /\n/, "the excerpt is flattened — model text cannot start a new line");
   });
 
+  it("strips terminal control characters from the contract-violation excerpt (round-2 dogfood P2)", async () => {
+    // ANSI escape + C0 controls smuggled into lane output must not survive
+    // into the failure reason that chat/logs render.
+    const hostile = "\u001b[31mred\u0007text\u001b[0m more";
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: hostile } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime,
+    });
+    assert.equal(outcome.status, "failed");
+    assert.doesNotMatch(outcome.reason, /\u001b|\u0007/, "control characters are stripped from the excerpt");
+    assert.match(outcome.reason, /lane output began: ".*red text.*more"/, "readable text survives sanitization");
+  });
+
   it("an empty lane output discloses its emptiness in the contract-violation reason", async () => {
     const { createRuntime } = fakeRuntime([
       async ({ emit }) => {

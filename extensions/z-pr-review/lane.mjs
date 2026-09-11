@@ -92,7 +92,12 @@ function findingProblem(candidate) {
 // the lane actually said (model text, rendered inert — never parsed, never
 // authoritative).
 function laneExcerpt(laneText) {
-  const flattened = String(laneText ?? "").replace(/\s+/g, " ").trim();
+  // Control characters (C0/C1, ANSI escapes) in model output could manipulate
+  // whatever terminal or log renders the failure reason — strip them before
+  // the excerpt exists (round-2 dogfood P2; same neutralization instinct as
+  // renderReview's backtick flattening).
+  const stripped = String(laneText ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  const flattened = stripped.replace(/\s+/g, " ").trim();
   if (flattened.length === 0) return " — lane output was empty";
   return ` — lane output began: "${flattened.slice(0, 120)}"`;
 }

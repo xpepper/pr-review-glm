@@ -184,11 +184,12 @@ async function main() {
         if (!branchHead.ok) return { results: [branchHead], prNumber, headRefOid };
         results.push(branchHead);
         results.push(await gateTests({ run, repoRoot }));
+        // V1: every merged increment bumps plugin.json's version — checked
+        // BEFORE the inference-consuming smokes so a bump-less PR fails in
+        // seconds instead of after burning model calls (round-2 dogfood P2).
+        results.push(await gateVersionBump({ run, repoRoot }));
         results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
         results.push(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement }));
-        // V1: every merged increment bumps plugin.json's version — enforced
-        // here, before any review burns a cycle on a bump-less PR.
-        results.push(await gateVersionBump({ run, repoRoot }));
       } else {
         results.push({ name: "increment-pr", ok: false, detail: `expected exactly one open PR, found ${open.length}` });
       }
@@ -257,7 +258,7 @@ async function main() {
       // assessment time; re-verify against a fresh main so a release landing in
       // between cannot turn this PR's bump into an unchanged version (the
       // version-side twin of the headRefOid pin).
-      const bump = await verifyBumpAtMerge({ run, repoRoot });
+      const bump = await verifyBumpAtMerge({ run, repoRoot, prNumber });
       if (!bump.ok) return { code: 1, stdout: "", stderr: bump.detail, timedOut: false };
       const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
       if (merged.code !== 0) return merged;
