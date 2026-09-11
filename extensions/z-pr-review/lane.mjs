@@ -320,6 +320,31 @@ async function defaultCreateRuntime({ cliPath, repoRoot, model, reasoningEffort,
 // possibly-live prior child (one live runtime per lane).
 const CLEANUP_GRACE_MS = 5_000;
 
+// A stop that outlives its bounded grace keeps running best-effort — but it is
+// never forgotten: it stays registered here until it settles, so the batch can
+// sweep what remains at its end and a process shutdown can drain stragglers
+// before exiting. Without this, a hung child runtime would outlive its lane
+// with nothing left referencing it (untracked and alive indefinitely).
+const unconfirmedStops = new Set();
+
+export function pendingUnconfirmedStops() {
+  return unconfirmedStops.size;
+}
+
+// Waits (never past `until`, epoch ms) for registered stops to settle. Returns
+// the count still unconfirmed — a hung stop is disclosed, never hidden.
+export async function drainUnconfirmedStops(until = Date.now() + CLEANUP_GRACE_MS) {
+  while (unconfirmedStops.size > 0) {
+    const remaining = until - Date.now();
+    if (remaining <= 0) break;
+    await Promise.race([
+      Promise.allSettled([...unconfirmedStops]),
+      new Promise((resolve) => setTimeout(resolve, remaining)),
+    ]);
+  }
+  return unconfirmedStops.size;
+}
+
 // Runs a child stop and reports how it went, never waiting past `until`
 // (epoch ms). The stop itself keeps running best-effort if it outlives the
 // window, but no caller ever blocks on it past the attempt budget.
@@ -336,9 +361,12 @@ async function stopBounded(stop, until) {
   }
   return new Promise((settled) => {
     let done = false;
+    const forget = () => unconfirmedStops.delete(call);
+    call.then(forget, forget);
     const grace = setTimeout(() => {
       if (done) return;
       done = true;
+      unconfirmedStops.add(call);
       settled("timed-out");
     }, graceMs);
     call.then(
@@ -400,11 +428,18 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
   // firing still leaves room to stop the child by deadlineAt.
   const deadlineMs = Math.max(1, deadlineAt - Date.now() - CLEANUP_GRACE_MS);
   timer = setTimeout(() => {
+    if (outcomeSettled) return;
     outcome.reason = `deadline exceeded after ${deadlineMs}ms`;
     session.abort?.().catch(() => {});
     settle(() => reject(new LaneError(outcome.reason)));
   }, deadlineMs);
   const unsubscribe = session.on((event) => {
+    // A terminal event (error, shutdown, deadline) settles the attempt; events
+    // delivered after that — a session.idle the SDK emits after a fatal
+    // session.error — must not mutate the outcome back into a "complete" lane.
+    // The unsubscribe in the finally below races with already-queued events, so
+    // the guard lives here, not only in the settle paths.
+    if (outcomeSettled) return;
     switch (event.type) {
       case "assistant.message":
         outcome.laneText = event.data.content ?? "";

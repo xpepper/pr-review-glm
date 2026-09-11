@@ -3,7 +3,7 @@
 // one configured fallback), deadline math (tier attempt cap intersected with
 // the batch window and the total hard cap), and lifecycle classification.
 // Model text never influences any of it (spec: "Degradation and budgets").
-import { runLane } from "./lane.mjs";
+import { drainUnconfirmedStops, runLane } from "./lane.mjs";
 
 // One lane's attempt plan: the tier's model under the tier's attempt cap,
 // then (if configured) the tier's fallback model under fallbackMs. Upstream
@@ -191,10 +191,22 @@ export async function runLaneBatch({
       return result;
     }),
   );
+  // Stops whose bounded grace expired during the batch keep running
+  // best-effort; one final bounded sweep retires any that settled since,
+  // inside the total budget. What still remains is reported, not hidden — a
+  // hung child runtime is never silently forgotten.
+  const unconfirmedStops = await drainUnconfirmedStops(Date.now() + FINAL_STOP_SWEEP_MS);
   return {
     mode,
     lanes: laneResults,
     elapsedMs: Date.now() - startedAt,
+    ...(unconfirmedStops > 0 ? { unconfirmedStops } : {}),
     ...batchStatus(laneResults),
   };
 }
+
+// The end-of-batch sweep is deliberately short: each stop already had its full
+// clipped grace inside its attempt, so this only catches stragglers that
+// settled a moment later — a long second wait would tax every clean batch for
+// the rare hung child.
+const FINAL_STOP_SWEEP_MS = 1_000;

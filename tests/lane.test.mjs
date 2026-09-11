@@ -17,6 +17,8 @@ import {
   parseFindings,
   runLane,
   unwrapLaneOutput,
+  pendingUnconfirmedStops,
+  drainUnconfirmedStops,
 } from "../extensions/z-pr-review/lane.mjs";
 import { batchStatus, runLaneBatch } from "../extensions/z-pr-review/batch.mjs";
 import { LANE_TOPOLOGIES, describeTopology, isReviewMode } from "../extensions/z-pr-review/topologies.mjs";
@@ -1136,5 +1138,93 @@ describe("renderReview (lane batch)", () => {
     assert.match(machine.reason, /correctness/);
     assert.deepEqual(machine.findings, [], "failed lanes' findings are not claimed");
     assert.equal(machine.lanes[1].status, "failed");
+  });
+});
+
+describe("lane lifecycle regressions (PR #18 review round)", () => {
+  it("a session.error stays failed even when session.idle follows with a valid envelope", async () => {
+    // The SDK may emit idle after a terminal error; without the settled guard
+    // the idle handler mutated the failed outcome back into a completed lane.
+    const listeners = [];
+    const session = {
+      send: async () => {
+        for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([{ severity: "P1", title: "t" }]) } });
+        for (const fn of listeners) fn({ type: "session.error", data: { message: "boom" } });
+        for (const fn of listeners) fn({ type: "session.idle" });
+      },
+      abort: async () => {},
+      on: (fn) => (listeners.push(fn), () => {}),
+    };
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime: async () => ({ client: { stop: async () => [] }, session }),
+    });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /boom/);
+    assert.deepEqual(outcome.findings, [], "an errored lane is never relabeled complete by a later idle");
+  });
+
+  it("a timed-out stop stays tracked and is drained once it settles", async () => {
+    // A stop that outlives its clipped grace keeps running best-effort; it
+    // must remain registered (never a lost live child) until it settles.
+    // Earlier tests legitimately leave forever-hung stops in the module-level
+    // registry, so this asserts deltas against the pre-existing count.
+    const preExisting = pendingUnconfirmedStops();
+    const listeners = [];
+    const session = {
+      send: () => new Promise(() => {}),
+      abort: async () => {},
+      on: (fn) => (listeners.push(fn), () => {}),
+    };
+    const client = {
+      stop: () => new Promise((resolve) => setTimeout(() => resolve([]), 100)),
+    };
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 40, // drive deadline + clipped grace both expire
+      createRuntime: async () => ({ client, session }),
+    });
+    assert.equal(outcome.status, "failed");
+    assert.equal(outcome.cleanup, "timed-out");
+    assert.equal(pendingUnconfirmedStops(), preExisting + 1, "the timed-out stop is registered, not forgotten");
+    const remaining = await drainUnconfirmedStops(Date.now() + 400);
+    assert.equal(remaining, preExisting, "the stop settled within the drain window and left the registry");
+    assert.equal(pendingUnconfirmedStops(), preExisting);
+  });
+
+  it("the batch sweeps unconfirmed stops at its end and discloses what remains", async () => {
+    const createRuntime = async () => {
+      const listeners = [];
+      const session = {
+        send: () => {
+          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([]) } });
+          for (const fn of listeners) fn({ type: "session.idle" });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: () => new Promise(() => {}) }, session }; // hangs forever
+    };
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "failed");
+    assert.ok(
+      batch.unconfirmedStops >= 1,
+      "a hung stop is still registered after the batch's final sweep, never silently dropped",
+    );
+    assert.ok(pendingUnconfirmedStops() >= 1);
   });
 });

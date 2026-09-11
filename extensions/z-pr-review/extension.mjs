@@ -9,6 +9,7 @@ import { joinSession } from "@github/copilot-sdk/extension";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
 import { runLaneBatch } from "./batch.mjs";
+import { drainUnconfirmedStops } from "./lane.mjs";
 import { LANE_TOPOLOGIES, describeTopology } from "./topologies.mjs";
 import {
   parseConfigArgs,
@@ -118,6 +119,9 @@ async function runReview(parsed) {
   if (unimplemented !== null) {
     throw new Error(`"${unimplemented[0]}" is ${unimplemented[1]}.`);
   }
+  const controller = new AbortController();
+  const review = { controller, done: Promise.resolve() };
+  activeReviews.add(review);
   try {
     await store.load();
     const config = store.get();
@@ -134,12 +138,13 @@ async function runReview(parsed) {
     lastCapture = outcome.summary;
     await session.log(renderCapture(outcome.summary));
     await session.log(`Dispatching mode ${mode}: ${describeTopology(mode)}.`);
-    const batch = await runLaneBatch({
+    const batchPromise = runLaneBatch({
       mode,
       lanes: LANE_TOPOLOGIES[mode],
       envelope: outcome.envelope,
       config,
       repoRoot: process.cwd(),
+      signal: controller.signal,
       onLaneDone: async (lane, result) => {
         const tail = result.status === "complete"
           ? `complete — ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}`
@@ -147,6 +152,8 @@ async function runReview(parsed) {
         await session.log(`Lane ${lane.id} (${lane.tier}): ${tail}`);
       },
     });
+    review.done = batchPromise;
+    const batch = await batchPromise;
     const decorated = {
       ...batch,
       lanes: batch.lanes.map((result) => ({
@@ -161,6 +168,8 @@ async function runReview(parsed) {
       return;
     }
     throw error;
+  } finally {
+    activeReviews.delete(review);
   }
 }
 
@@ -187,8 +196,28 @@ function describeConfigError(error) {
   return `Configuration not changed: ${String(error)}`;
 }
 
+// Parent cancellation: the SDK hands command handlers no abort signal and no
+// disconnect event — the host's only cancellation notices are process-level
+// (stdin end/error, SIGTERM, SIGINT, ~5s before a SIGKILL). Each review owns
+// an AbortController passed into its lane batch, and those signals are routed
+// through it here, so concurrent child runtimes are aborted and stopped
+// instead of orphaned by a raw process.exit mid-batch.
+const activeReviews = new Set();
+
+async function shutdown() {
+  for (const review of activeReviews) {
+    review.controller.abort(new Error("parent session ended"));
+  }
+  await Promise.race([
+    Promise.allSettled([...activeReviews].map((review) => review.done)),
+    new Promise((resolve) => setTimeout(resolve, 2_500)),
+  ]);
+  await drainUnconfirmedStops(Date.now() + 1_500);
+  process.exit(0);
+}
+
 // The parent CLI owns this process; when its stdin closes we must not linger.
-process.stdin.once("end", () => process.exit(0));
-process.stdin.once("error", () => process.exit(0));
-process.once("SIGTERM", () => process.exit(0));
-process.once("SIGINT", () => process.exit(0));
+process.stdin.once("end", shutdown);
+process.stdin.once("error", shutdown);
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
