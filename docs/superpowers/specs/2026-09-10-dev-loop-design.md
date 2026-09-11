@@ -245,6 +245,22 @@ automatic ROADMAP re-planning.
   carry the invocation's first error line so the `stopped=` line names the
   actual failure.
 
+- **2026-09-11 (V1 — release versioning decisions, approved in conversation):**
+  the loop's merge step (architecture step 7) gains a code-owned tagging tail:
+  after squash-merge + checkout + ff-only pull, read `plugin.json`'s `version`
+  on `main` and push tag `vX.Y.Z`, fail-closed on read/parse/push errors (unit
+  tests in the loop's suite). A new assessment gate fails an increment PR whose
+  `plugin.json` version is unchanged vs `main` — every merged increment bumps
+  (pre-1.0: additive → patch, breaking → minor; `1.0.0` when I8 completes), and
+  supervisor fix/docs PRs never bump because they never pass through the loop.
+  Both land inside V1's own increment PR, so the loop instance that merges V1
+  predates them: V1's initial `v0.2.0` tag is pushed once by the supervisor
+  post-merge, and both behaviors take effect from the next increment. This does
+  not violate the protocol-surfaces rule (amendment of 2026-09-11): a new gate
+  and a tagging tail are loop capabilities the running loop simply doesn't have
+  yet — not surfaces it validates or parses out of the increment PR — so landing
+  them in the increment PR breaks nothing.
+
 - **2026-09-11 (post-I4 calibration + hardening — phase timings, mergeable
   pre-check, MCP denial):** I4 landed through five loop runs (three genuine
   stops: STATUS-grammar skew, dogfood description skew, fixer-budget
