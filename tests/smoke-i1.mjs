@@ -62,7 +62,7 @@ try {
   const session = started.session;
 
   await waitForCommands(session, {
-    "z-pr-review": "PR review via a heavy reviewer lane over the captured diff; status and help",
+    "z-pr-review": "PR review via concurrent tiered reviewer lanes over the captured diff; status and help",
     "z-pr-review-config": "Inspect or update z-pr-review configuration",
   });
   console.log("PASS /z-pr-review and /z-pr-review-config are registered by the plugin extension");

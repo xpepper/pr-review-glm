@@ -1,8 +1,9 @@
-// I3 smoke script: the first real review, dispatched by RPC against an open
-// PR of this repository — /z-pr-review N --no-comment captures the PR, runs
-// one heavy reviewer lane in an owned Copilot SDK child runtime, and renders
-// findings in-chat. Unlike smoke-i1/i2 this smoke DOES perform inference, by
-// design: the model runs inside the lane's child runtime (the point of I3).
+// I3+ smoke script: the real review, dispatched by RPC against an open PR of
+// this repository — /z-pr-review N --no-comment captures the PR, then (I4)
+// runs the default mode's concurrent tiered lane batch — owned Copilot SDK
+// child runtimes — and renders findings in-chat. Unlike smoke-i1/i2 this
+// smoke DOES perform inference, by design: the model runs inside the lanes'
+// child runtimes (the point of I3).
 // The parent session stream must still show zero inference (harness
 // assertion in runCommand) — the review is dispatched, never prompted.
 //
@@ -73,7 +74,7 @@ try {
   const session = started.session;
 
   await waitForCommands(session, {
-    "z-pr-review": "PR review via a heavy reviewer lane over the captured diff; status and help",
+    "z-pr-review": "PR review via concurrent tiered reviewer lanes over the captured diff; status and help",
   });
   console.log("PASS /z-pr-review is registered by the plugin extension");
 
@@ -84,17 +85,24 @@ try {
     const messages = await runCommand(session, "z-pr-review", `${prNumber} --no-comment`);
     const report = messages.find((message) => message.includes(`Reviewed PR #${prNumber}`));
     assert.ok(report, `the review report must be rendered in-chat, got: ${messages.join(" | ")}`);
-    assert.match(report, /^Lane: heavy, /m);
+    assert.match(report, /^Mode: balanced — 5 lane/m);
     const machine = /```z-pr-review-findings\n([\s\S]*?)```/.exec(report);
     assert.ok(machine, "the report must carry the machine summary block");
     const summary = JSON.parse(machine[1]);
-    assert.equal(summary.status, "complete", `the heavy lane must satisfy the output contract: ${summary.reason ?? ""}`);
+    assert.equal(summary.mode, "balanced", "the default mode is balanced");
+    assert.equal(summary.lanes.length, 5, "balanced topology is 5 lanes");
+    assert.equal(
+      summary.status,
+      "complete",
+      `every lane must satisfy the output contract (status ${summary.status}): ${summary.reason ?? ""}`,
+    );
     assert.ok(Array.isArray(summary.findings), "findings must be an array");
-    console.log(`PASS heavy lane reviewed PR #${prNumber}: ${summary.findings.length} finding(s), ${summary.dropped} dropped`);
+    const completeLanes = summary.lanes.filter((lane) => lane.status === "complete").length;
+    console.log(`PASS tiered lane batch reviewed PR #${prNumber}: ${completeLanes}/5 lanes complete, ${summary.findings.length} finding(s), ${summary.dropped} dropped`);
     const captureLine = report.match(/Capture file: (\S+) \(0600\)/) ?? messages.join(" | ").match(/Capture file: (\S+) \(0600\)/);
     if (captureLine) capturePath = captureLine[1];
 
-    console.log(`SMOKE PASS I3: PR #${prNumber} reviewed by one heavy lane, findings in-chat, parent session inference-free`);
+    console.log(`SMOKE PASS I3: PR #${prNumber} reviewed by the tiered lane batch, findings in-chat, parent session inference-free`);
   }
 } finally {
   cleanupSync();
