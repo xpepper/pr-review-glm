@@ -182,7 +182,10 @@ export async function runLane({
   const creation = createRuntime({
     cliPath,
     repoRoot,
-    model: modelOverride ?? tier.model ?? undefined,
+    // An explicit null override means "the session's default model" exactly as
+    // a null tier model does — `??` would wrongly retry the tier's primary
+    // model on a null fallback override.
+    model: (modelOverride !== undefined ? modelOverride : tier.model) ?? undefined,
     reasoningEffort: tier.effort,
     availableTools: ["builtin:view", "builtin:grep", "builtin:glob"],
     enableConfigDiscovery: false,
@@ -232,10 +235,20 @@ export async function runLane({
   } catch (error) {
     abandoned = true;
     if (error instanceof LaneError) {
-      // Cancellation: the batch's loop breaks on the aborted signal, so no
-      // fallback follows this lane and there is nothing to wait for here — a
-      // creation that resolves later is stopped best-effort by the handler above.
-      return { status: "failed", reason: error.reason, findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
+      // Cancellation: no fallback follows (the batch's loop breaks on the
+      // aborted signal), but the lane must not return while a late creation may
+      // still spawn a live child — the same bounded wait as the deadline path,
+      // so cleanup lands inside the attempt budget (the total cap genuinely
+      // includes cleanup, cancelled or not).
+      const late = await Promise.race([
+        creation.then(
+          () => lateStop ?? "settled",
+          () => "settled",
+        ),
+        new Promise((resolve) => setTimeout(() => resolve("timed-out"), Math.max(1, deadlineAt - Date.now()))),
+      ]);
+      const reason = late === "settled" ? error.reason : `${error.reason} (late child cleanup ${late})`;
+      return { status: "failed", reason, cleanup: late === "settled" ? undefined : late, findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
     }
     // Deadline lost: the creation may still resolve into a live child. Wait
     // (bounded by deadlineAt — the grace the race reserved above) for it to
@@ -312,6 +325,15 @@ const CLEANUP_GRACE_MS = 5_000;
 // window, but no caller ever blocks on it past the attempt budget.
 async function stopBounded(stop, until) {
   const graceMs = Math.max(1, Math.min(CLEANUP_GRACE_MS, until - Date.now()));
+  let call;
+  try {
+    call = Promise.resolve(stop());
+  } catch {
+    // A stop() that throws synchronously still means the child may be live:
+    // surface it as a failed cleanup, never as an exception escaping the
+    // lifecycle bookkeeping (a fallback would then start beside the child).
+    return "failed";
+  }
   return new Promise((settled) => {
     let done = false;
     const grace = setTimeout(() => {
@@ -319,7 +341,7 @@ async function stopBounded(stop, until) {
       done = true;
       settled("timed-out");
     }, graceMs);
-    Promise.resolve(stop()).then(
+    call.then(
       () => {
         if (done) return;
         done = true;
@@ -351,9 +373,14 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
   };
   let timer = null;
   const onAbort = () => {
-    outcome.reason = "cancelled";
+    // An abort arriving after the outcome settled (a lane that reached
+    // session.idle and completed) must not relabel it: the review finished,
+    // and cancellation elsewhere does not void a cleanly finished lane.
+    if (!outcomeSettled) {
+      outcome.reason = "cancelled";
+      settle(() => reject(new LaneError("cancelled")));
+    }
     session.abort?.().catch(() => {});
-    settle(() => reject(new LaneError("cancelled")));
   };
   // Cleanup is awaited (within its grace) before the attempt settles so a
   // fallback attempt never starts while the prior child runtime is still

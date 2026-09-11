@@ -36,7 +36,12 @@ async function runLaneUnderBudget({
   for (const attempt of attemptPlan(lane, config)) {
     const remaining = hardEndAt - Date.now();
     if (signal?.aborted || remaining <= 0) {
-      attempts.push({ model: attempt.model, label: attempt.label, status: "failed", reason: "budget expired before dispatch" });
+      attempts.push({
+        model: attempt.model,
+        label: attempt.label,
+        status: "failed",
+        reason: signal?.aborted ? "cancelled before dispatch" : "budget expired before dispatch",
+      });
       break;
     }
     let outcome = await runLane({

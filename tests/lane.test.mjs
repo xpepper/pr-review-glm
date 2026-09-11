@@ -292,7 +292,7 @@ describe("runLane (driven child runtime, any tier)", () => {
     assert.equal(stopped, true, "a creation that loses the deadline race is stopped when it later resolves");
     assert.equal(sent, false);
   });
-  it("fails fast on cancellation while the runtime is still being created, stopping it late", async () => {
+  it("fails on cancellation while the runtime is still being created, stopping the late child before returning", async () => {
     const controller = new AbortController();
     let stopped = false;
     const createRuntime = () =>
@@ -314,9 +314,11 @@ describe("runLane (driven child runtime, any tier)", () => {
     const outcome = await inFlight;
     assert.equal(outcome.status, "failed");
     assert.match(outcome.reason, /cancelled during runtime creation/);
-    assert.ok(Date.now() - startedAbort < 25, "cancellation does not wait out the creation window");
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    assert.equal(stopped, true, "the runtime created after cancellation is stopped");
+    // Since the fifth dogfood round, cancellation returns once the late child's
+    // bounded cleanup settles (here ~30ms, the creation timer) — not instantly,
+    // and never by waiting out the whole attempt window.
+    assert.ok(Date.now() - startedAbort < 5_000, "cancellation does not wait out the creation window");
+    assert.equal(stopped, true, "the runtime created after cancellation is stopped before the lane returns");
   });
   it("settles a complete attempt on session.idle without waiting for session.send to settle", async () => {
     // A child that emits its answer and then hangs inside send must not hold
@@ -867,10 +869,11 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     const outcome = await inFlight;
     assert.equal(outcome.status, "failed");
     assert.match(outcome.reason, /cancelled during runtime creation/);
-    // The outcome settles immediately on abort; the child created later (10ms
-    // timer) is stopped by the abandoned-creation handler — wait for it.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(stopped, true, "the freshly created child is stopped");
+    // Since the fifth dogfood round the lane does NOT return while the late
+    // creation may be spawning a live child: the outcome settles only after
+    // the late child's bounded cleanup, so by the time it returns the stop has
+    // either settled or its grace expired.
+    assert.equal(stopped, true, "the freshly created child is stopped before the lane returns");
     assert.equal(sent, false, "a cancelled lane never sends a prompt");
   });
   it("awaits the prior child's cleanup before dispatching the fallback attempt", async () => {
@@ -916,6 +919,121 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     });
     assert.equal(batch.status, "complete");
     assert.deepEqual(order, ["create-primary", "primary-stop-start", "primary-stop-end", "create-fallback"]);
+  });
+});
+
+describe("lane lifecycle regressions (fifth dogfood round)", () => {
+  it("a null model override pins no model (session default), never the tier's primary", async () => {
+    const { createRuntime, captured } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const config = structuredClone(laneConfig);
+    config.tiers.heavy.model = "zai/glm-4.7";
+    await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, modelOverride: null, createRuntime });
+    assert.equal(captured.model, undefined, "a null override must not fall through to the tier's primary model");
+  });
+
+  it("a synchronous stop() throw becomes a failed cleanup: no fallback beside the possibly-live child", async () => {
+    let runtimes = 0;
+    const createRuntime = async () => {
+      runtimes += 1;
+      const listeners = [];
+      const session = {
+        send: async () => {
+          for (const fn of listeners) fn({ type: "session.error", data: { message: "overloaded" } });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: () => { throw new Error("stop exploded"); } }, session };
+    };
+    const config = structuredClone(laneConfig);
+    config.tiers.heavy.fallback = "zai/glm-4.6-air";
+    const batch = await runLaneBatch({ mode: "test", lanes: [HEAVY_LANE], envelope: ENVELOPE, config, repoRoot: process.cwd(), createRuntime });
+    assert.equal(batch.status, "failed");
+    assert.equal(runtimes, 1, "no fallback child over a child whose stop threw synchronously");
+    assert.match(batch.reason, /child cleanup failed, fallback skipped/);
+  });
+
+  it("cancellation during runtime creation awaits the late child's bounded cleanup before returning", async () => {
+    const controller = new AbortController();
+    const createRuntime = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const session = { send: async () => {}, abort: async () => {}, on: () => () => {} };
+      return { client: { stop: () => new Promise(() => {}) }, session }; // late child whose stop hangs
+    };
+    // The deadline must exceed the cleanup-grace reservation, or the creation
+    // race's own timer fires before the abort gets to win it.
+    const inFlight = runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 5_150, signal: controller.signal, createRuntime });
+    await new Promise((resolve) => setTimeout(resolve, 3));
+    controller.abort();
+    const outcome = await inFlight;
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /cancelled during runtime creation/);
+    assert.match(outcome.reason, /late child cleanup timed-out/);
+    assert.equal(outcome.cleanup, "timed-out");
+  });
+
+  it("cancellation during creation returns cleanly once the late child's stop settles", async () => {
+    const controller = new AbortController();
+    let stopped = false;
+    const createRuntime = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      const session = { send: async () => {}, abort: async () => {}, on: () => () => {} };
+      return { client: { stop: async () => { stopped = true; } }, session };
+    };
+    const inFlight = runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, signal: controller.signal, createRuntime });
+    await new Promise((resolve) => setTimeout(resolve, 3));
+    controller.abort();
+    const outcome = await inFlight;
+    assert.equal(outcome.status, "failed");
+    assert.equal(outcome.reason, "cancelled during runtime creation");
+    assert.equal(stopped, true, "the late child was stopped before the lane returned");
+    assert.equal(outcome.cleanup, undefined);
+  });
+
+  it("an abort arriving after session.idle does not relabel a completed lane", async () => {
+    const controller = new AbortController();
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: validLaneText([{ severity: "P2", title: "t" }]) } });
+        emit({ type: "session.idle" });
+        controller.abort(); // cancellation after the outcome settled
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, signal: controller.signal, createRuntime });
+    assert.equal(outcome.status, "complete");
+    assert.notEqual(outcome.reason, "cancelled", "a cleanly finished lane keeps its completed reason");
+    assert.deepEqual(outcome.findings, [{ severity: "P2", title: "t" }]);
+  });
+
+  it("an undischarged fallback attempt on cancellation records cancellation, not budget expiry", async () => {
+    const controller = new AbortController();
+    let runtimes = 0;
+    const createRuntime = async () => {
+      runtimes += 1;
+      const listeners = [];
+      const session = {
+        send: async () => {
+          for (const fn of listeners) fn({ type: "session.error", data: { message: "overloaded" } });
+          controller.abort(); // the undischarged fallback must be recorded as cancelled
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: async () => [] }, session };
+    };
+    const config = structuredClone(laneConfig);
+    config.tiers.heavy.fallback = "zai/glm-4.6-air";
+    const batch = await runLaneBatch({ mode: "test", lanes: [HEAVY_LANE], envelope: ENVELOPE, config, repoRoot: process.cwd(), signal: controller.signal, createRuntime });
+    assert.equal(batch.status, "failed");
+    assert.equal(runtimes, 1, "the fallback is never dispatched after cancellation");
+    const fallback = batch.lanes[0].attempts.find((attempt) => attempt.label === "fallback");
+    assert.equal(fallback.status, "failed");
+    assert.equal(fallback.reason, "cancelled before dispatch");
   });
 });
 
