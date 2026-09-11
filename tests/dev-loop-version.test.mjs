@@ -3,19 +3,32 @@
 // file reads are plugin.json-shaped strings passed in directly.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gateVersionBump, parseVersion, tagMergedRelease } from "../scripts/dev-loop/version.mjs";
+import { compareVersions, gateVersionBump, parseVersion, tagMergedRelease } from "../scripts/dev-loop/version.mjs";
 
 const manifest = (version) => `${JSON.stringify({ name: "z-pr-review", version }, null, 2)}\n`;
 const ok = (stdout = "") => async () => ({ code: 0, stdout, stderr: "" });
 // The gate reads the PR-branch plugin.json from the working tree, so each case
-// materializes one in a temp dir.
+// materializes one in a temp dir and removes it afterwards.
 const withManifest = (version, fn) => async () => {
   const repoRoot = mkdtempSync(join(tmpdir(), "zpr-version-"));
-  writeFileSync(join(repoRoot, "plugin.json"), manifest(version));
-  await fn(repoRoot);
+  try {
+    writeFileSync(join(repoRoot, "plugin.json"), manifest(version));
+    await fn(repoRoot);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+};
+// Cases that need an empty dir (no manifest at all).
+const withEmptyDir = (fn) => async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "zpr-version-"));
+  try {
+    await fn(repoRoot);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
 };
 
 describe("parseVersion", () => {
@@ -65,6 +78,22 @@ describe("gateVersionBump", () => {
     assert.equal(gate.ok, false);
     assert.match(gate.detail, /PR branch/);
   }));
+  it("fails closed (as a failed gate, not a crash) when the PR manifest is unreadable", withEmptyDir(async (repoRoot) => {
+    const gate = await gateVersionBump({ run: ok(manifest("0.1.0")), repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /PR branch.*cannot be read/);
+  }));
+});
+
+describe("compareVersions", () => {
+  it("keeps ordering for numeric identifiers beyond 2^53 (no float collapse)", () => {
+    // 2^53 + 1 vs 2^53: equal as Numbers, distinct as semver identifiers.
+    assert.equal(compareVersions("0.1.9007199254740993", "0.1.9007199254740992"), 1);
+    assert.equal(compareVersions("0.1.9007199254740992", "0.1.9007199254740993"), -1);
+    assert.equal(compareVersions("0.1.9007199254740993", "0.1.9007199254740993"), 0);
+    // Length-first comparison, not lexical: "10" > "9" even though "1" < "9".
+    assert.equal(compareVersions("0.10.0", "0.9.0"), 1);
+  });
 });
 
 describe("tagMergedRelease", () => {
@@ -104,5 +133,23 @@ describe("tagMergedRelease", () => {
     const result = await tagMergedRelease({ run: ok(), repoRoot });
     assert.equal(result.ok, false);
     assert.match(result.detail, /no strict X\.Y\.Z/);
+  }));
+  it("fails closed with the documented release-tag failure when main's manifest is unreadable", withEmptyDir(async (repoRoot) => {
+    const result = await tagMergedRelease({ run: ok(), repoRoot });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /plugin\.json \(main\) cannot be read/);
+    assert.ok(result.detail.length > 0);
+  }));
+  it("discloses a failed local-tag delete after a failed push (retry must know)", withManifest("0.3.1", async (repoRoot) => {
+    const run = async (command, args) =>
+      args[0] === "push"
+        ? { code: 1, stdout: "", stderr: "rejected" }
+        : args[0] === "tag" && args[1] === "-d"
+          ? { code: 1, stdout: "", stderr: "no such tag" }
+          : { code: 0, stdout: "", stderr: "" };
+    const result = await tagMergedRelease({ run, repoRoot });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /git push origin v0\.3\.1 failed/);
+    assert.match(result.detail, /removing the un-pushed local tag failed/);
   }));
 });

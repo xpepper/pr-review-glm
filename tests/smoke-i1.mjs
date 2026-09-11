@@ -70,7 +70,10 @@ try {
   const statusMessages = await runCommand(session, "z-pr-review", "");
   assert(statusMessages.some((m) => m.includes("z-pr-review — parallel tiered PR review")), "bare /z-pr-review must print the status");
   assert(statusMessages.some((m) => m.includes("no model calls")), "status must state it makes no model calls");
-  console.log("PASS bare /z-pr-review prints the capability boundary");
+  // V1: status carries the running release version from plugin.json.
+  const { version: pluginVersion } = JSON.parse(readFileSync(join(repoRoot, "plugin.json"), "utf8"));
+  assert(statusMessages.some((m) => m.includes(`Version: ${pluginVersion}`)), `status must report Version: ${pluginVersion}`);
+  console.log("PASS bare /z-pr-review prints the capability boundary and running version");
 
   const helpMessages = await runCommand(session, "z-pr-review", "help");
   assert(helpMessages.some((m) => m.includes("/z-pr-review — parallel tiered PR review")), "/z-pr-review help must print usage");
