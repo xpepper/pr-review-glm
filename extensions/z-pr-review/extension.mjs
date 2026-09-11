@@ -5,6 +5,7 @@
 // attempt/batch/total budgets with one fallback attempt per lane. The session
 // LLM never orchestrates anything here (spec: "Architecture A"); every
 // handler is plain code and the model runs only inside the lane children.
+import { readFileSync } from "node:fs";
 import { joinSession } from "@github/copilot-sdk/extension";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
@@ -38,7 +39,7 @@ const session = await joinSession({
           throw new Error(parsed.message);
         }
         if (parsed.kind === "status") {
-          await session.log(renderStatus(lastCapture));
+          await session.log(renderStatus(lastCapture, readPluginVersion()));
           return;
         }
         if (parsed.kind === "help") {
@@ -170,6 +171,17 @@ async function runReview(parsed) {
     throw error;
   } finally {
     activeReviews.delete(review);
+  }
+}
+
+// Running release version for /z-pr-review status (V1): read from plugin.json
+// beside the extension at status time. Purely informational — never a gate or
+// authority input — so an unreadable file degrades to "(unknown)", not an error.
+function readPluginVersion() {
+  try {
+    return JSON.parse(readFileSync(new URL("../../plugin.json", import.meta.url), "utf8")).version ?? null;
+  } catch {
+    return null;
   }
 }
 

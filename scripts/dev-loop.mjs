@@ -12,6 +12,7 @@ import {
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
+import { gateVersionBump, tagMergedRelease } from "./dev-loop/version.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
 
@@ -184,6 +185,9 @@ async function main() {
         results.push(await gateTests({ run, repoRoot }));
         results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
         results.push(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement }));
+        // V1: every merged increment bumps plugin.json's version — enforced
+        // here, before any review burns a cycle on a bump-less PR.
+        results.push(await gateVersionBump({ run, repoRoot }));
       } else {
         results.push({ name: "increment-pr", ok: false, detail: `expected exactly one open PR, found ${open.length}` });
       }
@@ -249,9 +253,15 @@ async function main() {
     },
     merge: async (prNumber) => {
       const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
-      if (merged.code === 0) {
-        await run("git", ["checkout", "main"], { cwd: repoRoot });
-        await run("git", ["pull", "--ff-only"], { cwd: repoRoot });
+      if (merged.code !== 0) return merged;
+      await run("git", ["checkout", "main"], { cwd: repoRoot });
+      await run("git", ["pull", "--ff-only"], { cwd: repoRoot });
+      // V1 tagging tail: the merged release is tagged from plugin.json on main.
+      // Fail-closed — a tag failure surfaces as a merge-path failure with a
+      // precise reason (the merge itself is already done and stays put).
+      const tagged = await tagMergedRelease({ run, repoRoot });
+      if (!tagged.ok) {
+        return { code: 1, stdout: "", stderr: `release tag failed (merge itself completed): ${tagged.detail}`, timedOut: false };
       }
       return merged;
     },
