@@ -25,7 +25,7 @@ describe("parseVersion", () => {
   it("rejects unparseable JSON, missing, and non-X.Y.Z versions", () => {
     assert.match(parseVersion("{oops", "m").error, /not parseable JSON/);
     assert.match(parseVersion("{}", "m").error, /no strict X\.Y\.Z/);
-    for (const bad of ["0.1", "1.2.3-rc1", "v1.2.3", "latest", 3]) {
+    for (const bad of ["0.1", "1.2.3-rc1", "v1.2.3", "latest", 3, "01.2.3", "1.02.3", "1.2.03"]) {
       assert.match(parseVersion(manifest(bad), "m").error, /no strict X\.Y\.Z/);
     }
   });
@@ -40,6 +40,15 @@ describe("gateVersionBump", () => {
     const gate = await gateVersionBump({ run: ok(manifest("0.1.0")), repoRoot });
     assert.equal(gate.ok, false);
     assert.match(gate.detail, /unchanged vs main/);
+  }));
+  it("fails when the version is a downgrade vs main", withManifest("0.1.0", async (repoRoot) => {
+    const gate = await gateVersionBump({ run: ok(manifest("0.2.0")), repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /not greater/);
+  }));
+  it("compares numerically, not lexically (0.10.0 > 0.9.0)", withManifest("0.10.0", async (repoRoot) => {
+    const gate = await gateVersionBump({ run: ok(manifest("0.9.0")), repoRoot });
+    assert.equal(gate.ok, true);
   }));
   it("fails closed on git baseline failure", withManifest("0.2.0", async (repoRoot) => {
     const gate = await gateVersionBump({ run: async () => ({ code: 128, stdout: "", stderr: "bad object" }), repoRoot });
@@ -78,14 +87,18 @@ describe("tagMergedRelease", () => {
     assert.equal(result.ok, false);
     assert.match(result.detail, /git tag v0\.3\.1 failed/);
   }));
-  it("fails closed on push failure", withManifest("0.3.1", async (repoRoot) => {
-    const run = async (command, args) =>
-      args[0] === "push"
+  it("fails closed on push failure and removes the local tag for retry", withManifest("0.3.1", async (repoRoot) => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args]);
+      return args[0] === "push"
         ? { code: 1, stdout: "", stderr: "rejected" }
         : { code: 0, stdout: "", stderr: "" };
+    };
     const result = await tagMergedRelease({ run, repoRoot });
     assert.equal(result.ok, false);
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);
+    assert.deepEqual(calls, [["git", "tag", "v0.3.1"], ["git", "push", "origin", "v0.3.1"], ["git", "tag", "-d", "v0.3.1"]]);
   }));
   it("fails closed on an invalid plugin.json version", withManifest("x", async (repoRoot) => {
     const result = await tagMergedRelease({ run: ok(), repoRoot });

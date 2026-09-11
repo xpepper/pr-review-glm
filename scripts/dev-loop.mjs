@@ -12,7 +12,8 @@ import {
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
-import { gateVersionBump, tagMergedRelease } from "./dev-loop/version.mjs";
+import { gateVersionBump } from "./dev-loop/version.mjs";
+import { mergeTail } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
 
@@ -254,16 +255,10 @@ async function main() {
     merge: async (prNumber) => {
       const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
       if (merged.code !== 0) return merged;
-      await run("git", ["checkout", "main"], { cwd: repoRoot });
-      await run("git", ["pull", "--ff-only"], { cwd: repoRoot });
-      // V1 tagging tail: the merged release is tagged from plugin.json on main.
-      // Fail-closed — a tag failure surfaces as a merge-path failure with a
-      // precise reason (the merge itself is already done and stays put).
-      const tagged = await tagMergedRelease({ run, repoRoot });
-      if (!tagged.ok) {
-        return { code: 1, stdout: "", stderr: `release tag failed (merge itself completed): ${tagged.detail}`, timedOut: false };
-      }
-      return merged;
+      // V1 tagging tail: GitHub confirms the merge, main is checked out and
+      // fast-forwarded, then the merged main is tagged vX.Y.Z — every step
+      // checked and fail-closed (the merge itself stays put on tail failure).
+      return mergeTail({ run, repoRoot, merged, prNumber });
     },
     postMergeGates: async () => {
       const results = [await gateMainGreen({ run, repoRoot })];

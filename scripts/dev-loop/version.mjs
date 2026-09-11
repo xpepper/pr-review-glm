@@ -9,6 +9,8 @@ import { join } from "node:path";
 // or minor (breaking), and the loop only ever compares strings, so a suffix
 // would be un-tagged territory the design never settled.
 const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+// Strict semver also forbids leading zeros in numeric identifiers ("01.2.3").
+const hasLeadingZero = (part) => part.length > 1 && part.startsWith("0");
 
 export function parseVersion(manifestText, source) {
   let manifest;
@@ -18,15 +20,26 @@ export function parseVersion(manifestText, source) {
     return { error: `${source} is not parseable JSON` };
   }
   const version = manifest?.version;
-  if (typeof version !== "string" || !SEMVER_PATTERN.test(version)) {
+  if (typeof version !== "string" || !SEMVER_PATTERN.test(version) || version.split(".").some(hasLeadingZero)) {
     return { error: `${source} has no strict X.Y.Z version: ${String(version)}` };
   }
   return { version };
 }
 
-// Bump gate: the PR's plugin.json version must be a valid semver and differ
-// from origin/main's. The baseline comes from git (not the local working tree,
-// which the gate itself runs in — on the PR branch), so a missing/unreadable
+// Numeric major.minor.patch comparison: -1, 0, or 1.
+export function compareVersions(a, b) {
+  const [aMaj, aMin, aPat] = a.split(".").map(Number);
+  const [bMaj, bMin, bPat] = b.split(".").map(Number);
+  if (aMaj !== bMaj) return aMaj < bMaj ? -1 : 1;
+  if (aMin !== bMin) return aMin < bMin ? -1 : 1;
+  if (aPat !== bPat) return aPat < bPat ? -1 : 1;
+  return 0;
+}
+
+// Bump gate: the PR's plugin.json version must be a valid semver strictly
+// greater than origin/main's — equal or lower fails, so downgrades never land.
+// The baseline comes from git (not the local working tree, which the gate
+// itself runs in — on the PR branch), so a missing/unreadable
 // baseline is a git failure and fails closed.
 export async function gateVersionBump({ run, repoRoot }) {
   const baseline = await run("git", ["show", "origin/main:plugin.json"], { cwd: repoRoot });
@@ -37,8 +50,9 @@ export async function gateVersionBump({ run, repoRoot }) {
   if (main.error) return { name: "version-bump", ok: false, detail: main.error };
   const branch = parseVersion(readFileSync(join(repoRoot, "plugin.json"), "utf8"), "plugin.json (PR branch)");
   if (branch.error) return { name: "version-bump", ok: false, detail: branch.error };
-  if (branch.version === main.version) {
-    return { name: "version-bump", ok: false, detail: `plugin.json version ${branch.version} is unchanged vs main — every merged increment bumps (pre-1.0: additive → patch, breaking → minor)` };
+  const ordering = compareVersions(branch.version, main.version);
+  if (ordering <= 0) {
+    return { name: "version-bump", ok: false, detail: `plugin.json version ${branch.version} is ${ordering === 0 ? "unchanged" : "not greater"} vs main's ${main.version} — every merged increment bumps (pre-1.0: additive → patch, breaking → minor)` };
   }
   return { name: "version-bump", ok: true, detail: `version ${main.version} → ${branch.version}` };
 }
@@ -58,6 +72,9 @@ export async function tagMergedRelease({ run, repoRoot }) {
   }
   const pushed = await run("git", ["push", "origin", tag], { cwd: repoRoot });
   if (pushed.code !== 0) {
+    // Drop the local tag so a retried release tagging starts clean instead of
+    // tripping over a tag that exists locally but not on origin.
+    await run("git", ["tag", "-d", tag], { cwd: repoRoot });
     return { ok: false, detail: `git push origin ${tag} failed: ${pushed.stderr.slice(0, 200)}` };
   }
   return { ok: true, detail: `tagged merged main ${tag}` };

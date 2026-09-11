@@ -89,7 +89,7 @@ function reviewUsageError(detail) {
 export function renderStatus(lastCapture = null, version = null) {
   const lines = [
     "z-pr-review — parallel tiered PR review for GitHub Copilot CLI (port of pi-pr-review)",
-    `Version: ${version ?? "(unknown — plugin.json unreadable)"}`,
+    `Version: ${version ?? "(unknown — plugin.json missing, unreadable, or has no version field)"}`,
     "",
     "Implemented today:",
     "- /z-pr-review status | help — this capability boundary. These commands make no model calls.",
