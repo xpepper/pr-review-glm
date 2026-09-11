@@ -45,7 +45,7 @@ async function runLaneUnderBudget({
       config,
       repoRoot,
       cliPath,
-      deadlineMs: Math.min(attempt.capMs, remaining),
+      deadlineAt: Math.min(Date.now() + attempt.capMs, hardEndAt),
       modelOverride: attempt.model,
       signal,
       createRuntime,
@@ -65,13 +65,22 @@ async function runLaneUnderBudget({
       };
       return failed;
     });
+    // A prior child whose stop failed or hung must not be walked over by a
+    // fallback attempt: one live runtime per lane, so an unresolved cleanup
+    // ends the lane (disclosed) instead of risking two live children.
+    const reason = outcome.cleanup === "timed-out" || outcome.cleanup === "failed"
+      ? `${outcome.reason}; child cleanup ${outcome.cleanup}, fallback skipped`
+      : outcome.reason;
     attempts.push({
       model: attempt.model,
       label: attempt.label,
       status: outcome.status,
-      reason: outcome.status === "complete" ? undefined : outcome.reason,
+      reason: outcome.status === "complete" ? undefined : reason,
     });
     if (outcome.status === "complete") return { ...outcome, attempts };
+    if (reason !== outcome.reason) {
+      return { ...outcome, reason, findings: [], dropped: [], attempts };
+    }
   }
   const last = attempts.at(-1);
   return {

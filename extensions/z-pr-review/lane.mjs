@@ -154,21 +154,22 @@ export function resolveLaneCliPath(env = process.env) {
   return execFileSync("sh", ["-c", "command -v copilot"], { encoding: "utf8" }).trim();
 }
 
-// One lane attempt at an explicit tier. The deadline is the caller's: the
-// tier attempt cap (deadlines.attemptMs.<tier>) possibly intersected with the
-// batch/total budgets by the caller (batch.mjs); exceeding it aborts the child
-// session and classifies the attempt failed. modelOverride serves fallback
-// attempts (tier.fallback); signal propagates parent cancellation into the
-// child session. `createRuntime` is injectable so unit tests drive a fake
-// child runtime; cliPath resolves lazily inside defaultCreateRuntime so
-// injected runtimes never touch PATH.
+// One lane attempt at an explicit tier, bounded by an ABSOLUTE deadline
+// (deadlineAt, epoch ms): runtime creation, the driven attempt, and cleanup
+// all live inside it, so a stalled spawn cannot outrun the batch/total
+// budgets by starting its timer late. The caller (batch.mjs) computes it as
+// the tier attempt cap intersected with the batch/total budgets. modelOverride
+// serves fallback attempts (tier.fallback); signal propagates parent
+// cancellation into the child session. `createRuntime` is injectable so unit
+// tests drive a fake child runtime; cliPath resolves lazily inside
+// defaultCreateRuntime so injected runtimes never touch PATH.
 export async function runLane({
   lane,
   envelope,
   config,
   repoRoot,
   cliPath,
-  deadlineMs,
+  deadlineAt,
   modelOverride,
   signal = null,
   createRuntime = defaultCreateRuntime,
@@ -178,7 +179,7 @@ export async function runLane({
   if (signal?.aborted) {
     return { status: "failed", reason: "cancelled before dispatch", findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
   }
-  const { client, session } = await createRuntime({
+  const creation = createRuntime({
     cliPath,
     repoRoot,
     model: modelOverride ?? tier.model ?? undefined,
@@ -187,6 +188,19 @@ export async function runLane({
     enableConfigDiscovery: false,
     permission: lanePermissionPolicy(repoRoot),
   });
+  // A child runtime that never finishes spawning must not eat past the
+  // attempt budget uncounted.
+  let creationTimer;
+  const { client, session } = await Promise.race([
+    creation,
+    new Promise((_, reject) => {
+      creationTimer = setTimeout(
+        () => reject(new Error("runtime creation exceeded the attempt budget")),
+        Math.max(1, deadlineAt - Date.now()),
+      );
+    }),
+  ]).finally(() => clearTimeout(creationTimer));
+  creation.catch(() => {});
   // An abort that arrived while the runtime was being created must not be
   // swallowed: the freshly created child is stopped before it is ever sent a
   // prompt (adding a listener to an already-aborted signal replays nothing).
@@ -196,7 +210,7 @@ export async function runLane({
   }
   const result = await driveLane(session, {
     prompt,
-    deadlineMs,
+    deadlineMs: Math.max(1, deadlineAt - Date.now()),
     cleanup: () => client.stop(),
     signal,
   });
@@ -218,8 +232,14 @@ async function defaultCreateRuntime({ cliPath, repoRoot, model, reasoningEffort,
   return { client, session };
 }
 
+// Cleanup gets a bounded grace window (upstream's termination grace): the
+// batch's budgets must include stopping the child, and a stop that hangs or
+// fails must be visible to the caller so a fallback attempt is not started
+// over a possibly-live prior child (one live runtime per lane).
+const CLEANUP_GRACE_MS = 5_000;
+
 async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }) {
-  const outcome = { status: "failed", reason: "", findings: [], dropped: [], laneText: "" };
+  const outcome = { status: "failed", reason: "", findings: [], dropped: [], laneText: "", cleanup: "none" };
   const { promise, resolve, reject } = Promise.withResolvers();
   promise.catch(() => {});
   let timer = null;
@@ -228,14 +248,39 @@ async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }
     session.abort?.().catch(() => {});
     reject(new LaneError("cancelled"));
   };
-  // Cleanup is awaited before the attempt settles so a fallback attempt (or
-  // the batch's next move) never starts while the prior child runtime is
-  // still stopping — one live runtime per lane at any time, and the total
-  // budget genuinely includes cleanup (spec: "Degradation and budgets").
+  // Cleanup is awaited (within its grace) before the attempt settles so a
+  // fallback attempt never starts while the prior child runtime is still
+  // stopping — one live runtime per lane at any time, and the total budget
+  // genuinely includes cleanup (spec: "Degradation and budgets").
   const finish = async () => {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
-    await cleanup?.().catch(() => {});
+    if (!cleanup) return;
+    await new Promise((settled) => {
+      let done = false;
+      const grace = setTimeout(() => {
+        if (done) return;
+        done = true;
+        outcome.cleanup = "timed-out";
+        settled();
+      }, CLEANUP_GRACE_MS);
+      cleanup().then(
+        () => {
+          if (done) return;
+          done = true;
+          clearTimeout(grace);
+          outcome.cleanup = "settled";
+          settled();
+        },
+        () => {
+          if (done) return;
+          done = true;
+          clearTimeout(grace);
+          outcome.cleanup = "failed";
+          settled();
+        },
+      );
+    });
   };
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
   timer = setTimeout(() => {

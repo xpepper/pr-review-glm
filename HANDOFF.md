@@ -21,11 +21,12 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
 
 - `main` = I4 complete (topologies and tiers), assuming PR #18 merges. Working tree
   clean. No open PRs should remain.
-- **The plugin reviews with full topologies now:** `/z-pr-review N [--quick|--balanced|
-  |--full|--deep] [--no-comment]` captures the PR (I2 path) and runs the mode's lane
-  batch concurrently — light/medium/heavy lanes, each an owned Copilot SDK child
-  runtime (`extensions/z-pr-review/lane.mjs`), one fallback attempt per lane on
-  `tiers.<tier>.fallback`, attempt caps clipped to `deadlines.batchMs`/`totalMs`.
+- **The plugin reviews with full topologies now:** `/z-pr-review N
+  [--quick|--balanced|--full|--deep] [--no-comment]` captures the PR (I2 path)
+  and runs the mode's lane batch concurrently — light/medium/heavy lanes, each
+  an owned Copilot SDK child runtime (`extensions/z-pr-review/lane.mjs`), one
+  fallback attempt per lane on `tiers.<tier>.fallback`, attempt caps clipped to
+  `deadlines.batchMs`/`totalMs`.
   Default mode from config `defaultMode`. Batch status is `complete` only when every
   lane completed; `partial`/`failed` are disclosed and block the dogfood merge
   (fail-closed). Machine summary carries `mode`, per-finding `lane`, and a `lanes`

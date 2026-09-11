@@ -194,7 +194,7 @@ describe("runLane (driven child runtime, any tier)", () => {
         emit({ type: "session.idle" });
       },
     ]);
-    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineMs: 60_000, createRuntime });
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
     assert.equal(outcome.status, "complete");
     assert.deepEqual(outcome.findings, [{ severity: "P2", title: "t", file: "f", line: 1 }]);
     assert.equal(outcome.laneId, "correctness");
@@ -215,7 +215,7 @@ describe("runLane (driven child runtime, any tier)", () => {
     ]);
     const config = structuredClone(laneConfig);
     config.tiers.heavy.model = "zai/glm-4.7";
-    await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config, repoRoot: process.cwd(), deadlineMs: 60_000, modelOverride: "zai/glm-4.6-air", createRuntime });
+    await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, modelOverride: "zai/glm-4.6-air", createRuntime });
     assert.equal(captured.model, "zai/glm-4.6-air", "modelOverride wins over the tier model");
     const { createRuntime: again, captured: capturedAgain } = fakeRuntime([
       async ({ emit }) => {
@@ -223,7 +223,7 @@ describe("runLane (driven child runtime, any tier)", () => {
         emit({ type: "session.idle" });
       },
     ]);
-    await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config, repoRoot: process.cwd(), deadlineMs: 60_000, createRuntime: again });
+    await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime: again });
     assert.equal(capturedAgain.model, "zai/glm-4.7");
   });
   it("fails when the lane ends without a satisfied output contract", async () => {
@@ -233,7 +233,7 @@ describe("runLane (driven child runtime, any tier)", () => {
         emit({ type: "session.idle" });
       },
     ]);
-    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineMs: 60_000, createRuntime });
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
     assert.equal(outcome.status, "failed");
     assert.match(outcome.reason, /output contract violated/);
     assert.deepEqual(outcome.findings, []);
@@ -244,7 +244,7 @@ describe("runLane (driven child runtime, any tier)", () => {
       { type: "session.shutdown" },
     ]) {
       const { createRuntime } = fakeRuntime([async ({ emit }) => emit(failure)]);
-      const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineMs: 60_000, createRuntime });
+      const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
       assert.equal(outcome.status, "failed");
       assert.ok(outcome.reason.length > 0);
     }
@@ -264,7 +264,7 @@ describe("runLane (driven child runtime, any tier)", () => {
       envelope: ENVELOPE,
       config: laneConfig,
       repoRoot: process.cwd(),
-      deadlineMs: 20,
+      deadlineAt: Date.now() + 20,
       createRuntime: async () => ({ client: { stop: async () => [] }, session }),
     });
     assert.equal(outcome.status, "failed");
@@ -279,7 +279,7 @@ describe("runLane (driven child runtime, any tier)", () => {
       envelope: ENVELOPE,
       config: laneConfig,
       repoRoot: process.cwd(),
-      deadlineMs: 60_000,
+      deadlineAt: Date.now() + 60_000,
       signal: controller.signal,
       createRuntime: async () => {
         throw new Error("must not be reached when already cancelled");
@@ -302,7 +302,7 @@ describe("runLane (driven child runtime, any tier)", () => {
       envelope: ENVELOPE,
       config: laneConfig,
       repoRoot: process.cwd(),
-      deadlineMs: 60_000,
+      deadlineAt: Date.now() + 60_000,
       signal: midController.signal,
       createRuntime: async () => ({ client: { stop: async () => [] }, session }),
     });
@@ -511,6 +511,49 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     assert.equal(exhausted.status, "failed");
     assert.match(exhausted.reason, /before dispatch/);
   });
+  it("fails the attempt when child-runtime creation outruns the absolute budget", async () => {
+    const outcome = runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 20,
+      createRuntime: () => new Promise(() => {}),
+    });
+    // runLane's creation race rejects; the batch classifies that as a failed
+    // attempt ("lane error: …" path in runLaneUnderBudget) — here we assert
+    // the attempt never dispatches a session.
+    await assert.rejects(outcome, /runtime creation exceeded the attempt budget/);
+  });
+  it("skips the fallback attempt when the prior child's cleanup hangs", async () => {
+    let runtimes = 0;
+    const createRuntime = async () => {
+      runtimes += 1;
+      const listeners = [];
+      const session = {
+        send: async () => {
+          for (const fn of listeners) fn({ type: "session.error", data: { message: "overloaded" } });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      const client = { stop: () => new Promise(() => {}) }; // hangs forever
+      return { client, session };
+    };
+    const config = structuredClone(laneConfig);
+    config.tiers.heavy.fallback = "zai/glm-4.6-air";
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "failed");
+    assert.equal(runtimes, 1, "no second child is created over a possibly-live first");
+    assert.match(batch.reason, /overloaded; child cleanup timed-out, fallback skipped/);
+  });
   it("refuses an empty topology", async () => {
     await assert.rejects(
       runLaneBatch({ mode: "empty", lanes: [], envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), createRuntime: async () => { throw new Error("nope"); } }),
@@ -565,7 +608,7 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
       envelope: ENVELOPE,
       config: laneConfig,
       repoRoot: process.cwd(),
-      deadlineMs: 60_000,
+      deadlineAt: Date.now() + 60_000,
       signal: controller.signal,
       createRuntime,
     });
