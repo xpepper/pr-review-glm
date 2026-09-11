@@ -6,16 +6,23 @@
 import { drainUnconfirmedStops, runLane } from "./lane.mjs";
 
 // One lane's attempt plan: the tier's model under the tier's attempt cap,
-// then (if configured) the tier's fallback model under fallbackMs. Upstream
-// classifies retryability finely (rate limits, quota, overload); our child
-// events do not carry that yet, so every failed attempt is retryable once via
-// the fallback and the attempt record discloses what ran. Richer
-// classification arrives with telemetry (I8).
+// then one retry under fallbackMs — on the tier's fallback model when
+// configured, otherwise on the tier's own model. Without the same-model
+// retry, the coarse "every failure retries once" rule was a no-op on default
+// configs (no fallback configured), so a single model flake — e.g. an
+// output-contract violation (PR #23 dogfood: performance-resources emitted no
+// whole-line begin marker) — failed the lane and degraded the whole review to
+// partial. Upstream classifies retryability finely (rate limits, quota,
+// overload); our child events do not carry that yet, so the retry stays
+// coarse and the attempt record discloses what ran. Richer classification
+// arrives with telemetry (I8).
 function attemptPlan(lane, config) {
   const tier = config.tiers[lane.tier];
   const plan = [{ model: tier.model ?? null, capMs: config.deadlines.attemptMs[lane.tier], label: "primary" }];
   if (tier.fallback !== undefined) {
     plan.push({ model: tier.fallback, capMs: config.deadlines.fallbackMs, label: "fallback" });
+  } else {
+    plan.push({ model: tier.model ?? null, capMs: config.deadlines.fallbackMs, label: "retry" });
   }
   return plan;
 }

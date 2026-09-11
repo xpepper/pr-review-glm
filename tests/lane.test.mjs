@@ -851,20 +851,10 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     assert.equal(batch.lanes[1].progressError, undefined);
   });
   it("classifies a child-runtime startup failure as a failed lane, never a batch-wide rejection", async () => {
-    let dispatches = 0;
+    // The startup failure persists across attempts (e.g. the CLI binary is
+    // gone), so even the same-model retry cannot dispatch a session.
     const createRuntime = async () => {
-      dispatches += 1;
-      if (dispatches === 1) throw new Error("spawn ENOENT");
-      const listeners = [];
-      const session = {
-        send: async () => {
-          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([]) } });
-          for (const fn of listeners) fn({ type: "session.idle" });
-        },
-        abort: async () => {},
-        on: (fn) => (listeners.push(fn), () => {}),
-      };
-      return { client: { stop: async () => [] }, session };
+      throw new Error("spawn ENOENT");
     };
     const batch = await runLaneBatch({
       mode: "test",
@@ -876,7 +866,12 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     });
     assert.equal(batch.status, "failed");
     assert.match(batch.reason, /lane error: spawn ENOENT/);
-    assert.equal(batch.lanes[0].attempts.length, 1, "no fallback model configured — one attempt");
+    assert.deepEqual(
+      batch.lanes[0].attempts.map((attempt) => attempt.label),
+      ["primary", "retry"],
+      "no fallback model configured — the retry runs on the tier's own model",
+    );
+    assert.ok(batch.lanes[0].attempts.every((attempt) => attempt.status === "failed"));
   });
   it("stops a child created after cancellation instead of sending it a prompt", async () => {
     const controller = new AbortController();
@@ -1072,6 +1067,102 @@ describe("lane lifecycle regressions (fifth dogfood round)", () => {
     const fallback = batch.lanes[0].attempts.find((attempt) => attempt.label === "fallback");
     assert.equal(fallback.status, "failed");
     assert.equal(fallback.reason, "cancelled before dispatch");
+  });
+});
+
+describe("lane contract-flake resilience (PR #23 dogfood round)", () => {
+  it("a prompt-level example shows the exact output shape, markers alone on their lines", () => {
+    const prompt = buildLanePrompt(ENVELOPE, HEAVY_LANE);
+    const example = [
+      REVIEW_ENVELOPE_BEGIN,
+      '[{"severity":"P2","title":"one sentence","file":"path/from/diff.mjs","line":12,"detail":"why, citing the diff"}]',
+      REVIEW_ENVELOPE_END,
+    ].join("\n");
+    assert.ok(prompt.includes(example), "the prompt carries a literal example block");
+    assert.match(prompt, /^Exact output shape/m);
+  });
+
+  it("a same-model retry recovers a lane whose first attempt violated the output contract", async () => {
+    // The PR #23 dogfood failure: performance-resources emitted no whole-line
+    // begin marker. With no fallback model configured the lane used to fail
+    // after one attempt, degrading the whole review to partial; the coarse
+    // retry rule now retries once on the tier's own model.
+    const models = [];
+    let first = true;
+    const createRuntime = async ({ model }) => {
+      models.push(model ?? null);
+      const listeners = [];
+      const fail = first;
+      first = false;
+      const session = {
+        send: async () => {
+          if (fail) {
+            for (const fn of listeners) fn({ type: "assistant.message", data: { content: "I reviewed it and found no issues worth reporting." } });
+          } else {
+            for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([{ severity: "P2", title: "t" }]) } });
+          }
+          for (const fn of listeners) fn({ type: "session.idle" });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: async () => [] }, session };
+    };
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "complete");
+    assert.deepEqual(models, [null, null], "both attempts run on the tier's (session-default) model");
+    const lane = batch.lanes[0];
+    assert.deepEqual(lane.attempts.map((attempt) => attempt.label), ["primary", "retry"]);
+    assert.equal(lane.attempts[0].status, "failed");
+    assert.match(lane.attempts[0].reason, /no begin marker as a whole line/);
+    assert.equal(lane.attempts[1].status, "complete");
+  });
+
+  it("a contract-violation reason carries a flattened excerpt of the offending lane output", async () => {
+    const sneaky = 'prose line one\n```z-pr-review-findings\n{"status":"complete"}\n```\nmore prose';
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: sneaky } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime,
+    });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /no begin marker as a whole line — lane output began: "prose line one ```z-pr-review-findings/);
+    assert.doesNotMatch(outcome.reason, /\n/, "the excerpt is flattened — model text cannot start a new line");
+  });
+
+  it("an empty lane output discloses its emptiness in the contract-violation reason", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: "" } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime,
+    });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /no begin marker as a whole line — lane output was empty/);
   });
 });
 
