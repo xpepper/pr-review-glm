@@ -271,6 +271,101 @@ describe("runLane (driven child runtime, any tier)", () => {
     assert.match(outcome.reason, /deadline exceeded/);
     assert.equal(aborted, true);
   });
+  it("stops a runtime that finishes creating after the creation deadline (no leaked live child)", async () => {
+    let stopped = false;
+    let sent = false;
+    const lateRuntime = { client: { stop: async () => { stopped = true; } }, session: null };
+    const createRuntime = () =>
+      new Promise((resolve) => {
+        setTimeout(() => resolve(lateRuntime), 30);
+      });
+    const outcomePromise = runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 10,
+      createRuntime,
+    });
+    await assert.rejects(outcomePromise, /runtime creation exceeded the attempt budget/);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(stopped, true, "a creation that loses the deadline race is stopped when it later resolves");
+    assert.equal(sent, false);
+  });
+  it("fails fast on cancellation while the runtime is still being created, stopping it late", async () => {
+    const controller = new AbortController();
+    let stopped = false;
+    const createRuntime = () =>
+      new Promise((resolve) => {
+        setTimeout(() => resolve({ client: { stop: async () => { stopped = true; } }, session: { send: async () => {}, on: () => () => {} } }), 30);
+      });
+    const inFlight = runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      signal: controller.signal,
+      createRuntime,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const startedAbort = Date.now();
+    controller.abort();
+    const outcome = await inFlight;
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /cancelled during runtime creation/);
+    assert.ok(Date.now() - startedAbort < 25, "cancellation does not wait out the creation window");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.equal(stopped, true, "the runtime created after cancellation is stopped");
+  });
+  it("keeps a complete outcome's reason intact when session.send rejects after session.idle", async () => {
+    const listeners = [];
+    const session = {
+      send: () =>
+        new Promise((_, reject) => {
+          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([{ severity: "P2", title: "t" }]) } });
+          for (const fn of listeners) fn({ type: "session.idle" });
+          setTimeout(() => reject(new Error("late send failure")), 5);
+        }),
+      abort: async () => {},
+      on: (fn) => (listeners.push(fn), () => {}),
+    };
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime: async () => ({ client: { stop: async () => [] }, session }),
+    });
+    assert.equal(outcome.status, "complete");
+    assert.deepEqual(outcome.findings, [{ severity: "P2", title: "t" }]);
+    assert.equal(outcome.reason, "", "a late send rejection must not overwrite a complete outcome's reason");
+  });
+  it("never awaits cleanup past the attempt deadline", async () => {
+    const listeners = [];
+    const session = {
+      send: () => new Promise(() => {}),
+      abort: async () => {},
+      on: (fn) => (listeners.push(fn), () => {}),
+    };
+    const client = { stop: () => new Promise(() => {}) }; // hangs forever
+    const deadlineAt = Date.now() + 40;
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt,
+      createRuntime: async () => ({ client, session }),
+    });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /deadline exceeded/);
+    assert.equal(outcome.cleanup, "timed-out");
+    // The cleanup grace is clipped to the remaining budget: the attempt ends
+    // at (not deadlineAt + 5s after) the absolute deadline.
+    assert.ok(Date.now() - deadlineAt < 2_000, "cleanup grace must not extend the attempt past its deadline");
+  });
   it("propagates parent cancellation: aborted before dispatch fails fast; aborted mid-lane aborts the child", async () => {
     const controller = new AbortController();
     controller.abort();
@@ -560,6 +655,35 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
       /empty topology/,
     );
   });
+  it("keeps lane results when an onLaneDone callback throws", async () => {
+    const createRuntime = async () => {
+      const listeners = [];
+      const session = {
+        send: async () => {
+          for (const fn of listeners) fn({ type: "assistant.message", data: { content: validLaneText([]) } });
+          for (const fn of listeners) fn({ type: "session.idle" });
+        },
+        abort: async () => {},
+        on: (fn) => (listeners.push(fn), () => {}),
+      };
+      return { client: { stop: async () => [] }, session };
+    };
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE, { ...HEAVY_LANE, id: "contracts" }],
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      createRuntime,
+      onLaneDone: async (lane) => {
+        if (lane.id === "correctness") throw new Error("sink unavailable");
+      },
+    });
+    assert.equal(batch.status, "complete", "lane results are not discarded by a progress-callback failure");
+    assert.equal(batch.lanes.length, 2);
+    assert.match(batch.lanes[0].progressError, /sink unavailable/);
+    assert.equal(batch.lanes[1].progressError, undefined);
+  });
   it("classifies a child-runtime startup failure as a failed lane, never a batch-wide rejection", async () => {
     let dispatches = 0;
     const createRuntime = async () => {
@@ -617,6 +741,9 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     const outcome = await inFlight;
     assert.equal(outcome.status, "failed");
     assert.match(outcome.reason, /cancelled during runtime creation/);
+    // The outcome settles immediately on abort; the child created later (10ms
+    // timer) is stopped by the abandoned-creation handler — wait for it.
+    await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(stopped, true, "the freshly created child is stopped");
     assert.equal(sent, false, "a cancelled lane never sends a prompt");
   });

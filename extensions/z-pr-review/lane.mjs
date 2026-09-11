@@ -189,9 +189,22 @@ export async function runLane({
     permission: lanePermissionPolicy(repoRoot),
   });
   // A child runtime that never finishes spawning must not eat past the
-  // attempt budget uncounted.
+  // attempt budget uncounted; parent cancellation must not wait out the
+  // creation window either. And a runtime that finishes spawning AFTER the
+  // race below was lost (deadline or cancellation) must not survive as a
+  // second live child next to whatever attempt follows — it is stopped the
+  // moment it resolves. `abandoned` flips only when the race is lost, so a
+  // creation that wins is never stopped here.
+  let abandoned = false;
+  creation.then(
+    ({ client: lateClient }) => {
+      if (abandoned) lateClient.stop().catch(() => {});
+    },
+    () => {},
+  );
   let creationTimer;
-  const { client, session } = await Promise.race([
+  const detachCreationAbort = [];
+  const racedCreation = Promise.race([
     creation,
     new Promise((_, reject) => {
       creationTimer = setTimeout(
@@ -199,8 +212,30 @@ export async function runLane({
         Math.max(1, deadlineAt - Date.now()),
       );
     }),
-  ]).finally(() => clearTimeout(creationTimer));
-  creation.catch(() => {});
+    ...(signal
+      ? [
+          new Promise((_, reject) => {
+            const onCreationAbort = () => reject(new LaneError("cancelled during runtime creation"));
+            signal.addEventListener("abort", onCreationAbort, { once: true });
+            detachCreationAbort.push(() => signal.removeEventListener("abort", onCreationAbort));
+          }),
+        ]
+      : []),
+  ]);
+  let client;
+  let session;
+  try {
+    ({ client, session } = await racedCreation);
+  } catch (error) {
+    abandoned = true;
+    if (error instanceof LaneError) {
+      return { status: "failed", reason: error.reason, findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
+    }
+    throw error;
+  } finally {
+    clearTimeout(creationTimer);
+    for (const detach of detachCreationAbort) detach();
+  }
   // An abort that arrived while the runtime was being created must not be
   // swallowed: the freshly created child is stopped before it is ever sent a
   // prompt (adding a listener to an already-aborted signal replays nothing).
@@ -210,7 +245,7 @@ export async function runLane({
   }
   const result = await driveLane(session, {
     prompt,
-    deadlineMs: Math.max(1, deadlineAt - Date.now()),
+    deadlineAt,
     cleanup: () => client.stop(),
     signal,
   });
@@ -232,13 +267,16 @@ async function defaultCreateRuntime({ cliPath, repoRoot, model, reasoningEffort,
   return { client, session };
 }
 
-// Cleanup gets a bounded grace window (upstream's termination grace): the
-// batch's budgets must include stopping the child, and a stop that hangs or
-// fails must be visible to the caller so a fallback attempt is not started
-// over a possibly-live prior child (one live runtime per lane).
+// Cleanup gets a bounded grace window (upstream's termination grace). The
+// attempt's drive deadline reserves that grace up front and the grace itself
+// is clipped to the time left at cleanup, so the whole attempt — creation,
+// drive, cleanup included — ends by deadlineAt and the batch/total budgets can
+// never be blown by a fixed stop grace. A stop that hangs or fails must be
+// visible to the caller so a fallback attempt is not started over a
+// possibly-live prior child (one live runtime per lane).
 const CLEANUP_GRACE_MS = 5_000;
 
-async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }) {
+async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }) {
   const outcome = { status: "failed", reason: "", findings: [], dropped: [], laneText: "", cleanup: "none" };
   const { promise, resolve, reject } = Promise.withResolvers();
   promise.catch(() => {});
@@ -258,12 +296,16 @@ async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }
     if (!cleanup) return;
     await new Promise((settled) => {
       let done = false;
+      // Clip the grace to the attempt's remaining budget: cleanup may be
+      // started (the stop still runs, best-effort) but is never awaited past
+      // deadlineAt.
+      const graceMs = Math.max(1, Math.min(CLEANUP_GRACE_MS, deadlineAt - Date.now()));
       const grace = setTimeout(() => {
         if (done) return;
         done = true;
         outcome.cleanup = "timed-out";
         settled();
-      }, CLEANUP_GRACE_MS);
+      }, graceMs);
       cleanup().then(
         () => {
           if (done) return;
@@ -283,6 +325,9 @@ async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }
     });
   };
   if (signal) signal.addEventListener("abort", onAbort, { once: true });
+  // Reserve the cleanup grace inside the attempt window so the drive deadline
+  // firing still leaves room to stop the child by deadlineAt.
+  const deadlineMs = Math.max(1, deadlineAt - Date.now() - CLEANUP_GRACE_MS);
   timer = setTimeout(() => {
     outcome.reason = `deadline exceeded after ${deadlineMs}ms`;
     session.abort?.().catch(() => {});
@@ -326,7 +371,10 @@ async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }
     await Promise.all([session.send({ prompt }), promise]);
     return outcome;
   } catch (error) {
-    if (!(error instanceof LaneError)) {
+    // A session.send rejection arriving after the outcome already settled as
+    // complete (session.idle resolved first) must not overwrite the reason of
+    // a complete review with an error.
+    if (!(error instanceof LaneError) && outcome.status !== "complete") {
       outcome.reason = String(error?.message ?? error);
     }
     return outcome;

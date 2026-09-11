@@ -143,7 +143,14 @@ export async function runLaneBatch({
         totalEndAt,
         signal,
       });
-      await onLaneDone?.(lane, result);
+      // Progress reporting is not a lane result: a throwing onLaneDone is
+      // recorded on the lane (disclosed) instead of rejecting the batch and
+      // discarding the already-settled lane results.
+      try {
+        await onLaneDone?.(lane, result);
+      } catch (error) {
+        result.progressError = `progress reporting failed: ${String(error?.message ?? error)}`;
+      }
       return result;
     }),
   );
