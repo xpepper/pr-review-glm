@@ -69,6 +69,7 @@ budgets with cancellation propagation. The `--quick|--balanced|--full|--deep` fl
 are already parsed and currently rejected — flip them live. Dogfood runs from here on:
 every I4+ increment PR is reviewed by this tool via the dev-loop before merge.
 
-After I4: C-series STATUS-id support (`next=C1` currently fails the status gate —
-extend the grammar in a code PR before C1 becomes active), then C1 (custom review
-roles) or I5 per ROADMAP order.
+After I4: V-series STATUS-id support (V1 needs `next=V1` to parse — the grammar
+accepts only I/L ids today; extend it in a code PR before V1 becomes active, covering
+the C-series in the same change), then V1 (plugin release versioning), then C1
+(custom review roles) or I5 per ROADMAP order.
