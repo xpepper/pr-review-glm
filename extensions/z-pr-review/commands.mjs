@@ -185,7 +185,13 @@ export function renderReview(capture, lane) {
       status: lane.status,
       reason: lane.status === "complete" ? undefined : lane.reason,
       findings: lane.status === "complete"
-        ? lane.findings.map((finding) => ({ ...finding, title: machineText(finding.title), detail: finding.detail === undefined ? undefined : machineText(finding.detail) }))
+        ? lane.findings.map((finding) => ({
+            severity: finding.severity,
+            title: machineText(finding.title),
+            file: finding.file === undefined ? undefined : machineText(finding.file),
+            line: finding.line,
+            detail: finding.detail === undefined ? undefined : machineText(finding.detail),
+          }))
         : [],
       dropped: lane.status === "complete" ? lane.dropped.length : 0,
     }),

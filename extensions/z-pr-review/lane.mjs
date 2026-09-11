@@ -34,7 +34,7 @@ export function unwrapLaneOutput(text) {
   const end = lines.findIndex((line, index) => index > begin && isMarker(line, REVIEW_ENVELOPE_END));
   if (end === -1) return { status: "malformed", reason: "no end marker after the begin marker" };
   let payload = lines.slice(begin + 1, end).join("\n").trim();
-  const fence = /^```[a-zA-Z0-9]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
+  const fence = /^```[^\s`]*\r?\n([\s\S]*)\r?\n```$/.exec(payload);
   if (fence) payload = fence[1].trim();
   if (payload.length === 0) return { status: "malformed", reason: "empty envelope payload" };
   return { status: "ok", payload };
@@ -141,12 +141,13 @@ export function resolveLaneCliPath(env = process.env) {
 
 // One heavy-lane attempt. Deadline comes from config (deadlines.attemptMs.heavy);
 // exceeding it aborts the child session and classifies the lane failed.
-// `createRuntime` is injectable so unit tests drive a fake child runtime.
+// `createRuntime` is injectable so unit tests drive a fake child runtime; cliPath
+// resolves lazily inside defaultCreateRuntime so injected runtimes never touch PATH.
 export async function runHeavyLane({
   envelope,
   config,
   repoRoot,
-  cliPath = resolveLaneCliPath(),
+  cliPath,
   createRuntime = defaultCreateRuntime,
 }) {
   const tier = config.tiers.heavy;
@@ -170,7 +171,7 @@ export async function runHeavyLane({
 async function defaultCreateRuntime({ cliPath, repoRoot, model, reasoningEffort, availableTools, permission }) {
   const { CopilotClient, RuntimeConnection } = await import("@github/copilot-sdk");
   const client = new CopilotClient({
-    connection: RuntimeConnection.forStdio({ path: cliPath }),
+    connection: RuntimeConnection.forStdio({ path: cliPath ?? resolveLaneCliPath() }),
   });
   const session = await client.createSession({
     model,
