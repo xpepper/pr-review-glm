@@ -10,6 +10,10 @@ describe("parseStatusLine", () => {
     assert.deepEqual(parseStatusLine(handoff("STATUS: next=i3")), { kind: "next", increment: "I3" });
     assert.deepEqual(parseStatusLine(handoff("STATUS: next=L1")), { kind: "next", increment: "L1" });
   });
+  it("parses V- and C-series ids (release versioning and custom roles)", () => {
+    assert.deepEqual(parseStatusLine(handoff("STATUS: next=V1")), { kind: "next", increment: "V1" });
+    assert.deepEqual(parseStatusLine(handoff("STATUS: next=c1")), { kind: "next", increment: "C1" });
+  });
   it("parses blocked with a reason", () => {
     assert.deepEqual(parseStatusLine(handoff("STATUS: blocked: gh auth expired")), {
       kind: "blocked", reason: "gh auth expired",

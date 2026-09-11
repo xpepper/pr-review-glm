@@ -13,11 +13,13 @@ import { join } from "node:path";
 
 const MACHINE_BLOCK = /```z-pr-review-findings\n([\s\S]*?)```/;
 const EXPECTED_DESCRIPTIONS = {
-  "z-pr-review": "PR review via a heavy reviewer lane over the captured diff; status and help",
+  "z-pr-review": "PR review via concurrent tiered reviewer lanes over the captured diff; status and help",
 };
 
-// Machine summary → loop review contract. Fail-closed: any incomplete lane,
-// missing or malformed summary, or dropped-everything run blocks the merge.
+// Machine summary → loop review contract. Fail-closed: any incomplete lane
+// (batch status "partial"/"failed" — since I4 a batch is "complete" only when
+// every lane completed), missing or malformed summary, or dropped-everything
+// run blocks the merge.
 export function dogfoodVerdict(summary, { source = "dispatch" } = {}) {
   if (summary === null || typeof summary !== "object" || Array.isArray(summary)) {
     return {
@@ -28,7 +30,7 @@ export function dogfoodVerdict(summary, { source = "dispatch" } = {}) {
   if (summary.status !== "complete") {
     return {
       verdict: "request-changes",
-      findings: [{ severity: "P1", title: `dogfood review lane incomplete: ${String(summary.reason ?? "unknown")}` }],
+      findings: [{ severity: "P1", title: `dogfood review incomplete (${String(summary.status)}): ${String(summary.reason ?? "unknown")}` }],
     };
   }
   const findings = (Array.isArray(summary.findings) ? summary.findings : [])

@@ -1,13 +1,15 @@
 // Extension entry: registers the /z-pr-review and /z-pr-review-config commands.
-// I3 scope: status/help, read-only PR capture (--capture-only), configuration,
-// and the first real review — one heavy lane over the captured diff in an
-// owned Copilot SDK child runtime, findings rendered in-chat. The session LLM
-// never orchestrates anything here (spec: "Architecture A"); every handler is
-// plain code and the model runs only inside the lane child.
+// I4 scope: status/help, read-only PR capture (--capture-only), configuration,
+// and tiered concurrent reviews — a mode topology of light/medium/heavy lanes
+// over the captured diff, each an owned Copilot SDK child runtime under
+// attempt/batch/total budgets with one fallback attempt per lane. The session
+// LLM never orchestrates anything here (spec: "Architecture A"); every
+// handler is plain code and the model runs only inside the lane children.
 import { joinSession } from "@github/copilot-sdk/extension";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
-import { runHeavyLane } from "./lane.mjs";
+import { runLaneBatch } from "./batch.mjs";
+import { LANE_TOPOLOGIES, describeTopology } from "./topologies.mjs";
 import {
   parseConfigArgs,
   parseReviewArgs,
@@ -28,7 +30,7 @@ const session = await joinSession({
   commands: [
     {
       name: "z-pr-review",
-      description: "PR review via a heavy reviewer lane over the captured diff; status and help",
+      description: "PR review via concurrent tiered reviewer lanes over the captured diff; status and help",
       handler: async ({ args }) => {
         const parsed = parseReviewArgs(args);
         if (parsed.kind === "error") {
@@ -101,23 +103,25 @@ async function runCapture(parsed) {
   }
 }
 
-// Full review (I3): capture, then one heavy lane over the captured diff in an
-// owned child runtime. Flags for later increments are rejected up front with a
-// pointer, never silently ignored; publication cannot run before I7, so
-// --no-comment is the only posture that exists today.
+// Full review (I4): capture, then the mode's topology of tiered lanes run
+// concurrently under the config budgets, one fallback attempt per lane. The
+// mode comes from the flag or config defaultMode; flags for later increments
+// are rejected up front with a pointer, never silently ignored. Publication
+// cannot run before I7, so --no-comment is the only posture that exists today.
 async function runReview(parsed) {
   const { flags, number } = parsed;
-  const unimplemented = flags.mode !== null
-    ? ["--" + flags.mode, "mode topologies arrive with increment I4"]
-    : flags.all
-      ? ["--all", "finding selection arrives with increment I6"]
-      : flags.comment === true
-        ? ["--comment", "COMMENT publication arrives with increment I7"]
-        : null;
+  const unimplemented = flags.all
+    ? ["--all", "finding selection arrives with increment I6"]
+    : flags.comment === true
+      ? ["--comment", "COMMENT publication arrives with increment I7"]
+      : null;
   if (unimplemented !== null) {
     throw new Error(`"${unimplemented[0]}" is ${unimplemented[1]}.`);
   }
   try {
+    await store.load();
+    const config = store.get();
+    const mode = flags.mode ?? config.defaultMode;
     const outcome = await capturePullRequest({
       number,
       includeDrafts: flags.includeDrafts,
@@ -129,14 +133,28 @@ async function runReview(parsed) {
     }
     lastCapture = outcome.summary;
     await session.log(renderCapture(outcome.summary));
-    await store.load();
-    const lane = await runHeavyLane({
+    await session.log(`Dispatching mode ${mode}: ${describeTopology(mode)}.`);
+    const batch = await runLaneBatch({
+      mode,
+      lanes: LANE_TOPOLOGIES[mode],
       envelope: outcome.envelope,
-      config: store.get(),
+      config,
       repoRoot: process.cwd(),
+      onLaneDone: async (lane, result) => {
+        const tail = result.status === "complete"
+          ? `complete — ${result.findings.length} finding(s)`
+          : `FAILED (${result.reason})`;
+        await session.log(`Lane ${lane.id} (${lane.tier}): ${tail}`);
+      },
     });
-    const modelLabel = store.get().tiers.heavy.model ?? "session default model";
-    await session.log(renderReview(outcome.summary, { ...lane, modelLabel }));
+    const decorated = {
+      ...batch,
+      lanes: batch.lanes.map((result) => ({
+        ...result,
+        modelLabel: modelLabelFor(config, result),
+      })),
+    };
+    await session.log(renderReview(outcome.summary, decorated));
   } catch (error) {
     if (error instanceof CaptureError) {
       await session.log(`Capture refused — nothing was written: ${error.message}`, { level: "error" });
@@ -144,6 +162,11 @@ async function runReview(parsed) {
     }
     throw error;
   }
+}
+
+function modelLabelFor(config, laneResult) {
+  const tier = config.tiers[laneResult.tier];
+  return tier.model ?? "session default model";
 }
 
 function describeConfigError(error) {

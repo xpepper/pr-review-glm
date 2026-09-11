@@ -1,8 +1,12 @@
-// I3: the first reviewer lane — one heavy Copilot SDK child runtime over the
-// captured diff, envelope-marker output contract (structured output is broken
-// on Copilot CLI 1.0.83), findings parsed deterministically by this code.
-// The session LLM never touches this path; the model runs only inside the
-// child runtime (spec: "Architecture A", "Publication gates" authority rule).
+// I3–I4: reviewer lanes — Copilot SDK child runtimes over the captured diff,
+// envelope-marker output contract (structured output is broken on Copilot CLI
+// 1.0.83), findings parsed deterministically by this code. I4 generalizes the
+// single heavy lane to any tier: the lane descriptor picks the tier (model +
+// effort from config), a model override serves fallback attempts, the attempt
+// deadline comes from the caller (tier cap intersected with batch/total
+// budgets in batch.mjs), and an AbortSignal propagates parent cancellation
+// into the child session. The session LLM never touches this path (spec:
+// "Architecture A", "Publication gates" authority rule).
 
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
@@ -83,12 +87,23 @@ function findingProblem(candidate) {
   return null;
 }
 
-export function buildLanePrompt(envelope) {
+// The lane prompt carries the lane's fixed id and objective (topologies.mjs);
+// other lanes cover the rest of the diff, so a lane reports only its own
+// focus. The objective is model input, never authority — findings are shaped
+// and (from I5) validated by host code.
+export function buildLanePrompt(envelope, lane = null) {
+  const focus = lane === null ? [] : [
+    `You are the "${lane.id}" lane (${lane.tier} tier).`,
+    `Your focus: ${lane.objective}.`,
+    "Report only findings inside your focus; other lanes cover the rest of the review.",
+    "",
+  ];
   return [
     "You are one reviewer lane of a code-review tool. Review the following pull request diff.",
     `Repository: ${envelope.repo} — PR #${envelope.pr.number} "${envelope.pr.title}"`,
     `Base ${envelope.pr.base.refName} -> Head ${envelope.pr.head.refName}`,
     "",
+    ...focus,
     "Report only defects you can ground in the diff: correctness bugs, contract violations,",
     "security, performance, or resource problems. Skip style nits you cannot justify.",
     "For each finding give a JSON object with fields: severity (P0|P1|P2|P3|nit), title",
@@ -139,33 +154,46 @@ export function resolveLaneCliPath(env = process.env) {
   return execFileSync("sh", ["-c", "command -v copilot"], { encoding: "utf8" }).trim();
 }
 
-// One heavy-lane attempt. Deadline comes from config (deadlines.attemptMs.heavy);
-// exceeding it aborts the child session and classifies the lane failed.
-// `createRuntime` is injectable so unit tests drive a fake child runtime; cliPath
-// resolves lazily inside defaultCreateRuntime so injected runtimes never touch PATH.
-export async function runHeavyLane({
+// One lane attempt at an explicit tier. The deadline is the caller's: the
+// tier attempt cap (deadlines.attemptMs.<tier>) possibly intersected with the
+// batch/total budgets by the caller (batch.mjs); exceeding it aborts the child
+// session and classifies the attempt failed. modelOverride serves fallback
+// attempts (tier.fallback); signal propagates parent cancellation into the
+// child session. `createRuntime` is injectable so unit tests drive a fake
+// child runtime; cliPath resolves lazily inside defaultCreateRuntime so
+// injected runtimes never touch PATH.
+export async function runLane({
+  lane,
   envelope,
   config,
   repoRoot,
   cliPath,
+  deadlineMs,
+  modelOverride,
+  signal = null,
   createRuntime = defaultCreateRuntime,
 }) {
-  const tier = config.tiers.heavy;
-  const prompt = buildLanePrompt(envelope);
+  const tier = config.tiers[lane.tier];
+  const prompt = buildLanePrompt(envelope, lane);
+  if (signal?.aborted) {
+    return { status: "failed", reason: "cancelled before dispatch", findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
+  }
   const { client, session } = await createRuntime({
     cliPath,
     repoRoot,
-    model: tier.model ?? undefined,
+    model: modelOverride ?? tier.model ?? undefined,
     reasoningEffort: tier.effort,
     availableTools: ["builtin:view", "builtin:grep", "builtin:glob"],
     enableConfigDiscovery: false,
     permission: lanePermissionPolicy(repoRoot),
   });
-  return await driveLane(session, {
+  const result = await driveLane(session, {
     prompt,
-    deadlineMs: config.deadlines.attemptMs.heavy,
+    deadlineMs,
     cleanup: () => client.stop(),
+    signal,
   });
+  return { ...result, laneId: lane.id, tier: lane.tier };
 }
 
 async function defaultCreateRuntime({ cliPath, repoRoot, model, reasoningEffort, availableTools, permission }) {
@@ -183,15 +211,22 @@ async function defaultCreateRuntime({ cliPath, repoRoot, model, reasoningEffort,
   return { client, session };
 }
 
-async function driveLane(session, { prompt, deadlineMs, cleanup }) {
+async function driveLane(session, { prompt, deadlineMs, cleanup, signal = null }) {
   const outcome = { status: "failed", reason: "", findings: [], dropped: [], laneText: "" };
   const { promise, resolve, reject } = Promise.withResolvers();
   promise.catch(() => {});
   let timer = null;
+  const onAbort = () => {
+    outcome.reason = "cancelled";
+    session.abort?.().catch(() => {});
+    reject(new LaneError("cancelled"));
+  };
   const finish = () => {
     if (timer) clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
     cleanup?.().catch(() => {});
   };
+  if (signal) signal.addEventListener("abort", onAbort, { once: true });
   timer = setTimeout(() => {
     outcome.reason = `deadline exceeded after ${deadlineMs}ms`;
     session.abort?.().catch(() => {});
