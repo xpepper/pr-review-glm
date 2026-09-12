@@ -18,11 +18,16 @@ import { drainUnconfirmedStops, runLane } from "./lane.mjs";
 // arrives with telemetry (I8).
 function attemptPlan(lane, config) {
   const tier = config.tiers[lane.tier];
-  const plan = [{ model: tier.model ?? null, capMs: config.deadlines.attemptMs[lane.tier], label: "primary" }];
+  // C1: a lane (custom role) model override replaces the tier model as the
+  // primary and as the same-model retry; the tier's configured fallback model
+  // still wins when present (it is the explicit escape hatch for a flaky
+  // primary).
+  const laneModel = (lane.model !== undefined ? lane.model : tier.model) ?? null;
+  const plan = [{ model: laneModel, capMs: config.deadlines.attemptMs[lane.tier], label: "primary" }];
   if (tier.fallback !== undefined) {
     plan.push({ model: tier.fallback, capMs: config.deadlines.fallbackMs, label: "fallback" });
   } else {
-    plan.push({ model: tier.model ?? null, capMs: config.deadlines.fallbackMs, label: "retry" });
+    plan.push({ model: laneModel, capMs: config.deadlines.fallbackMs, label: "retry" });
   }
   return plan;
 }

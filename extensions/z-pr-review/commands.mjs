@@ -100,6 +100,9 @@ export function renderStatus(lastCapture = null, version = null) {
     "  each from config; owned Copilot SDK child runtimes under attempt/batch/total budgets);",
     "  findings rendered in-chat. Publication never runs in v1 without a future gate (I7).",
     "- /z-pr-review-config — inspect and edit personal configuration.",
+    "- Custom review roles and modes (schemaVersion 2 config): user-defined lanes",
+    "  (prompt + tier, optional model/effort overrides) composed into custom modes;",
+    "  edited directly in the config file, shown via /z-pr-review-config show.",
     "",
     "Not implemented yet (ROADMAP order):",
     "- I5: deterministic validation and adjudication",
@@ -309,6 +312,8 @@ export function renderConfigShow(store) {
     `tiers.heavy.effort: ${config.tiers.heavy.effort}`,
     `tiers.heavy.fallback: ${formatFallback(config.tiers.heavy.fallback)}`,
     `defaultMode: ${config.defaultMode}`,
+    ...renderRoles(config.roles),
+    ...renderModes(config.modes),
     `autoPostReviews: ${config.autoPostReviews}`,
     `deadlines.attemptMs.light: ${config.deadlines.attemptMs.light}`,
     `deadlines.attemptMs.medium: ${config.deadlines.attemptMs.medium}`,
@@ -329,6 +334,37 @@ function formatFallback(fallback) {
   return fallback === undefined ? "(unset)" : fallback;
 }
 
+// Roles and modes are edited directly in the config file (multi-line prompts
+// don't fit the key=value grammar), so `show` is their read surface: one line
+// per role with the tier/overrides and a one-line prompt excerpt, and the
+// mode compositions. Newlines inside a prompt excerpt are flattened so a
+// prompt can never forge extra config lines.
+function renderRoles(roles) {
+  const entries = Object.entries(roles ?? {});
+  if (entries.length === 0) return ["roles: (none — standard topologies only)"];
+  return [
+    `roles: ${entries.length} defined`,
+    ...entries.map(([id, role]) => {
+      const overrides = [
+        role.model === undefined ? null : `model ${formatModel(role.model)}`,
+        role.effort === undefined ? null : `effort ${role.effort}`,
+      ].filter(Boolean);
+      const tail = overrides.length > 0 ? `, ${overrides.join(", ")}` : "";
+      const excerpt = singleLine(role.prompt).slice(0, 72);
+      return `- ${id} (${role.tier}${tail}): "${excerpt}"`;
+    }),
+  ];
+}
+
+function renderModes(modes) {
+  const entries = Object.entries(modes ?? {});
+  if (entries.length === 0) return ["modes: (none — standard modes apply)"];
+  return [
+    `modes: ${entries.length} defined (override/compose standard modes)`,
+    ...entries.map(([name, laneIds]) => `- ${name}: ${laneIds.join(" -> ")}`),
+  ];
+}
+
 export function renderConfigHelp(store) {
   return [
     "/z-pr-review-config — inspect or change z-pr-review configuration",
@@ -346,5 +382,10 @@ export function renderConfigHelp(store) {
     "Values: true/false, integers (milliseconds), or strings (model ids, efforts).",
     "A tier model of null uses the session model at review time; only",
     "`unset tiers.<tier>.model` restores that null (set always takes a literal id).",
+    "Custom review roles and modes are edited directly in the config file",
+    "(multi-line prompts don't fit key=value): roles.<id> = {prompt, tier,",
+    "model?, effort?}; modes.<name> = ordered array of built-in lane ids and/or",
+    "role ids (a standard mode name there overrides that mode). Set",
+    "defaultMode to a custom mode to select it; mode flags stay standard.",
   ].join("\n");
 }

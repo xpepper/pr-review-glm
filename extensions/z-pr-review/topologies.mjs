@@ -109,14 +109,20 @@ export function isReviewMode(mode) {
   return Object.prototype.hasOwnProperty.call(LANE_TOPOLOGIES, mode);
 }
 
-// One-line lane-set description for progress/report headers, e.g.
-// "5 lanes (1 light, 4 heavy)".
-export function describeTopology(mode) {
-  const lanes = LANE_TOPOLOGIES[mode];
+// One-line lane-list description for progress/report headers, e.g.
+// "5 lanes (1 light, 4 heavy)". Works for any resolved lane list (C1 custom
+// modes compose built-in lanes and custom roles).
+export function describeLanes(lanes) {
   const counts = new Map();
   for (const lane of lanes) counts.set(lane.tier, (counts.get(lane.tier) ?? 0) + 1);
   const parts = ["light", "medium", "heavy"]
     .filter((tier) => counts.has(tier))
     .map((tier) => `${counts.get(tier)} ${tier}`);
   return `${lanes.length} lane${lanes.length === 1 ? "" : "s"} (${parts.join(", ")})`;
+}
+
+// Standard-topology convenience; custom modes resolve their lane list first
+// (roles.resolveMode) and use describeLanes.
+export function describeTopology(mode) {
+  return describeLanes(LANE_TOPOLOGIES[mode]);
 }
