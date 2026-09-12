@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -35,10 +36,30 @@ const DENIED_TOOLS = "Bash(gh pr merge *)";
 // auth stay real through documented env redirection, and the API key rides the
 // environment as before. The zcode-headless preflight gate probes this exact
 // env shape before any phase is dispatched.
+// gh auth, pinned to a token the isolated HOME can use. The operator's gh
+// stores its token in the macOS keyring, and gh's keyring read FAILS under a
+// redirected HOME (verified 2026-09-12: `gh auth status` with a fake HOME
+// reports "The token in default is invalid", with a real HOME it is fine —
+// so #25's GIT_CONFIG_* helper pin still left the helper answerless, and the
+// V1 run 3/4 fixers hit interactive "Username for 'https://github.com'"
+// prompts mid-push). GH_TOKEN is gh's documented top-priority auth source and
+// bypasses the keyring entirely: resolve it once here, in the OPERATOR's env
+// where the keyring works, and carry it into the phase env. The phase agents
+// are the operator's own agents on the operator's machine; the token was
+// already reachable from any phase via gh under the pre-#24 real HOME.
+function resolveGhToken(env) {
+  try {
+    return { token: execSync("gh auth token", { env, encoding: "utf8" }).trim() };
+  } catch (error) {
+    return { error: `gh auth token failed (the loop must run where gh is logged in): ${String(error.message ?? error).slice(0, 200)}` };
+  }
+}
+
 export function buildPhaseEnv({
   home = process.env.HOME,
   env = process.env,
   mkdtemp = mkdtempSync,
+  resolveToken = resolveGhToken,
 } = {}) {
   const sourceConfig = join(home, ".zcode", "cli", "config.json");
   let configText;
@@ -46,6 +67,11 @@ export function buildPhaseEnv({
     configText = readFileSync(sourceConfig, "utf8");
   } catch {
     return { error: `cannot read ${sourceConfig} — headless phases need the operator's model config; see AGENTS.md (Environment facts — zcode CLI)` };
+  }
+  const ghToken = resolveToken(env);
+  if (ghToken.error) return { error: ghToken.error };
+  if (!ghToken.token) {
+    return { error: "gh auth token returned empty — log in with gh in the shell that launches the loop" };
   }
   const phaseHome = mkdtemp(join(tmpdir(), "zpr-phase-home-"));
   mkdirSync(join(phaseHome, ".zcode", "cli"), { recursive: true });
@@ -56,14 +82,17 @@ export function buildPhaseEnv({
       HOME: phaseHome,
       GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
       GH_CONFIG_DIR: join(home, ".config", "gh"),
+      // Phase gh auth: the token rides the env (keyring is unreachable under
+      // the redirected HOME), so `gh` commands and the git credential helper
+      // below both authenticate deterministically, no prompts.
+      GH_TOKEN: ghToken.token,
       // Git credentials, pinned to gh's helper. The operator's helper chain
       // (observed: osxkeychain, a reset line, then git-credential-manager)
       // breaks under the isolated HOME — GCM has no config there and falls
-      // back to interactive prompting (observed in the V1 run 3 fixer:
-      // "Username for 'https://github.com':" mid-push). These GIT_CONFIG_*
-      // entries are command-scope config: the empty value resets whatever the
-      // global file accumulated, then exactly one helper remains — gh's, which
-      // reads GH_CONFIG_DIR above. Phase pushes become deterministic.
+      // back to interactive prompting. These GIT_CONFIG_* entries are
+      // command-scope config: the empty value resets whatever the global file
+      // accumulated, then exactly one helper remains — gh's, which answers
+      // from GH_TOKEN above. Phase pushes/fetches become deterministic.
       GIT_CONFIG_COUNT: "2",
       GIT_CONFIG_KEY_0: "credential.helper",
       GIT_CONFIG_VALUE_0: "",

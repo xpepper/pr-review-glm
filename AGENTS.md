@@ -115,15 +115,20 @@ upstream `lib/` reused with attribution.
     gate runs a one-turn probe and fails fast with the CLI's own error line when
     any of this is missing.
 - `--mode yolo` (default for `--prompt`), `--cwd`, `--disallowed-tools` parse and
-  work as the loop uses them.
-- Headless phases inherit the user's FULL MCP/plugin config (`enabledPlugins` —
-  e.g. `npm exec @playwright/mcp@latest` auto-spawns per phase), so a phase agent
-  can invoke browser MCP tools unless denied: observed 2026-09-11 when a reviewer
-  agent's playwright tool call popped a visible automation Chrome mid-run. The
-  dev-loop denies `mcp__*` plus the known server names in `DENIED_TOOLS`
-  (`scripts/dev-loop/phases.mjs`; parser acceptance verified on 0.16.5 — the
-  match effect rides on supervised runs staying Chrome-free). Re-verify deny
-  patterns after CLI updates, like every other flag.
+  work as the loop uses them. **`--disallowed-tools` never matches MCP tools** —
+  no denylist shape does on 0.16.5 (`mcp__*`, bare server names, exact names:
+  all parser-accepted, all ineffective; observed live twice when reviewer agents
+  invoked playwright MCP tools and popped a visible automation Chrome, I4 and
+  V1). The `--allowed-tools` allowlist is parser-dead like `--max-turns`.
+- Headless phases therefore run with an **isolated HOME** (`buildPhaseEnv` in
+  `scripts/dev-loop/phases.mjs`, PR #24): a temp HOME containing only the copied
+  model config, so MCP servers, plugins, and skills never exist for a phase —
+  verified Chrome-free in supervised runs. `GIT_CONFIG_GLOBAL`/`GH_CONFIG_DIR`
+  redirect git identity and gh config to the real HOME; gh's keyring token is
+  unreachable under a redirected HOME ("token invalid"), so the loop resolves
+  `gh auth token` once in its own env and carries it as `GH_TOKEN` (PR #26), and
+  pins the git credential helper to gh's. Re-verify after CLI updates, like
+  every other flag.
 
 ## Conventions
 

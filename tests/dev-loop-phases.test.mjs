@@ -53,8 +53,8 @@ describe("buildPhaseEnv", () => {
       rmSync(home, { recursive: true, force: true });
     }
   };
-  it("builds an isolated HOME carrying only the model config, with git/gh redirected to the real home", withFakeHome(async (home) => {
-    const phase = buildPhaseEnv({ home, env: { HOME: home, ZAI_API_KEY: "k", PATH: "/usr/bin" } });
+  it("builds an isolated HOME carrying only the model config, with git/gh redirected to the real home and the gh token in env", withFakeHome(async (home) => {
+    const phase = buildPhaseEnv({ home, env: { HOME: home, ZAI_API_KEY: "k", PATH: "/usr/bin" }, resolveToken: () => ({ token: "gh-token" }) });
     assert.equal(phase.error, undefined);
     assert.ok(phase.env.HOME.startsWith(join(tmpdir(), "zpr-phase-home-")), "phase HOME must be a fresh temp dir");
     assert.notEqual(phase.env.HOME, home);
@@ -70,6 +70,9 @@ describe("buildPhaseEnv", () => {
     assert.equal(phase.env.GIT_CONFIG_VALUE_0, "");
     assert.equal(phase.env.GIT_CONFIG_KEY_1, "credential.helper");
     assert.equal(phase.env.GIT_CONFIG_VALUE_1, "!gh auth git-credential");
+    // The keyring is unreachable under the redirected HOME, so phase gh auth
+    // rides GH_TOKEN (resolved once in the operator env).
+    assert.equal(phase.env.GH_TOKEN, "gh-token");
     phase.cleanup();
     assert.equal(existsSync(phase.env.HOME), false, "cleanup removes the phase HOME");
   }));
@@ -78,6 +81,12 @@ describe("buildPhaseEnv", () => {
     assert.match(phase.error, /cannot read .*config\.json/);
     assert.match(phase.error, /AGENTS\.md/);
   });
+  it("fails closed when the gh token cannot be resolved (loop must run where gh is logged in)", withFakeHome(async (home) => {
+    const failing = buildPhaseEnv({ home, env: { HOME: home }, resolveToken: () => ({ error: "gh auth token failed (the loop must run where gh is logged in): boom" }) });
+    assert.match(failing.error, /gh auth token failed/);
+    const empty = buildPhaseEnv({ home, env: { HOME: home }, resolveToken: () => ({ token: "" }) });
+    assert.match(empty.error, /gh auth token returned empty/);
+  }));
 });
 
 describe("renderPrompt", () => {
