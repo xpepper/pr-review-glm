@@ -1,10 +1,49 @@
-// Merge-path tagging tail (V1): after gh reports the squash-merge done, GitHub
-// must confirm the PR is MERGED, main must be checked out and fast-forwarded,
+// Merge path (V1): a server-pinned squash merge (the reviewed head enforced
+// atomically at GitHub) plus the tagging tail — after the mutation reports
+// success, GitHub must confirm the PR is MERGED, main must be checked out and fast-forwarded,
 // and the resulting HEAD must be exactly this PR's merge commit — only then is
 // the merged main tagged vX.Y.Z. Every step fails closed — a failure returns a
 // merge-path failure with a precise reason; the merge itself (if it happened)
 // stays put. Code-owned only: no model output gates a release.
 import { tagMergedRelease } from "./version.mjs";
+
+// Server-side enforcement of the reviewed head (P1: `gh pr merge` merges
+// whatever head GitHub currently holds, so the loop's local pin can lose a
+// race in the seconds between fetchPrHead/verifyBumpAtMerge and the merge).
+// The GraphQL mergePullRequest mutation takes the head OID itself and GitHub
+// rejects the whole mutation if the head moved — the pin is atomic at the
+// server, closing the window the CLI command leaves open.
+const MERGE_MUTATION = [
+  "mutation($pr: ID!, $head: GitObjectID!) {",
+  "  mergePullRequest(input: {pullRequestId: $pr, mergeMethod: SQUASH, headRefOid: $head}) { mergeCommit { oid } }",
+  "}",
+].join("\n");
+
+export async function squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadRefOid }) {
+  // The mutation needs the PR's GraphQL id (not its number) and its branch
+  // name (for the --delete-branch equivalent below).
+  const view = await run("gh", ["pr", "view", String(prNumber), "--json", "id,headRefName"], { cwd: repoRoot });
+  let pr = null;
+  try { pr = JSON.parse(view.stdout || "{}"); } catch { /* handled below */ }
+  if (view.code !== 0 || !pr?.id || typeof pr.headRefName !== "string" || !pr.headRefName) {
+    return { code: 1, stdout: view.stdout, stderr: `cannot resolve PR ${prNumber}'s GraphQL id / branch name (merge aborted): ${(view.stderr || view.stdout || "").slice(0, 200)}`, timedOut: false };
+  }
+  const api = await run("gh", ["api", "graphql", "-f", `query=${MERGE_MUTATION}`, "-f", `pr=${pr.id}`, "-f", `head=${expectedHeadRefOid}`], { cwd: repoRoot });
+  let payload = null;
+  try { payload = JSON.parse(api.stdout || "{}"); } catch { /* handled below */ }
+  const errors = Array.isArray(payload?.errors) ? payload.errors : null;
+  if (api.code !== 0 || errors || !payload?.data?.mergePullRequest) {
+    const detail = errors?.map((error) => error?.message ?? String(error)).join("; ")
+      ?? (api.stderr || api.stdout || "no output").slice(0, 200);
+    return { code: 1, stdout: api.stdout, stderr: `GitHub refused the squash-merge of PR ${prNumber} pinned to reviewed head ${expectedHeadRefOid.slice(0, 7)} (merge aborted — the head likely moved; re-run the loop to re-assess): ${detail}`, timedOut: false };
+  }
+  // --delete-branch equivalent: the mutation has no such flag, so the branch
+  // is deleted after the merge. Failure is disclosed but cannot un-merge — the
+  // tail still runs so the merged head gets tagged and post-merge gates run.
+  const del = await run("git", ["push", "origin", "--delete", pr.headRefName], { cwd: repoRoot });
+  const warning = del.code === 0 ? "" : `\nwarning: branch ${pr.headRefName} was not deleted (delete it manually): ${(del.stderr || del.stdout || "").slice(0, 200)}`;
+  return { code: 0, stdout: api.stdout, stderr: warning, timedOut: false };
+}
 
 // A merge can report success while GitHub still shows OPEN for a moment, or sit
 // in QUEUED on a merge queue. Poll instead of failing on the first non-MERGED

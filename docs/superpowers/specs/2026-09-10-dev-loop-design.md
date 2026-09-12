@@ -22,7 +22,7 @@ normal PR flow itself.
 |---|---|
 | Orchestrator | Script loop (`scripts/dev-loop.mjs`, plain ESM, no deps), not an in-session agent. Deterministic shell owns sequencing and gates; every judgment phase is a fresh headless agent invocation. |
 | Worker | `zcode` CLI headless: `zcode --prompt <text> --cwd <repo> --mode yolo`, with merge denied via `--disallowed-tools` (zcode 0.16.5 parser-rejects `--max-turns` while still listing it in `--help`; phase bounds are wall-clock — see Amendments). Binary resolved from `ZCODE_CLI` env, default the app-bundle path (version-sensitive; flagged below). |
-| Merge policy | Merging is loop-owned and code-governed (`gh pr merge --squash --delete-branch`), never agent-discretion. `--merge human\|auto` (default **human**): `auto` merges only when gates are green **and all active reviews are clean** — (1) an independent reviewer invocation always, (2) the plugin's own dogfood review once it exists (I3+), which `auto` then additionally requires. Pre-I3, `auto` is an explicit opt-in on the independent review alone; `human` stops the loop after review 1 + gates and leaves merging to the human. |
+| Merge policy | Merging is loop-owned and code-governed (GraphQL `mergePullRequest` squash-pinned to the reviewed `headRefOid`, branch deleted after — amended V1 from `gh pr merge --squash --delete-branch`, which cannot pin a head), never agent-discretion. `--merge human\|auto` (default **human**): `auto` merges only when gates are green **and all active reviews are clean** — (1) an independent reviewer invocation always, (2) the plugin's own dogfood review once it exists (I3+), which `auto` then additionally requires. Pre-I3, `auto` is an explicit opt-in on the independent review alone; `human` stops the loop after review 1 + gates and leaves merging to the human. |
 | Clean | A review is clean when it reports no P0/P1 findings. P2 nits are recorded on the PR and do not block. |
 | State protocol | A machine-owned `STATUS:` line in `HANDOFF.md` (first line matching `^STATUS: `): `next=<increment-id>` · `blocked: <one-line reason>` · `done`. The worker writes it when rewriting HANDOFF; the loop only parses and validates it. |
 | Worker permissions | `--mode yolo` (headless default) minus merge. Start permissive-but-mergeless rather than pre-narrowed; tighten after the first supervised runs. |
@@ -69,8 +69,13 @@ normal PR flow itself.
    active reviews clean — pre-I3 that is the independent review alone (explicit
    opt-in); once the dogfood reviewer exists, `auto` additionally requires it. The
    merge **pins the reviewed head**: re-fetch the PR `headRefOid` immediately before
-   `gh pr merge` and, if it moved since assessment, re-enter assessment instead of
-   merging unreviewed commits (the I2 capture head-moved re-check pattern). With
+   merging and, if it moved since assessment, re-enter assessment instead of
+   merging unreviewed commits (the I2 capture head-moved re-check pattern). The
+   squash-merge itself is GitHub's GraphQL `mergePullRequest` mutation with
+   `headRefOid` set (amended V1: `gh pr merge` cannot pin a head, so the local
+   re-fetch could lose a race; the mutation is rejected server-side if the head
+   moved — atomic enforcement at GitHub), with the branch deleted after a
+   successful merge. With
    `--merge human` (the default), stop here and leave merging to the human.
 8. **Post-merge** (shell): sync `main`; re-run unit tests + smoke on merged `main`;
    red → stop immediately and report (human decides revert vs fix-forward); cooldown;

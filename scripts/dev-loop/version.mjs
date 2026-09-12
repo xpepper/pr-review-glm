@@ -100,7 +100,12 @@ export async function gateVersionBump({ run, repoRoot }) {
 // it post-hoc: if another merge sneaks in anyway, main's HEAD will not be this
 // PR's merge commit and the tail refuses to tag (loud stop, human decides).
 export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid }) {
-  const fetched = await run("git", ["fetch", "--quiet", "origin", "main"], { cwd: repoRoot });
+  // The explicit refspec is load-bearing: a bare `git fetch origin main`
+  // updates only FETCH_HEAD, so `git show origin/main:plugin.json` below would
+  // re-read the stale remote-tracking ref the assessment-time gate saw — the
+  // very staleness this re-check exists to catch. The forced refspec updates
+  // refs/remotes/origin/main itself.
+  const fetched = await run("git", ["fetch", "--quiet", "origin", "+refs/heads/main:refs/remotes/origin/main"], { cwd: repoRoot });
   if (fetched.code !== 0) {
     return { ok: false, detail: `git fetch origin main failed (merge aborted): ${(fetched.stderr || fetched.stdout || "").slice(0, 200)}` };
   }

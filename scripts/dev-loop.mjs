@@ -13,7 +13,7 @@ import {
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
-import { mergeTail } from "./dev-loop/merge-tail.mjs";
+import { mergeTail, squashMergeAtHead } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
 
@@ -266,7 +266,9 @@ async function main() {
       // version-side twin of the headRefOid pin).
       const bump = await verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid });
       if (!bump.ok) return { code: 1, stdout: "", stderr: bump.detail, timedOut: false };
-      const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
+      // gh pr merge cannot pin a head, so the local pin above can lose a race;
+      // the GraphQL mutation enforces the reviewed head atomically at GitHub.
+      const merged = await squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadRefOid });
       if (merged.code !== 0) return merged;
       // V1 tagging tail: GitHub confirms the merge, main is checked out and
       // fast-forwarded, then the merged main is tagged vX.Y.Z — every step

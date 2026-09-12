@@ -145,10 +145,16 @@ describe("verifyBumpAtMerge", () => {
     assert.match(result.detail, /not greater than main's 0\.3\.0 at merge time/);
   });
   it("fails closed when the fetch fails", async () => {
-    const { run } = fake({ overrides: { "git fetch --quiet origin main": res("", 1, "network") } });
+    const { run } = fake({ overrides: { "git fetch --quiet origin +refs/heads/main:refs/remotes/origin/main": res("", 1, "network") } });
     const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.equal(result.ok, false);
     assert.match(result.detail, /git fetch origin main failed/);
+  });
+  it("fetches with an explicit refspec that updates origin/main (a bare `fetch origin main` would leave the stale baseline in place)", async () => {
+    const { calls, run } = fake({ main: "0.1.0", head: "0.2.0" });
+    await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
+    assert.ok(calls.some((key) => key.startsWith("git fetch") && key.includes("+refs/heads/main:refs/remotes/origin/main")),
+      "the fetch must update refs/remotes/origin/main itself, not just FETCH_HEAD");
   });
   it("fails closed when the PR head cannot be pinned (gh view fails or OID malformed)", async () => {
     const ghDown = fake({ overrides: { "gh pr view 23 --json headRefOid": res("", 1, "gh down") } });
