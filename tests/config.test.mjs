@@ -18,6 +18,8 @@ describe("defaultConfig", () => {
         heavy: { model: null, effort: "high" },
       },
       defaultMode: "balanced",
+      roles: {},
+      modes: {},
       autoPostReviews: false,
       deadlines: {
         attemptMs: { light: 180_000, medium: 360_000, heavy: 720_000 },
@@ -77,7 +79,7 @@ describe("validateConfig", () => {
 
   it("rejects a wrong schema version", () => {
     const config = valid();
-    config.schemaVersion = 2;
+    config.schemaVersion = 3;
     const result = validateConfig(config);
     assert.equal(result.valid, false);
     assert(result.errors.some((e) => e.includes("schemaVersion")));
@@ -190,6 +192,112 @@ describe("validateConfig", () => {
     for (const effort of ["none", "minimal", "low", "medium", "high", "xhigh", "max"]) {
       assert(DEFAULT_EFFORTS.includes(effort), `${effort} must be a valid effort`);
     }
+  });
+});
+
+// --- C1: roles and modes -----------------------------------------------------
+
+describe("validateConfig roles/modes (C1)", () => {
+  const valid = () => defaultConfig();
+
+  it("accepts a well-formed role and a custom mode composing it with built-ins", () => {
+    const config = valid();
+    config.roles = {
+      "api-hygiene": { prompt: "API design and hygiene across the diff.", tier: "medium" },
+    };
+    config.modes = { "hygiene-first": ["overview", "api-hygiene", "correctness"] };
+    assert.deepEqual(validateConfig(config), { valid: true });
+  });
+
+  it("accepts role model/effort overrides (null model = session model)", () => {
+    const config = valid();
+    config.roles = {
+      "fast-pass": { prompt: "Quick pass.", tier: "light", model: null, effort: "minimal" },
+    };
+    assert.deepEqual(validateConfig(config), { valid: true });
+  });
+
+  it("rejects roles that are missing prompt/tier or carry unknown keys", () => {
+    const missingPrompt = valid();
+    missingPrompt.roles = { bad: { tier: "heavy" } };
+    const missingTier = valid();
+    missingTier.roles = { bad: { prompt: "p" } };
+    const unknownKey = valid();
+    unknownKey.roles = { bad: { prompt: "p", tier: "heavy", temperature: 0.2 } };
+    for (const config of [missingPrompt, missingTier, unknownKey]) {
+      const result = validateConfig(config);
+      assert.equal(result.valid, false);
+    }
+    assert(validateConfig(missingPrompt).errors.some((e) => e.startsWith("roles.bad:") && e.includes("prompt")));
+    assert(validateConfig(missingTier).errors.some((e) => e.startsWith("roles.bad:") && e.includes("tier")));
+    assert(validateConfig(unknownKey).errors.some((e) => e.includes("temperature")));
+  });
+
+  it("rejects an empty prompt, unknown tier, bad effort, and non-string/non-null model", () => {
+    for (const [mutation, needle] of [
+      [(role) => (role.prompt = "  "), "prompt"],
+      [(role) => (role.tier = "extreme"), "tier"],
+      [(role) => (role.effort = "ludicrous"), "effort"],
+      [(role) => (role.model = 42), "model"],
+    ]) {
+      const config = valid();
+      const role = { prompt: "p", tier: "heavy" };
+      mutation(role);
+      config.roles = { bad: role };
+      const result = validateConfig(config);
+      assert.equal(result.valid, false);
+      assert(result.errors.some((e) => e.includes(`roles.bad.${needle}`)), JSON.stringify(result.errors));
+    }
+  });
+
+  it("rejects a role id colliding with a built-in lane id", () => {
+    const config = valid();
+    config.roles = { correctness: { prompt: "p", tier: "heavy" } };
+    const result = validateConfig(config);
+    assert.equal(result.valid, false);
+    assert(result.errors.some((e) => e.includes("collides with built-in lane id")));
+  });
+
+  it("rejects modes referencing unknown lane ids and non-array/empty shapes", () => {
+    const unknownId = valid();
+    unknownId.modes = { custom: ["overview", "nope"] };
+    const notArray = valid();
+    notArray.modes = { custom: "overview" };
+    const empty = valid();
+    empty.modes = { custom: [] };
+    for (const config of [unknownId, notArray, empty]) {
+      const result = validateConfig(config);
+      assert.equal(result.valid, false);
+    }
+    assert(validateConfig(unknownId).errors.some((e) => e.includes("nope")));
+    assert(validateConfig(notArray).errors.some((e) => e.includes("modes.custom")));
+    assert(validateConfig(empty).errors.some((e) => e.includes("modes.custom")));
+  });
+
+  it("rejects a mode referencing a role that is not defined (roles and modes cross-check)", () => {
+    const config = valid();
+    config.roles = {};
+    config.modes = { custom: ["ghost-role"] };
+    const result = validateConfig(config);
+    assert.equal(result.valid, false);
+    assert(result.errors.some((e) => e.includes("ghost-role")));
+  });
+
+  it("allows overriding a standard mode name and selecting it (or a custom mode) as defaultMode", () => {
+    const config = valid();
+    config.roles = { extra: { prompt: "p", tier: "light" } };
+    config.modes = { balanced: ["overview", "extra"], turbo: ["extra", "correctness"] };
+    config.defaultMode = "turbo";
+    assert.deepEqual(validateConfig(config), { valid: true });
+  });
+
+  it("rejects defaultMode values that are neither standard nor config-defined modes", () => {
+    const config = valid();
+    config.modes = { turbo: ["overview"] };
+    config.defaultMode = "thorough";
+    const result = validateConfig(config);
+    assert.equal(result.valid, false);
+    assert(result.errors.some((e) => e.includes("defaultMode")));
   });
 });
 

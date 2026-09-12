@@ -11,7 +11,8 @@ import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
 import { runLaneBatch } from "./batch.mjs";
 import { drainUnconfirmedStops } from "./lane.mjs";
-import { LANE_TOPOLOGIES, describeTopology } from "./topologies.mjs";
+import { describeLanes } from "./topologies.mjs";
+import { resolveMode } from "./roles.mjs";
 import {
   parseConfigArgs,
   parseReviewArgs,
@@ -138,10 +139,14 @@ async function runReview(parsed) {
     }
     lastCapture = outcome.summary;
     await session.log(renderCapture(outcome.summary));
-    await session.log(`Dispatching mode ${mode}: ${describeTopology(mode)}.`);
+    // C1: the mode resolves through config — a custom/overridden mode in
+    // config.modes composes built-in lanes and custom roles into one lane
+    // list that runs through the unchanged budgets, shaping, and gates.
+    const lanes = resolveMode(mode, config);
+    await session.log(`Dispatching mode ${mode}: ${describeLanes(lanes)}.`);
     const batchPromise = runLaneBatch({
       mode,
-      lanes: LANE_TOPOLOGIES[mode],
+      lanes,
       envelope: outcome.envelope,
       config,
       repoRoot: process.cwd(),

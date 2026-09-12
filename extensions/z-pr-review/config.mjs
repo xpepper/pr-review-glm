@@ -1,11 +1,12 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { builtinLaneIds } from "./roles.mjs";
 
 // Personal configuration for z-pr-review. The whole object is validated as a
 // unit: a file that is partial or malformed is rejected and the last valid
 // state stays active (spec: "Error handling").
 
-export const CONFIG_SCHEMA_VERSION = 1;
+export const CONFIG_SCHEMA_VERSION = 2;
 
 // Renamed from "pr-review-glm" by R1 (2026-09-10). The store is user-local and
 // schema-versioned, so the rename starts fresh at the new path — no migration.
@@ -45,6 +46,10 @@ export function defaultConfig() {
       heavy: { model: null, effort: "high" },
     },
     defaultMode: "balanced",
+    // C1: custom review roles and custom modes start empty — the standard
+    // topologies apply until the user composes over them in the config file.
+    roles: {},
+    modes: {},
     autoPostReviews: false,
     deadlines: DEFAULT_DEADLINES_MS,
   });
@@ -102,6 +107,72 @@ function checkTier(tier, name, errors) {
   }
 }
 
+// C1 roles: { prompt, tier, model?, effort? } — prompt and tier required,
+// model (string id or null = session model) and effort optional, falling back
+// to the tier's values. A role id colliding with a built-in lane id would make
+// mode composition ambiguous, so it is rejected here rather than shadowed.
+function checkRoles(roles, errors) {
+  const builtinIds = builtinLaneIds();
+  for (const [id, role] of Object.entries(roles)) {
+    const label = `roles.${id}`;
+    if (id.trim().length === 0) {
+      errors.push("roles keys must be non-empty role ids");
+      continue;
+    }
+    if (builtinIds.includes(id)) {
+      errors.push(`${label}: role id collides with built-in lane id "${id}"`);
+      continue;
+    }
+    if (!isPlainObject(role)) {
+      errors.push(`${label} must be an object`);
+      continue;
+    }
+    for (const present of Object.keys(role)) {
+      if (!["prompt", "tier", "model", "effort"].includes(present)) {
+        errors.push(`${label}: unknown key "${present}"`);
+      }
+    }
+    for (const required of ["prompt", "tier"]) {
+      if (!(required in role)) errors.push(`${label}: missing key "${required}"`);
+    }
+    if ("prompt" in role && (typeof role.prompt !== "string" || role.prompt.trim().length === 0)) {
+      errors.push(`${label}.prompt must be a non-empty string (multi-line is fine)`);
+    }
+    if ("tier" in role && !TIER_NAMES.includes(role.tier)) {
+      errors.push(`${label}.tier must be one of: ${TIER_NAMES.join(", ")}`);
+    }
+    if ("model" in role && role.model !== null && (typeof role.model !== "string" || role.model.length === 0)) {
+      errors.push(`${label}.model must be a non-empty model id or null (session model)`);
+    }
+    if ("effort" in role && !DEFAULT_EFFORTS.includes(role.effort)) {
+      errors.push(`${label}.effort must be one of: ${DEFAULT_EFFORTS.join(", ")}`);
+    }
+  }
+}
+
+// C1 modes: mode name -> ordered list of lane ids (built-in lane ids and/or
+// role ids defined in config.roles). A key matching a standard mode name
+// OVERRIDES that mode's built-in topology — the intended composition.
+function checkModes(modes, roles, errors) {
+  const known = [...builtinLaneIds(), ...Object.keys(roles)];
+  for (const [name, laneIds] of Object.entries(modes)) {
+    const label = `modes.${name}`;
+    if (name.trim().length === 0) {
+      errors.push("modes keys must be non-empty mode names");
+      continue;
+    }
+    if (!Array.isArray(laneIds) || laneIds.length === 0) {
+      errors.push(`${label} must be a non-empty ordered array of lane/role ids`);
+      continue;
+    }
+    for (const id of laneIds) {
+      if (typeof id !== "string" || !known.includes(id)) {
+        errors.push(`${label}: "${String(id)}" is neither a built-in lane id nor a defined role id`);
+      }
+    }
+  }
+}
+
 export function validateConfig(value) {
   const errors = [];
   if (!isPlainObject(value)) {
@@ -109,7 +180,7 @@ export function validateConfig(value) {
   }
   checkExactKeys(
     value,
-    ["schemaVersion", "tiers", "defaultMode", "autoPostReviews", "deadlines"],
+    ["schemaVersion", "tiers", "defaultMode", "roles", "modes", "autoPostReviews", "deadlines"],
     "config",
     errors,
   );
@@ -130,8 +201,29 @@ export function validateConfig(value) {
   } else if ("tiers" in value) {
     errors.push("config.tiers must be an object");
   }
-  if ("defaultMode" in value && !REVIEW_MODES.includes(value.defaultMode)) {
-    errors.push(`config.defaultMode must be one of: ${REVIEW_MODES.join(", ")}`);
+  if ("roles" in value) {
+    if (isPlainObject(value.roles)) {
+      checkRoles(value.roles, errors);
+    } else {
+      errors.push("config.roles must be an object keyed by role id");
+    }
+  }
+  if ("modes" in value) {
+    if (isPlainObject(value.modes)) {
+      checkModes(value.modes, value.roles ?? {}, errors);
+    } else {
+      errors.push("config.modes must be an object keyed by mode name");
+    }
+  }
+  if ("defaultMode" in value && typeof value.defaultMode === "string") {
+    const selectable = [...REVIEW_MODES, ...Object.keys(value.modes ?? {})];
+    if (!selectable.includes(value.defaultMode)) {
+      errors.push(
+        `config.defaultMode must be one of: ${selectable.join(", ")} (standard modes plus config.modes keys)`,
+      );
+    }
+  } else if ("defaultMode" in value) {
+    errors.push("config.defaultMode must be a mode name string");
   }
   if ("autoPostReviews" in value && typeof value.autoPostReviews !== "boolean") {
     errors.push("config.autoPostReviews must be a boolean");

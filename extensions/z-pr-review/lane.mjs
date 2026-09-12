@@ -201,6 +201,11 @@ export async function runLane({
   createRuntime = defaultCreateRuntime,
 }) {
   const tier = config.tiers[lane.tier];
+  // C1: a lane (custom role) may override the tier's model/effort; absent
+  // overrides fall back to the tier's values, and a null model means the
+  // session's model either way.
+  const tierModel = lane.model !== undefined ? lane.model : tier.model;
+  const tierEffort = lane.effort !== undefined ? lane.effort : tier.effort;
   const prompt = buildLanePrompt(envelope, lane);
   if (signal?.aborted) {
     return { status: "failed", reason: "cancelled before dispatch", findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
@@ -211,8 +216,8 @@ export async function runLane({
     // An explicit null override means "the session's default model" exactly as
     // a null tier model does — `??` would wrongly retry the tier's primary
     // model on a null fallback override.
-    model: (modelOverride !== undefined ? modelOverride : tier.model) ?? undefined,
-    reasoningEffort: tier.effort,
+    model: (modelOverride !== undefined ? modelOverride : tierModel) ?? undefined,
+    reasoningEffort: tierEffort,
     availableTools: ["builtin:view", "builtin:grep", "builtin:glob"],
     enableConfigDiscovery: false,
     permission: lanePermissionPolicy(repoRoot),

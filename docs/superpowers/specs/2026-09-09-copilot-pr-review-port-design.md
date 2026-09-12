@@ -128,6 +128,28 @@ Upstream code reused under its declared MIT license (package.json) with attribut
 
 ## Amendments
 
+- **2026-09-12 (C1 — custom review roles; amends "fixed code-owned
+  topologies").** The four standard mode topologies remain code-owned
+  defaults, but users can now compose over them: config (schemaVersion 2)
+  gains `roles` — user-defined reviewer lanes, each a prompt plus a tier
+  (light/medium/heavy ⇒ budgets/fallback) with optional model and
+  reasoning-effort overrides falling back to the tier's values — and `modes`
+  — custom modes as ordered lists of built-in lane ids and/or role ids, where
+  a standard mode name in `modes` overrides that mode's built-in topology.
+  Roles and modes are edited directly in the config file (the key=value
+  grammar doesn't fit multi-line prompts); a custom mode is selected via
+  `defaultMode` (mode flags stay standard). A role's prompt is model input
+  only: the role resolves to an ordinary lane descriptor and its findings
+  flow through the same budgets, deterministic shaping, and future I5/I7
+  validation/adjudication/publication gates — prompts never gain authority.
+  Built-in lane ids reused between standard topologies resolve to their first
+  definition (search order quick → balanced → full → deep, the baseline
+  variant), keeping id resolution unambiguous without a qualified-id grammar.
+  The config schemaVersion bumps to 2 (a v1 file is rejected whole-object,
+  activating defaults — same starts-fresh posture as the R1 path change).
+  Upstream has fixed topologies; C1 is original work, not a port. Text above
+  keeps "fixed, code-owned" as written at the time.
+
 - **2026-09-10 (R1 — plugin identity rename).** The plugin is now **z-pr-review**:
   `plugin.json` name; commands `/z-pr-review` and `/z-pr-review-config` (formerly
   `/pr-review` and `/pr-review-config`); extension directory `extensions/z-pr-review/`
