@@ -159,7 +159,7 @@ describe("squashMergeAtHead", () => {
   const HEAD = "c".repeat(40);
   // A run fake for the merge path: `gh pr view` resolves the GraphQL id and
   // branch, `gh api graphql` performs (or refuses) the pinned mutation.
-  const mergeFake = ({ graphql = { data: { mergePullRequest: { mergeCommit: { oid: MERGE_OID } } } }, graphqlRaw = null, overrides = {} } = {}) => {
+  const mergeFake = ({ graphql = { data: { mergePullRequest: { pullRequest: { mergeCommit: { oid: MERGE_OID } } } } }, graphqlRaw = null, overrides = {} } = {}) => {
     const calls = [];
     const run = async (command, args) => {
       const key = [command, ...args].join(" ");
@@ -201,7 +201,7 @@ describe("squashMergeAtHead", () => {
     assert.ok(!calls.some((key) => key.includes("--delete")), "must not delete the branch of a refused merge");
   });
   it("fails closed when data.mergePullRequest arrives WITHOUT a mergeCommit oid (that is not a confirmed merge)", async () => {
-    const { calls, run } = mergeFake({ graphql: { data: { mergePullRequest: { mergeCommit: null } } } });
+    const { calls, run } = mergeFake({ graphql: { data: { mergePullRequest: { pullRequest: { mergeCommit: null } } } } });
     const result = await squashMergeAtHead({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: HEAD });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /did not confirm the squash-merge/);

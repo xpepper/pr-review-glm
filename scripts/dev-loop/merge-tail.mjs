@@ -11,14 +11,18 @@ import { tagMergedRelease } from "./version.mjs";
 // whatever head GitHub currently holds, so the loop's local pin can lose a
 // race in the seconds between fetchPrHead/verifyBumpAtMerge and the merge).
 // The GraphQL mergePullRequest mutation takes the head OID itself — via its
-// `expectedHeadOid` input field (MergePullRequestInput; an earlier draft used
-// a field name that does not exist in the schema, which every merge attempt
-// would have died on) — and GitHub rejects the whole mutation if the head
-// moved: the pin is atomic at the server, closing the window the CLI command
-// leaves open.
+// `expectedHeadOid` input field — and GitHub rejects the whole mutation if
+// the head moved: the pin is atomic at the server, closing the window the
+// CLI command leaves open. Schema note (introspected 2026-09-12, after the
+// mutation's first live use failed schema validation):
+// MergePullRequestPayload has NO mergeCommit of its own — only actor,
+// clientMutationId, pullRequest — so the merge commit is selected through
+// the payload's pullRequest. The earlier selection `{ mergeCommit { oid } }`
+// was schema-invalid and the first live merge (C1, PR #27) died fail-closed
+// on it: "GitHub did not confirm the squash-merge … Field 'mergeCommit'".
 const MERGE_MUTATION = [
   "mutation($pr: ID!, $head: GitObjectID!) {",
-  "  mergePullRequest(input: {pullRequestId: $pr, mergeMethod: SQUASH, expectedHeadOid: $head}) { mergeCommit { oid } }",
+  "  mergePullRequest(input: {pullRequestId: $pr, mergeMethod: SQUASH, expectedHeadOid: $head}) { pullRequest { mergeCommit { oid } } }",
   "}",
 ].join("\n");
 
@@ -39,7 +43,7 @@ export async function squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadR
   let payload = null;
   try { payload = JSON.parse(api.stdout || "{}"); } catch { /* handled below */ }
   const errors = Array.isArray(payload?.errors) ? payload.errors : null;
-  const mergeCommitOid = payload?.data?.mergePullRequest?.mergeCommit?.oid ?? null;
+  const mergeCommitOid = payload?.data?.mergePullRequest?.pullRequest?.mergeCommit?.oid ?? null;
   if (api.code !== 0 || errors || !payload?.data?.mergePullRequest || !mergeCommitOid) {
     // A data.mergePullRequest object without a mergeCommit oid is NOT a
     // confirmed merge (e.g. an already-merged edge) — treat it as refused, not
