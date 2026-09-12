@@ -43,20 +43,30 @@ the development workflow itself.
   the increment flow) makes runs self-explaining: every dispatched phase
   (worker/reviewer/fixer, plus the dogfood's rendered review) persists its
   full stdout/stderr to `.dev-loop/phase-<name>-<n>.log` (0600, gitignored,
-  capped to the last 256 KB, persistence failures disclosed but never fatal);
-  each phase logs `started` / `finished in <duration>` alongside the existing
+  the complete transcript — header, both streams, final newline — capped by
+  UTF-8 bytes without splitting a code point, header preserved when it fits,
+  persistence failures disclosed but never fatal); each phase logs
+  `started` / `finished in <duration>` alongside the existing
   phaseTimings capture; every preflight/assessment/post-merge gate prints
   `gate <name>: PASS|FAIL — <detail>` as it completes; and the merge path
   narrates its steps (bump verified + reservation, squash-merged at <oid>,
   tag landed, branch deleted). The `zcode-headless` preflight probe now
-  EXERCISES a tool instead of completing a text turn — the probe asks the
-  session to run `echo zpr-probe-$((6*7))` and asserts the computed marker
-  (`zpr-probe-42`, deliberately not present in the prompt), so the 2026-09-12
-  shell-less-toolset condition fails in seconds with the session's own words
-  instead of passing a text probe and costing a full worker cycle. Evidence:
-  336 unit tests (+4: persistPhaseOutput transcript/truncation/error-shape
-  matrix, the code-0 shell-less probe refusal, phase lifecycle log lines) +
-  smoke-l1 dry-run green. Protocol surfaces untouched; no version bump
+  EXERCISES a tool instead of completing a text turn — the probe carries an
+  opaque token generated at gate time ONLY in the child environment (never
+  in prompt or argv) and asks the session to `echo $ZPR_PROBE_TOKEN`, so
+  only executing something in that environment can produce the expected
+  reply: the 2026-09-12 shell-less-toolset condition fails in seconds with
+  the session's own words instead of passing a text probe and costing a
+  full worker cycle (the probe proves a code-execution path exists, not
+  specifically the shell tool — the operationally relevant property for
+  phases; a first version with a computed marker `zpr-probe-42` was
+  guessable in prose and hardened after review). Evidence: 338 unit tests
+  (+6: persistPhaseOutput content/mode, whole-transcript byte cap incl.
+  dual-stream ASCII + multibyte, error-shape; code-0 shell-less probe
+  refusal; wrong-token/unexpanded-variable refusals; phase lifecycle log
+  lines) + smoke-l1 dry-run green — plus a CodeRabbit review round on the
+  PR whose two findings (guessable probe marker, per-stream code-unit cap)
+  were fixed in-PR. Protocol surfaces untouched; no version bump
   (loop-side, like #26/#28/#31).
 
 - **2026-09-12 (I5 landed + release-tag collision diagnosed and fixed — the
