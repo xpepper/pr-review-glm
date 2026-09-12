@@ -127,6 +127,39 @@ export function buildZcodeArgs({ prompt, repoRoot }) {
   ];
 }
 
+// Phase transcripts survive the run (2026-09-12 lesson: the shell-less I5
+// worker's self-report existed only in its stdout, which phaseRunner printed
+// only on failure — and the reviewer's "static review only" note vanished the
+// same way; the uncommitted HANDOFF rewrite was the sole surviving record).
+// One file per dispatch under the gitignored .dev-loop/ (worker/reviewer/fixer
+// repeat across assessments and rounds), 0600 (phase output can carry diff
+// content), capped to the last maxBytes so a chatty phase cannot balloon the
+// directory. A persistence failure is returned, never thrown: observability
+// must not be able to fail a phase.
+export function persistPhaseOutput({ artDir, name, index, result, maxBytes = 256 * 1024 }) {
+  const tail = (text, label) => {
+    const value = String(text ?? "");
+    if (value.length <= maxBytes) return value;
+    return `# (${label} truncated to the last ${maxBytes} bytes)\n${value.slice(-maxBytes)}`;
+  };
+  const body = [
+    `# phase ${name} #${index} — ${new Date().toISOString()}`,
+    `# exit code=${String(result.code)} timedOut=${String(Boolean(result.timedOut))}`,
+    "--- stdout ---",
+    tail(result.stdout, "stdout"),
+    "--- stderr ---",
+    tail(result.stderr, "stderr"),
+  ].join("\n");
+  try {
+    mkdirSync(artDir, { recursive: true });
+    const file = join(artDir, `phase-${name}-${index}.log`);
+    writeFileSync(file, `${body}\n`, { mode: 0o600 });
+    return { file };
+  } catch (error) {
+    return { error: `could not persist phase ${name} output: ${String(error.message ?? error).slice(0, 200)}` };
+  }
+}
+
 export function runCommand(command, args, { cwd, timeoutMs, env } = {}) {
   return new Promise((resolve) => {
     let child;

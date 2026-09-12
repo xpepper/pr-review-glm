@@ -34,6 +34,31 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-12 (loop observability — phase transcripts, per-gate/per-phase log
+  lines, tool-exercising preflight probe)** — the same evening's two failure
+  modes were both observability failures before they were anything else: the
+  shell-less I5 worker's only self-report lived in phase stdout that
+  `phaseRunner` discards on a code-0 exit, and multi-minute gate/phase silence
+  read as "stuck" from the terminal. This loop-side PR (conventional, outside
+  the increment flow) makes runs self-explaining: every dispatched phase
+  (worker/reviewer/fixer, plus the dogfood's rendered review) persists its
+  full stdout/stderr to `.dev-loop/phase-<name>-<n>.log` (0600, gitignored,
+  capped to the last 256 KB, persistence failures disclosed but never fatal);
+  each phase logs `started` / `finished in <duration>` alongside the existing
+  phaseTimings capture; every preflight/assessment/post-merge gate prints
+  `gate <name>: PASS|FAIL — <detail>` as it completes; and the merge path
+  narrates its steps (bump verified + reservation, squash-merged at <oid>,
+  tag landed, branch deleted). The `zcode-headless` preflight probe now
+  EXERCISES a tool instead of completing a text turn — the probe asks the
+  session to run `echo zpr-probe-$((6*7))` and asserts the computed marker
+  (`zpr-probe-42`, deliberately not present in the prompt), so the 2026-09-12
+  shell-less-toolset condition fails in seconds with the session's own words
+  instead of passing a text probe and costing a full worker cycle. Evidence:
+  336 unit tests (+4: persistPhaseOutput transcript/truncation/error-shape
+  matrix, the code-0 shell-less probe refusal, phase lifecycle log lines) +
+  smoke-l1 dry-run green. Protocol surfaces untouched; no version bump
+  (loop-side, like #26/#28/#31).
+
 - **2026-09-12 (I5 landed + release-tag collision diagnosed and fixed — the
   C1 "phase pre-tagging" attribution corrected)** — the resumed loop run
   (22:31) adopted PR #30 at the pinned head 130a505 and completed the cleanest

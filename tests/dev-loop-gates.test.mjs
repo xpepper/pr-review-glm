@@ -80,22 +80,34 @@ describe("gateSmokes", () => {
 });
 
 describe("gateZcodeHeadless", () => {
-  it("passes when a probe turn exits 0, probing the exact worker arg set", async () => {
+  it("passes when a probe turn runs the shell command, probing the exact worker arg set", async () => {
     const spawned = [];
     const run = async (command, args) => {
       spawned.push([command, ...args].join(" "));
-      return { code: 0, stdout: "ok\n", stderr: "" };
+      return { code: 0, stdout: "zpr-probe-42\n", stderr: "" };
     };
     // No injected buildArgs: the gate must use the real buildZcodeArgs so the
     // probe exercises the same flags a worker phase would send.
     const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
     assert.equal(gate.ok, true);
+    assert.match(gate.detail, /shell tool exercised/);
     const probe = spawned[0];
-    assert.match(probe, /--prompt Reply with the single word: ok /);
+    assert.match(probe, /--prompt Run the shell command `echo zpr-probe-\$\(\(6\*7\)\)` using your shell tool/);
     assert.match(probe, new RegExp(`--cwd ${repoRoot} `));
     assert.match(probe, /--mode yolo /);
     assert.match(probe, /--disallowed-tools Bash\(gh pr merge \*\)/);
     assert.doesNotMatch(probe, /--max-turns/);
+    // The expected marker must NOT appear in the prompt: it is only producible
+    // by actually executing the command, which is what makes the probe catch a
+    // session without a shell tool (2026-09-12 condition).
+    assert.doesNotMatch(probe, /zpr-probe-42/);
+  });
+  it("fails closed with the session's own words when a code-0 probe cannot exercise the shell tool", async () => {
+    const run = async () => ({ code: 0, stdout: "I don't have a shell tool available in this session, so I cannot run the command.\n", stderr: "" });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /I don't have a shell tool available/);
+    assert.match(gate.detail, /phase TOOLSET/);
   });
   it("fails with the CLI's first error line when the probe exits nonzero (flags, config, auth)", async () => {
     const run = async () => ({ code: 1, stdout: "", stderr: "Error: Model config is missing. Create ~/.zcode/cli/config.json ...\n" });

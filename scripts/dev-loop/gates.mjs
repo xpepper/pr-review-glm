@@ -73,14 +73,27 @@ export async function gateRepoIdle({ run, repoRoot }) {
 // ("zcode login", ~/.zcode/cli/config.json) without burning a worker run.
 // Pass the isolated phase env (buildPhaseEnv) so the probe exercises the exact
 // environment phases run under — including its copied model config.
+// The probe must EXERCISE a tool, not just complete a text turn: on 2026-09-12
+// both the I5 worker and the independent reviewer phases ran with NO shell tool
+// (file tools worked; both sessions honestly said so in output nobody kept),
+// and a "Reply with the single word: ok" probe sails through that condition —
+// a degraded toolset then costs a full worker cycle. The expected marker is not
+// literally in the prompt (it appears only if the command actually executes),
+// so a shell-less session that quotes or refuses the command fails here in
+// seconds, with its own first output line in the detail.
+const PROBE_COMMAND = "echo zpr-probe-$((6*7))";
+const PROBE_MARKER = "zpr-probe-42";
 export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buildZcodeArgs, env }) {
-  const args = buildArgs({ prompt: "Reply with the single word: ok", repoRoot });
+  const args = buildArgs({
+    prompt: `Run the shell command \`${PROBE_COMMAND}\` using your shell tool, then reply with exactly the command's output and nothing else.`,
+    repoRoot,
+  });
   const result = await run(zcode, args, { cwd: repoRoot, timeoutMs: 3 * 60_000, env });
-  if (result.code === 0 && !result.timedOut) {
-    return ok("zcode-headless", "probe turn completed with the worker arg set");
+  if (result.code === 0 && !result.timedOut && String(result.stdout ?? "").includes(PROBE_MARKER)) {
+    return ok("zcode-headless", "probe turn completed with the worker arg set (shell tool exercised)");
   }
-  const firstLine = (result.stderr || result.stdout).split("\n").find((l) => l.trim()) ?? "";
-  return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), and zcode login`);
+  const firstLine = (result.stderr || result.stdout || "").split("\n").find((l) => l.trim()) ?? "";
+  return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), zcode login, and the phase TOOLSET: phases need a working shell tool (2026-09-12: worker and reviewer ran shell-less while text-only probes kept passing)`);
 }
 
 export async function gateTests({ run, repoRoot }) {

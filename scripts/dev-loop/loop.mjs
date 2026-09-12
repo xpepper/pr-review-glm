@@ -19,6 +19,13 @@ export function reviewBlocking(reviewResult) {
 // the loop and merging would ship unreviewed commits — stop instead.
 const HEAD_REASSESSMENT_LIMIT = 1;
 
+// Terminal-friendly durations for the per-phase log lines ("42s", "4m30s").
+function describeDuration(ms) {
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
+}
+
 export async function runLoop(deps) {
   const {
     readStatus, preflight, runWorker, workerGates, runReviewer, runDogfood, runFixer,
@@ -64,17 +71,22 @@ export async function runLoop(deps) {
     // every dispatched phase records its duration on the iteration, so
     // report-last.json finally carries the data future PHASE_LIMITS tuning
     // needs. Each phase name accumulates one entry per dispatch (reviews and
-    // gates repeat across assessments and fixer rounds).
+    // gates repeat across assessments and fixer rounds). The same wrapper emits
+    // start/finished log lines — a silent multi-minute phase is indistinguish
+    // from a stuck one from the terminal (the I3 run #2 lesson), so the loop
+    // says what it is doing while it is doing it.
     const phaseRunners = { worker: runWorker, gates: workerGates, reviewer: runReviewer, dogfood: runDogfood, fixer: runFixer, merge };
     const timed = Object.fromEntries(Object.entries(phaseRunners).map(([name, fn]) => [
       name,
       async (...args) => {
+        log(`${name} started`);
         const startedAt = Date.now();
         try {
           return await fn(...args);
         } finally {
           iteration.phaseTimings ??= {};
           (iteration.phaseTimings[name] ??= []).push(Date.now() - startedAt);
+          log(`${name} finished in ${describeDuration(Date.now() - startedAt)}`);
         }
       },
     ]));
