@@ -25,11 +25,15 @@ const MERGE_MUTATION = [
 export async function squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadRefOid }) {
   // The mutation needs the PR's GraphQL id (not its number) and its branch
   // name (returned for the post-confirmation branch deletion in the merge dep).
-  const view = await run("gh", ["pr", "view", String(prNumber), "--json", "id,headRefName"], { cwd: repoRoot });
+  // isCrossRepository tells that deletion WHICH remote owns the branch — a
+  // fork PR's branch lives in the fork, and pushing --delete through the base
+  // repository's remote must never happen (it would fail, or worse delete a
+  // same-named branch in the base repo).
+  const view = await run("gh", ["pr", "view", String(prNumber), "--json", "id,headRefName,isCrossRepository"], { cwd: repoRoot });
   let pr = null;
   try { pr = JSON.parse(view.stdout || "{}"); } catch { /* handled below */ }
-  if (view.code !== 0 || !pr?.id || typeof pr.headRefName !== "string" || !pr.headRefName) {
-    return { code: 1, stdout: view.stdout, stderr: `cannot resolve PR ${prNumber}'s GraphQL id / branch name (merge aborted): ${(view.stderr || view.stdout || "").slice(0, 200)}`, timedOut: false };
+  if (view.code !== 0 || !pr?.id || typeof pr.headRefName !== "string" || !pr.headRefName || typeof pr.isCrossRepository !== "boolean") {
+    return { code: 1, stdout: view.stdout, stderr: `cannot resolve PR ${prNumber}'s GraphQL id / branch name / fork status (merge aborted): ${(view.stderr || view.stdout || "").slice(0, 200)}`, timedOut: false };
   }
   const api = await run("gh", ["api", "graphql", "-f", `query=${MERGE_MUTATION}`, "-f", `pr=${pr.id}`, "-f", `head=${expectedHeadRefOid}`], { cwd: repoRoot });
   let payload = null;
@@ -44,20 +48,41 @@ export async function squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadR
       ?? (api.stderr || api.stdout || "no output").slice(0, 200);
     return { code: 1, stdout: api.stdout, stderr: `GitHub did not confirm the squash-merge of PR ${prNumber} pinned to reviewed head ${expectedHeadRefOid.slice(0, 7)} (merge aborted — the head likely moved or the PR was not mergeable; re-run the loop to re-assess): ${detail}`, timedOut: false };
   }
-  return { code: 0, stdout: api.stdout, stderr: "", timedOut: false, branch: pr.headRefName, mergeCommitOid };
+  return { code: 0, stdout: api.stdout, stderr: "", timedOut: false, branch: pr.headRefName, isCrossRepository: pr.isCrossRepository, mergeCommitOid };
 }
 
 // The --delete-branch equivalent, isolated so the merge dep can run it ONLY
 // after the tail confirmed MERGED and the release tag landed (run-3 dogfood
 // P1: deleting before confirmation strands a possibly-unmerged PR without its
 // branch). Failure is disclosed as a warning, never a failed merge — it cannot
-// un-merge what already landed.
-export async function deleteMergedBranch({ run, repoRoot, branch }) {
-  const del = await run("git", ["push", "origin", "--delete", branch], { cwd: repoRoot });
-  if (del.code !== 0) {
-    return { ok: false, detail: `branch ${branch} was not deleted (delete it manually): ${(del.stderr || del.stdout || "").slice(0, 200)}` };
+// un-merge what already landed. A fork PR's branch lives in the FORK's remote:
+// `git push origin --delete` through the base repository must never run for it
+// (run-3 P1 — it either fails or deletes an unrelated same-named base branch);
+// the fork's own branch is the fork owner's to keep. The local branch is pruned
+// in both cases (`gh pr merge --delete-branch` used to do this; a missing local
+// branch — a fork PR never checked out here — is fine, nothing to prune).
+export async function deleteMergedBranch({ run, repoRoot, branch, isCrossRepository }) {
+  const warnings = [];
+  // Informational, never a warning: skipping the remote delete is the correct
+  // outcome for a fork PR — nothing to clean up on this remote. The local
+  // prune below still runs.
+  let note = null;
+  if (isCrossRepository) {
+    note = `branch ${branch} lives in the PR author's fork, not this remote — remote deletion skipped (delete it in the fork if desired)`;
+  } else {
+    const del = await run("git", ["push", "origin", "--delete", branch], { cwd: repoRoot });
+    if (del.code !== 0) {
+      warnings.push(`remote branch ${branch} was not deleted (delete it manually): ${(del.stderr || del.stdout || "").slice(0, 200)}`);
+    }
   }
-  return { ok: true };
+  const local = await run("git", ["branch", "-D", branch], { cwd: repoRoot });
+  // "not found" means the branch was never checked out locally (fork PR) —
+  // not debris, so it is not a warning.
+  if (local.code !== 0 && !/not found/i.test(local.stderr || local.stdout || "")) {
+    warnings.push(`local branch ${branch} was not deleted (delete it manually): ${(local.stderr || local.stdout || "").slice(0, 200)}`);
+  }
+  if (warnings.length) return { ok: false, detail: warnings.join("; ") };
+  return note ? { ok: true, note } : { ok: true };
 }
 
 // A merge can report success while GitHub still shows OPEN for a moment, or sit

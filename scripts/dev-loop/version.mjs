@@ -91,15 +91,20 @@ export async function gateVersionBump({ run, repoRoot }) {
 // release merging in between could already carry this PR's version, landing an
 // "unchanged" version after all. The version-side twin of the headRefOid pin:
 // fetch main, read the PR head's manifest BY ITS REMOTE OID (never the local
-// checkout), and re-verify the ordering immediately before gh pr merge. The
-// freshly fetched OID must equal the reviewed head the loop pinned — gh pr
-// merge has no OID parameter, so without this equality check the merge could
-// integrate a head that neither the review nor this re-check certified.
-// Fail-closed aborts the merge; the next run re-assesses against the moved
-// main. The seconds-wide fetch→merge window that remains is the same one the
-// head pin accepts by design, and the merge tail's merge-commit pin backstops
-// it post-hoc: if another merge sneaks in anyway, main's HEAD will not be this
-// PR's merge commit and the tail refuses to tag (loud stop, human decides).
+// checkout), and re-verify the ordering immediately before the merge mutation.
+// The freshly fetched OID must equal the reviewed head the loop pinned — a
+// version re-check of one head must never merge another. Version uniqueness
+// has no server-side pin (unlike the head, GitHub holds no "expected version"),
+// so the release TAG is the serialization point: every merged release tags
+// vX.Y.Z, the tag is checked on origin here (pre-merge), and the tail's
+// non-forced `git push origin vX.Y.Z` is itself atomic (rejected if the tag
+// exists) — the backstop if a same-version release lands inside the residual
+// check→merge window. Fail-closed aborts the merge; the next run re-assesses
+// against the moved main. The seconds-wide check→merge window that remains is
+// the same one the head pin accepts by design, and the merge tail's
+// merge-commit pin backstops it post-hoc: if another merge sneaks in anyway,
+// main's HEAD will not be this PR's merge commit and the tail refuses to tag
+// (loud stop, human decides).
 export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid }) {
   // The explicit refspec is load-bearing: a bare `git fetch origin main`
   // updates only FETCH_HEAD, so `git show origin/main:plugin.json` below would
@@ -135,7 +140,19 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
   if (ordering <= 0) {
     return { ok: false, detail: `plugin.json version ${head.version} is ${ordering === 0 ? "unchanged vs" : "not greater than"} main's ${main.version} at merge time — main moved since assessment; merge aborted, re-run the loop to re-assess` };
   }
-  return { ok: true, detail: `version ${main.version} → ${head.version} confirmed at merge time (PR head ${headRefOid.slice(0, 7)})` };
+  // Duplicate-version guard: every merged release tags vX.Y.Z, so a tag that
+  // already exists on origin means this version was already released — merging
+  // anyway would land a duplicate version whose tagging the tail must then
+  // refuse. Asked of origin directly (ls-remote), never local state.
+  const tag = `v${head.version}`;
+  const tags = await run("git", ["ls-remote", "--tags", "origin", `refs/tags/${tag}`], { cwd: repoRoot });
+  if (tags.code !== 0) {
+    return { ok: false, detail: `git ls-remote --tags origin ${tag} failed (merge aborted): ${(tags.stderr || tags.stdout || "").slice(0, 200)}` };
+  }
+  if (tags.stdout.trim() !== "") {
+    return { ok: false, detail: `release tag ${tag} already exists on origin — version ${head.version} was already released; merge aborted, bump the PR's version and re-run the loop` };
+  }
+  return { ok: true, detail: `version ${main.version} → ${head.version} confirmed at merge time (PR head ${headRefOid.slice(0, 7)}, tag ${tag} free)` };
 }
 
 // Tagging tail of the merge path: after squash-merge + checkout main + ff-only

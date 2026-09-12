@@ -119,9 +119,25 @@ describe("verifyBumpAtMerge", () => {
   it("confirms the bump against a freshly fetched main, reading the PR head by its pinned remote OID", async () => {
     const { calls, run } = fake({ main: "0.1.0", head: "0.2.0" });
     const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
-    assert.deepEqual(result, { ok: true, detail: `version 0.1.0 → 0.2.0 confirmed at merge time (PR head ${OID.slice(0, 7)})` });
+    assert.deepEqual(result, { ok: true, detail: `version 0.1.0 → 0.2.0 confirmed at merge time (PR head ${OID.slice(0, 7)}, tag v0.2.0 free)` });
     assert.ok(calls.includes(`git show ${OID}:plugin.json`), "must read the PR head manifest by OID, not the local checkout");
     assert.ok(!calls.includes("git show HEAD:plugin.json"), "the local checkout is never the re-check source");
+    assert.ok(calls.includes("git ls-remote --tags origin refs/tags/v0.2.0"),
+      "must check the release tag on origin before merging (duplicate-version guard)");
+  });
+  it("aborts the merge when the release tag already exists on origin (duplicate version)", async () => {
+    const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { "git ls-remote --tags origin refs/tags/v0.2.0": res("abc123\trefs/tags/v0.2.0\n") } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /release tag v0\.2\.0 already exists on origin/);
+    assert.match(result.detail, /merge aborted/);
+  });
+  it("fails closed when the origin tag check itself fails", async () => {
+    const { run } = fake({ overrides: { "git ls-remote --tags origin refs/tags/v0.2.0": res("", 1, "network") } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /git ls-remote --tags origin v0\.2\.0 failed/);
+    assert.match(result.detail, /merge aborted/);
   });
   it("aborts the merge when the head at re-check time differs from the pinned reviewed head", async () => {
     const OTHER = "d".repeat(40);

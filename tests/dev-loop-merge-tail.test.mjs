@@ -158,7 +158,7 @@ describe("squashMergeAtHead", () => {
       calls.push(key);
       if (overrides[key]) return overrides[key];
       if (command === "gh" && args[1] === "view") {
-        return ok(JSON.stringify({ id: "PR_23", headRefName: "i9-example" }));
+        return ok(JSON.stringify({ id: "PR_23", headRefName: "i9-example", isCrossRepository: false }));
       }
       if (command === "gh" && args[0] === "api") return ok(graphqlRaw ?? JSON.stringify(graphql));
       return ok();
@@ -180,6 +180,7 @@ describe("squashMergeAtHead", () => {
     assert.doesNotMatch(graphql, /headRefOid/, "headRefOid is not a MergePullRequestInput field");
     assert.ok(graphql.includes(`head=${HEAD}`), "the pinned head is the reviewed OID");
     assert.equal(result.branch, "i9-example", "the branch is returned for the merge dep to delete only after confirmation");
+    assert.equal(result.isCrossRepository, false, "fork status is returned so deletion never targets the wrong remote");
     assert.equal(result.mergeCommitOid, MERGE_OID);
     assert.ok(!calls.some((key) => key.includes("--delete")), "must NOT delete the branch before the merge is confirmed");
   });
@@ -199,10 +200,16 @@ describe("squashMergeAtHead", () => {
     assert.ok(!calls.some((key) => key.includes("--delete")), "must not delete the branch on unconfirmed merges");
   });
   it("fails closed when the PR's GraphQL id / branch cannot be resolved", async () => {
-    const { run } = mergeFake({ overrides: { "gh pr view 23 --json id,headRefName": fail("gh down") } });
+    const { run } = mergeFake({ overrides: { "gh pr view 23 --json id,headRefName,isCrossRepository": fail("gh down") } });
     const result = await squashMergeAtHead({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: HEAD });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /cannot resolve PR 23/);
+  });
+  it("fails closed when the fork status is missing (deletion must never guess which remote owns the branch)", async () => {
+    const { run } = mergeFake({ overrides: { "gh pr view 23 --json id,headRefName,isCrossRepository": ok(JSON.stringify({ id: "PR_23", headRefName: "i9-example" })) } });
+    const result = await squashMergeAtHead({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: HEAD });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /cannot resolve PR 23.*fork status/);
   });
   it("fails closed when the GraphQL output is not JSON", async () => {
     const { run } = mergeFake({ graphqlRaw: "not json" });
@@ -213,17 +220,43 @@ describe("squashMergeAtHead", () => {
 });
 
 describe("deleteMergedBranch", () => {
-  it("deletes the branch on the remote and reports success", async () => {
+  it("deletes the branch on the remote and prunes the local branch (--delete-branch parity)", async () => {
     const calls = [];
     const run = async (command, args) => { calls.push([command, ...args]); return ok(); };
-    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example" });
+    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example", isCrossRepository: false });
     assert.deepEqual(result, { ok: true });
-    assert.deepEqual(calls, [["git", "push", "origin", "--delete", "i9-example"]]);
+    assert.deepEqual(calls, [["git", "push", "origin", "--delete", "i9-example"], ["git", "branch", "-D", "i9-example"]]);
   });
-  it("reports a disclosed warning (not a failure) when the deletion fails — it cannot un-merge", async () => {
-    const run = async () => fail("remote ref delete failed");
-    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example" });
+  it("never deletes a fork PR's branch through the base repository remote (run-3 P1)", async () => {
+    const calls = [];
+    const run = async (command, args) => { calls.push([command, ...args]); return ok(); };
+    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example", isCrossRepository: true });
+    assert.equal(result.ok, true, "a fork skip is the correct outcome, not a warning");
+    assert.match(result.note, /lives in the PR author's fork/);
+    assert.ok(!calls.some(([command, , flag]) => command === "git" && flag === "--delete"), "must not push --delete through the base remote for a fork branch");
+    assert.deepEqual(calls, [["git", "branch", "-D", "i9-example"]], "the local branch is still pruned");
+  });
+  it("treats a missing local branch as fine, not debris (fork PR never checked out here)", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args]);
+      return command === "git" && args[0] === "branch" ? fail("error: branch 'i9-example' not found.") : ok();
+    };
+    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example", isCrossRepository: true });
+    assert.equal(result.ok, true);
+  });
+  it("reports a disclosed warning (not a failure) when the remote deletion fails — it cannot un-merge", async () => {
+    const run = async (command, args) =>
+      command === "git" && args[0] === "push" ? fail("remote ref delete failed") : ok();
+    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example", isCrossRepository: false });
     assert.equal(result.ok, false);
-    assert.match(result.detail, /branch i9-example was not deleted/);
+    assert.match(result.detail, /remote branch i9-example was not deleted/);
+  });
+  it("discloses a local-prune failure without failing the merge", async () => {
+    const run = async (command, args) =>
+      command === "git" && args[0] === "branch" ? fail("error: Cannot delete branch") : ok();
+    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example", isCrossRepository: false });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /local branch i9-example was not deleted/);
   });
 });

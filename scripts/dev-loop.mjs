@@ -279,7 +279,7 @@ async function main() {
       // the release tag landed (run-3 dogfood P1: deleting earlier means a
       // failed confirmation or tail strands a merged PR whose branch is already
       // gone). Failure is disclosed as a warning — it cannot un-merge.
-      const del = await deleteMergedBranch({ run, repoRoot, branch: merged.branch });
+      const del = await deleteMergedBranch({ run, repoRoot, branch: merged.branch, isCrossRepository: merged.isCrossRepository });
       if (!del.ok) {
         return { ...tailed, stderr: `${tailed.stderr}\nwarning: ${del.detail}` };
       }
