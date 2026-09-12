@@ -29,16 +29,29 @@ describe("persistPhaseOutput", () => {
     assert.match(text, /--- stdout ---\nreview done\n--- stderr ---\n/);
     assert.equal(statSync(persisted.file).mode & 0o777, 0o600, "phase output can carry diff content — 0600");
   }));
-  it("caps a chatty phase's output to the last maxBytes, disclosing the truncation", withArtDir(async (artDir) => {
+  it("caps the COMPLETE transcript by UTF-8 bytes — dual-stream ASCII (PR #32 review)", withArtDir(async (artDir) => {
     const persisted = persistPhaseOutput({
       artDir, name: "worker", index: 1,
-      result: { code: 1, timedOut: false, stdout: "x".repeat(300), stderr: "" },
-      maxBytes: 100,
+      result: { code: 1, timedOut: false, stdout: "q".repeat(400), stderr: "y".repeat(200) },
+      maxBytes: 200,
     });
     const text = readFileSync(persisted.file, "utf8");
-    assert.match(text, /# \(stdout truncated to the last 100 bytes\)/);
-    assert.ok(text.includes("x".repeat(100)), "the tail survives");
-    assert.ok(!text.includes("x".repeat(101)), "the head does not");
+    assert.ok(Buffer.byteLength(text, "utf8") <= 200, "the whole file — header, disclosure, both streams, final newline — stays within the cap");
+    assert.match(text, /# \(transcript truncated to fit the byte cap/, "truncation is disclosed");
+    assert.match(text, /^# phase worker #1 — /, "the header block survives when it fits");
+    assert.ok(text.includes("y".repeat(20)), "the tail of the LAST output survives");
+    assert.ok(!text.includes("q"), "the earlier stream is what gets dropped");
+  }));
+  it("caps multibyte output by encoded bytes without splitting a code point", withArtDir(async (artDir) => {
+    const persisted = persistPhaseOutput({
+      artDir, name: "worker", index: 1,
+      result: { code: 0, timedOut: false, stdout: "界".repeat(400), stderr: "" },
+      maxBytes: 200,
+    });
+    const text = readFileSync(persisted.file, "utf8");
+    assert.ok(Buffer.byteLength(text, "utf8") <= 200, "3-byte code points count as 3 bytes, not 1 code unit");
+    assert.ok(!text.includes("\uFFFD"), "no code point is split by the byte cap");
+    assert.ok(text.includes("界".repeat(5)), "an aligned tail of multibyte output survives");
   }));
   it("returns the error instead of throwing when the artifact dir cannot be created", async () => {
     const blocker = join(tmpdir(), `zpr-persist-block-${process.pid}-${Date.now()}`);

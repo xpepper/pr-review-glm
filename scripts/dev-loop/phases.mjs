@@ -133,27 +133,33 @@ export function buildZcodeArgs({ prompt, repoRoot }) {
 // same way; the uncommitted HANDOFF rewrite was the sole surviving record).
 // One file per dispatch under the gitignored .dev-loop/ (worker/reviewer/fixer
 // repeat across assessments and rounds), 0600 (phase output can carry diff
-// content), capped to the last maxBytes so a chatty phase cannot balloon the
-// directory. A persistence failure is returned, never thrown: observability
-// must not be able to fail a phase.
+// content). The COMPLETE transcript — header, both streams, final newline — is
+// capped by UTF-8 bytes (review hardening, PR #32: capping each stream
+// separately by code-unit count let multibyte output overshoot the cap), never
+// splitting a code point; the header block is preserved when it fits, with the
+// head of the output dropped and disclosed. A persistence failure is returned,
+// never thrown: observability must not be able to fail a phase.
 export function persistPhaseOutput({ artDir, name, index, result, maxBytes = 256 * 1024 }) {
-  const tail = (text, label) => {
-    const value = String(text ?? "");
-    if (value.length <= maxBytes) return value;
-    return `# (${label} truncated to the last ${maxBytes} bytes)\n${value.slice(-maxBytes)}`;
-  };
-  const body = [
+  const header = [
     `# phase ${name} #${index} — ${new Date().toISOString()}`,
     `# exit code=${String(result.code)} timedOut=${String(Boolean(result.timedOut))}`,
-    "--- stdout ---",
-    tail(result.stdout, "stdout"),
-    "--- stderr ---",
-    tail(result.stderr, "stderr"),
   ].join("\n");
+  const streams = `--- stdout ---\n${String(result.stdout ?? "")}\n--- stderr ---\n${String(result.stderr ?? "")}\n`;
+  const disclosure = "# (transcript truncated to fit the byte cap; the head of the output was dropped)";
+  let text = `${header}\n${streams}`;
+  if (Buffer.byteLength(text, "utf8") > maxBytes) {
+    const budget = maxBytes - Buffer.byteLength(`${header}\n${disclosure}\n`, "utf8");
+    const bytes = Buffer.from(budget >= 0 ? streams : `${header}\n${streams}`, "utf8");
+    let start = Math.max(0, bytes.length - Math.max(0, budget));
+    // Advance past any leading partial UTF-8 sequence so no code point splits.
+    while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start += 1;
+    const tail = bytes.subarray(start).toString("utf8");
+    text = budget >= 0 ? `${header}\n${disclosure}\n${tail}` : tail;
+  }
   try {
     mkdirSync(artDir, { recursive: true });
     const file = join(artDir, `phase-${name}-${index}.log`);
-    writeFileSync(file, `${body}\n`, { mode: 0o600 });
+    writeFileSync(file, text, { mode: 0o600 });
     return { file };
   } catch (error) {
     return { error: `could not persist phase ${name} output: ${String(error.message ?? error).slice(0, 200)}` };
