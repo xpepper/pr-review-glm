@@ -67,7 +67,7 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
 - zcode headless auth remains `ZAI_API_KEY` env + keyless `~/.zcode/cli/config.json`;
   the `zcode-headless` preflight gate fails fast if that regresses. zcode 0.16.5
   still rejects `--max-turns`/`--settings` at parse time.
-- Tests: `node --test tests/*.test.mjs` (330). Smokes: `tests/smoke-i1.mjs`,
+- Tests: `node --test tests/*.test.mjs` (338). Smokes: `tests/smoke-i1.mjs`,
   `tests/smoke-i2.mjs` (SDK dispatch, no inference), `tests/smoke-i3.mjs` (SDK
   dispatch; the lane children and now the adjudicator perform real inference BY
   DESIGN — parent session stays inference-free; scenario skips cleanly when no PR

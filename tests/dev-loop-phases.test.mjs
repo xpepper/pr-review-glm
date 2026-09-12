@@ -1,12 +1,73 @@
 // tests/dev-loop-phases.test.mjs
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  DEFAULT_ZCODE_CLI, PHASE_LIMITS, buildPhaseEnv, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand,
+  DEFAULT_ZCODE_CLI, PHASE_LIMITS, buildPhaseEnv, buildZcodeArgs, persistPhaseOutput, renderPrompt, resolveZcodeCli, runCommand,
 } from "../scripts/dev-loop/phases.mjs";
+
+describe("persistPhaseOutput", () => {
+  const withArtDir = (fn) => async () => {
+    const artDir = mkdtempSync(join(tmpdir(), "zpr-persist-"));
+    try {
+      await fn(artDir);
+    } finally {
+      rmSync(artDir, { recursive: true, force: true });
+    }
+  };
+  it("writes a per-dispatch transcript with the exit code, timedOut, stdout, and stderr (mode 0600)", withArtDir(async (artDir) => {
+    const persisted = persistPhaseOutput({
+      artDir, name: "reviewer", index: 2,
+      result: { code: 0, timedOut: false, stdout: "review done", stderr: "" },
+    });
+    assert.equal(persisted.file, join(artDir, "phase-reviewer-2.log"));
+    const text = readFileSync(persisted.file, "utf8");
+    assert.match(text, /# phase reviewer #2 — /);
+    assert.match(text, /# exit code=0 timedOut=false/);
+    assert.match(text, /--- stdout ---\nreview done\n--- stderr ---\n/);
+    assert.equal(statSync(persisted.file).mode & 0o777, 0o600, "phase output can carry diff content — 0600");
+  }));
+  it("caps the COMPLETE transcript by UTF-8 bytes — dual-stream ASCII (PR #32 review)", withArtDir(async (artDir) => {
+    const persisted = persistPhaseOutput({
+      artDir, name: "worker", index: 1,
+      result: { code: 1, timedOut: false, stdout: "q".repeat(400), stderr: "y".repeat(200) },
+      maxBytes: 200,
+    });
+    const text = readFileSync(persisted.file, "utf8");
+    assert.ok(Buffer.byteLength(text, "utf8") <= 200, "the whole file — header, disclosure, both streams, final newline — stays within the cap");
+    assert.match(text, /# \(transcript truncated to fit the byte cap/, "truncation is disclosed");
+    assert.match(text, /^# phase worker #1 — /, "the header block survives when it fits");
+    assert.ok(text.includes("y".repeat(20)), "the tail of the LAST output survives");
+    assert.ok(!text.includes("q"), "the earlier stream is what gets dropped");
+  }));
+  it("caps multibyte output by encoded bytes without splitting a code point", withArtDir(async (artDir) => {
+    const persisted = persistPhaseOutput({
+      artDir, name: "worker", index: 1,
+      result: { code: 0, timedOut: false, stdout: "界".repeat(400), stderr: "" },
+      maxBytes: 200,
+    });
+    const text = readFileSync(persisted.file, "utf8");
+    assert.ok(Buffer.byteLength(text, "utf8") <= 200, "3-byte code points count as 3 bytes, not 1 code unit");
+    assert.ok(!text.includes("\uFFFD"), "no code point is split by the byte cap");
+    assert.ok(text.includes("界".repeat(5)), "an aligned tail of multibyte output survives");
+  }));
+  it("returns the error instead of throwing when the artifact dir cannot be created", async () => {
+    const blocker = join(tmpdir(), `zpr-persist-block-${process.pid}-${Date.now()}`);
+    writeFileSync(blocker, "not a directory");
+    try {
+      const persisted = persistPhaseOutput({
+        artDir: join(blocker, "sub"), name: "worker", index: 1,
+        result: { code: 0, timedOut: false, stdout: "", stderr: "" },
+      });
+      assert.match(persisted.error, /could not persist phase worker output/);
+      assert.equal(persisted.file, undefined, "observability must not fail a phase — and must not claim a file it did not write");
+    } finally {
+      rmSync(blocker, { force: true });
+    }
+  });
+});
 
 describe("runCommand", () => {
   it("captures exit code and stdout", async () => {

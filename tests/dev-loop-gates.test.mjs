@@ -80,22 +80,47 @@ describe("gateSmokes", () => {
 });
 
 describe("gateZcodeHeadless", () => {
-  it("passes when a probe turn exits 0, probing the exact worker arg set", async () => {
+  it("passes when the probe echoes the env-carried token, probing the exact worker arg set", async () => {
     const spawned = [];
-    const run = async (command, args) => {
+    let probeEnv;
+    const run = async (command, args, opts) => {
       spawned.push([command, ...args].join(" "));
-      return { code: 0, stdout: "ok\n", stderr: "" };
+      probeEnv = opts.env;
+      // The stub behaves like a real child: the token exists only in the
+      // environment, and only actually executing the command would produce it.
+      return { code: 0, stdout: `${opts.env.ZPR_PROBE_TOKEN}\n`, stderr: "" };
     };
     // No injected buildArgs: the gate must use the real buildZcodeArgs so the
     // probe exercises the same flags a worker phase would send.
     const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
     assert.equal(gate.ok, true);
+    assert.match(gate.detail, /execution in the child env exercised/);
     const probe = spawned[0];
-    assert.match(probe, /--prompt Reply with the single word: ok /);
+    assert.match(probe, /--prompt Run the shell command `echo \$ZPR_PROBE_TOKEN` using your shell tool/);
     assert.match(probe, new RegExp(`--cwd ${repoRoot} `));
     assert.match(probe, /--mode yolo /);
     assert.match(probe, /--disallowed-tools Bash\(gh pr merge \*\)/);
     assert.doesNotMatch(probe, /--max-turns/);
+    // The token rides the environment only: a session that never executes
+    // anything in the child env cannot know it (PR #32 review hardening —
+    // a computed fixed marker was guessable without a shell).
+    assert.match(probeEnv.ZPR_PROBE_TOKEN, /^zpr-probe-[0-9a-f]{32}$/);
+    assert.ok(!probe.includes(probeEnv.ZPR_PROBE_TOKEN), "the token must never appear in the prompt or argv");
+  });
+  it("fails closed when a code-0 probe replies without the token (unexpanded variable, a guess, or prose)", async () => {
+    for (const stdout of ["$ZPR_PROBE_TOKEN\n", "zpr-probe-abc123\n", "I would run echo $ZPR_PROBE_TOKEN, but I have no shell tool in this session.\n"]) {
+      const run = async () => ({ code: 0, stdout, stderr: "" });
+      const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+      assert.equal(gate.ok, false);
+      assert.match(gate.detail, /phase TOOLSET/);
+    }
+  });
+  it("fails closed with the session's own words when a code-0 probe cannot exercise the shell tool", async () => {
+    const run = async () => ({ code: 0, stdout: "I don't have a shell tool available in this session, so I cannot run the command.\n", stderr: "" });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /I don't have a shell tool available/);
+    assert.match(gate.detail, /phase TOOLSET/);
   });
   it("fails with the CLI's first error line when the probe exits nonzero (flags, config, auth)", async () => {
     const run = async () => ({ code: 1, stdout: "", stderr: "Error: Model config is missing. Create ~/.zcode/cli/config.json ...\n" });

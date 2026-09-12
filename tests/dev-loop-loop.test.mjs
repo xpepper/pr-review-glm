@@ -240,6 +240,12 @@ describe("runLoop head pinning (auto only)", () => {
     assert.equal(summary.stopped, "completed", "a warning on a successful merge must not fail the iteration");
     assert.ok(lines.some((line) => /warning:.*not deleted/.test(line)), "the deletion warning is disclosed in the log");
     assert.ok(lines.some((line) => /note:.*fork/.test(line)), "the fork note is disclosed in the log");
+    // Observability (2026-09-12): each dispatched phase logs start and a
+    // duration-bearing finish — a silent multi-minute phase is indistinguishable
+    // from a stuck one from the terminal.
+    assert.ok(lines.some((line) => /^worker started$/.test(line)), "phase start lines are logged");
+    assert.ok(lines.some((line) => /^worker finished in \d+(s|m\d+s)$/.test(line)), "phase finish lines carry a duration");
+    assert.ok(lines.some((line) => /^merge finished in \d+(s|m\d+s)$/.test(line)), "every phase kind is covered");
   });
 });
 

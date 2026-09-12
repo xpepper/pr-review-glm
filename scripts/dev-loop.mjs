@@ -6,7 +6,7 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
-import { buildPhaseEnv, PHASE_LIMITS, buildZcodeArgs, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
+import { buildPhaseEnv, PHASE_LIMITS, buildZcodeArgs, persistPhaseOutput, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
   gateBranchHead, gateDocsUpdated, gateMainGreen, gateRepoIdle,
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
@@ -101,11 +101,26 @@ function loadTemplate(name) {
   return readFileSync(new URL(`./dev-loop/${name}`, import.meta.url), "utf8");
 }
 
-function phaseRunner({ zcode, template, vars, limits, phaseEnv }) {
+// One dispatch per file: worker runs once, reviewer re-runs per assessment,
+// fixer per round — the index keeps every dispatch's transcript on disk.
+const phaseDispatchCounts = new Map();
+const nextPhaseIndex = (name) => {
+  const index = (phaseDispatchCounts.get(name) ?? 0) + 1;
+  phaseDispatchCounts.set(name, index);
+  return index;
+};
+
+function phaseRunner({ zcode, name, template, vars, limits, phaseEnv }) {
   const prompt = renderPrompt(template, vars);
   const args = buildZcodeArgs({ prompt, repoRoot });
+  const index = nextPhaseIndex(name);
   return async () => {
     const result = await runCommand(zcode, args, { cwd: repoRoot, timeoutMs: limits.timeoutMs, env: phaseEnv });
+    // The transcript survives the run whatever the exit code — the 2026-09-12
+    // shell-less worker's only self-report lived in stdout nobody printed.
+    const persisted = persistPhaseOutput({ artDir, name, index, result });
+    if (persisted.error) console.error(`[dev-loop] warning: ${persisted.error}`);
+    else console.log(`[dev-loop] ${name} transcript: ${persisted.file}`);
     if (result.code !== 0 || result.timedOut) console.error(result.stdout.slice(-2000), result.stderr.slice(-2000));
     return result;
   };
@@ -136,6 +151,11 @@ async function main() {
 
 async function runMain(options, { zcode, phaseEnv }) {
   const run = (command, args, opts) => runCommand(command, args, opts);
+  const log = (line) => console.log(`[dev-loop] ${line}`);
+  // Every gate result prints as it completes — a silent multi-minute gate batch
+  // (tests + smokes can run 5+ minutes) is indistinguishable from a hang from
+  // the terminal (the I3 run #2 lesson, now applied to gates as well as phases).
+  const logGate = (gate) => { log(`gate ${gate.name}: ${gate.ok ? "PASS" : "FAIL"} — ${gate.detail}`); return gate; };
   // A previous run may have stopped mid-iteration (gate failure, killed
   // process), leaving the checkout stranded on the increment branch: recover to
   // synced main before anything reads HANDOFF — fail-closed on debris we cannot
@@ -158,12 +178,12 @@ async function runMain(options, { zcode, phaseEnv }) {
   const summary = await runLoop({
     readStatus: async () => parseStatusLine(read("HANDOFF.md")),
     preflight: async () => [
-      await gateRepoIdle({ run, repoRoot }),
+      logGate(await gateRepoIdle({ run, repoRoot })),
       // Probes the exact worker arg set AND the isolated phase env: if the
       // phase HOME breaks model config or auth, this fails in seconds.
-      await gateZcodeHeadless({ run, zcode, repoRoot, env: phaseEnv }),
-      await gateTests({ run, repoRoot }),
-      await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }),
+      logGate(await gateZcodeHeadless({ run, zcode, repoRoot, env: phaseEnv })),
+      logGate(await gateTests({ run, repoRoot })),
+      logGate(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] })),
     ],
     // Mid-iteration resume (spec Amendments): recognize the checkpoint a
     // previous run left after its worker completed and skip straight to
@@ -177,7 +197,7 @@ async function runMain(options, { zcode, phaseEnv }) {
     runWorker: (status) => {
       workedIncrement = status.increment;
       return phaseRunner({
-        zcode, template: loadTemplate("worker-prompt.md"),
+        zcode, name: "worker", template: loadTemplate("worker-prompt.md"),
         vars: { INCREMENT: status.increment }, phaseEnv, limits: PHASE_LIMITS.worker,
       })();
     },
@@ -194,25 +214,25 @@ async function runMain(options, { zcode, phaseEnv }) {
         // Cheapest check first: a CONFLICTING PR can never merge, so it fails
         // before any local gate or review burns a cycle on it (the I4 landing
         // learned this the expensive way, at `gh pr merge` time).
-        const mergeable = mergeabilityGate(open[0]);
+        const mergeable = logGate(mergeabilityGate(open[0]));
         if (!mergeable.ok) return { results: [mergeable], prNumber, headRefOid };
         results.push(mergeable);
         // The worker may leave the checkout anywhere; gates and the reviewer must
         // see the exact PR head, so establish it before anything runs (zero-trust:
         // never assume the worker left it there or that it matches the remote
         // head the pin records).
-        const branchHead = await gateBranchHead({ run, repoRoot, headRefName: open[0].headRefName, headRefOid });
+        const branchHead = logGate(await gateBranchHead({ run, repoRoot, headRefName: open[0].headRefName, headRefOid }));
         if (!branchHead.ok) return { results: [branchHead], prNumber, headRefOid };
         results.push(branchHead);
-        results.push(await gateTests({ run, repoRoot }));
+        results.push(logGate(await gateTests({ run, repoRoot })));
         // V1: every merged increment bumps plugin.json's version — checked
         // BEFORE the inference-consuming smokes so a bump-less PR fails in
         // seconds instead of after burning model calls (round-2 dogfood P2).
-        results.push(await gateVersionBump({ run, repoRoot }));
-        results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
-        results.push(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement }));
+        results.push(logGate(await gateVersionBump({ run, repoRoot })));
+        results.push(logGate(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] })));
+        results.push(logGate(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement })));
       } else {
-        results.push({ name: "increment-pr", ok: false, detail: `expected exactly one open PR, found ${open.length}` });
+        results.push(logGate({ name: "increment-pr", ok: false, detail: `expected exactly one open PR, found ${open.length}` }));
       }
       return { results, prNumber, headRefOid };
     },
@@ -225,7 +245,7 @@ async function runMain(options, { zcode, phaseEnv }) {
         // writing the file must surface as a missing review, not a stale approve.
         rmSync(reviewFile, { force: true });
         const invocation = await phaseRunner({
-          zcode, template: loadTemplate("reviewer-prompt.md"),
+          zcode, name: "reviewer", template: loadTemplate("reviewer-prompt.md"),
           vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, REVIEW_FILE: reviewFile },
           phaseEnv, limits: PHASE_LIMITS.reviewer,
         })();
@@ -238,9 +258,18 @@ async function runMain(options, { zcode, phaseEnv }) {
         return { code: 1, stdout: "", stderr: String(error), timedOut: false, review: undefined };
       }
     },
-    runDogfood: (prNumber) => runDogfoodReview({
-      prNumber, repoRoot, timeoutMs: PHASE_LIMITS.dogfood.timeoutMs, log: (line) => console.log(`[dev-loop] ${line}`),
-    }),
+    runDogfood: async (prNumber) => {
+      const result = await runDogfoodReview({
+        prNumber, repoRoot, timeoutMs: PHASE_LIMITS.dogfood.timeoutMs, log,
+      });
+      // The dogfood is not a phaseRunner invocation, but its stdout — the full
+      // in-chat review the plugin rendered — is exactly what a post-mortem
+      // wants on disk next to the phase transcripts.
+      const persisted = persistPhaseOutput({ artDir, name: "dogfood", index: nextPhaseIndex("dogfood"), result });
+      if (persisted.error) log(`warning: ${persisted.error}`);
+      else log(`dogfood transcript: ${persisted.file}`);
+      return result;
+    },
     runFixer: async (prNumber, findings) => {
       try {
         const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefName"], { cwd: repoRoot });
@@ -250,7 +279,7 @@ async function runMain(options, { zcode, phaseEnv }) {
           return { code: checkout.code, stdout: checkout.stdout, stderr: checkout.stderr, timedOut: false };
         }
         return phaseRunner({
-          zcode, template: loadTemplate("fixer-prompt.md"),
+          zcode, name: "fixer", template: loadTemplate("fixer-prompt.md"),
           vars: { PR_NUMBER: prNumber, REPO_ROOT: repoRoot, HEAD_REF: headRefName, FINDINGS_JSON: JSON.stringify(findings) },
           phaseEnv, limits: PHASE_LIMITS.fixer,
         })();
@@ -287,6 +316,7 @@ async function runMain(options, { zcode, phaseEnv }) {
       // version-side twin of the headRefOid pin).
       const bump = await verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid });
       if (!bump.ok) return { code: 1, stdout: "", stderr: bump.detail, timedOut: false };
+      log(`merge: ${bump.detail}`);
       // gh pr merge cannot pin a head, so the local pin above can lose a race;
       // the GraphQL mutation enforces the reviewed head atomically at GitHub.
       const merged = await squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadRefOid });
@@ -306,8 +336,10 @@ async function runMain(options, { zcode, phaseEnv }) {
       // fast-forwarded, then the merged main is tagged vX.Y.Z — every step
       // checked and fail-closed (the merge itself stays put on tail failure).
       // The reservation retargets the pre-merge tag onto the merge commit.
+      log(`merge: squash-merged PR #${prNumber} at ${merged.mergeCommitOid.slice(0, 7)} (branch ${merged.branch}) — running the tagging tail`);
       const tailed = await mergeTail({ run, repoRoot, merged, prNumber, reservation: { tag: bump.tag, reservedAt: bump.reservedAt } });
       if (tailed.code !== 0) return tailed;
+      log(`merge: ${bump.tag} tagged at the merge commit`);
       // --delete-branch equivalent, run ONLY after GitHub confirmed MERGED and
       // the release tag landed (run-3 dogfood P1: deleting earlier means a
       // failed confirmation or tail strands a merged PR whose branch is already
@@ -319,17 +351,19 @@ async function runMain(options, { zcode, phaseEnv }) {
       if (!del.ok) {
         return { ...tailed, warning: del.detail };
       }
+      if (del.note) log(`merge: ${del.note}`);
+      else log(`merge: branch ${merged.branch} deleted`);
       return del.note ? { ...tailed, note: del.note } : tailed;
     },
     postMergeGates: async () => {
-      const results = [await gateMainGreen({ run, repoRoot })];
+      const results = [logGate(await gateMainGreen({ run, repoRoot }))];
       return results;
     },
     dogfood: options.dogfood,
     mergeMode: options.mergeMode,
     maxIterations: options.maxIterations,
     cooldownSeconds: options.cooldownSeconds,
-    log: (line) => console.log(`[dev-loop] ${line}`),
+    log,
   });
 
   console.log(`\n[dev-loop] stopped=${summary.stopped} reason=${summary.reason}`);

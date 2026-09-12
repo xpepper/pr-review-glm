@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { buildZcodeArgs } from "./phases.mjs";
@@ -73,14 +74,38 @@ export async function gateRepoIdle({ run, repoRoot }) {
 // ("zcode login", ~/.zcode/cli/config.json) without burning a worker run.
 // Pass the isolated phase env (buildPhaseEnv) so the probe exercises the exact
 // environment phases run under — including its copied model config.
+// The probe must EXERCISE a tool, not just complete a text turn: on 2026-09-12
+// both the I5 worker and the independent reviewer phases ran with NO shell tool
+// (file tools worked; both sessions honestly said so in output nobody kept),
+// and a "Reply with the single word: ok" probe sails through that condition —
+// a degraded toolset then costs a full worker cycle. The expected value is an
+// opaque token generated at probe time and carried ONLY in the child
+// environment (never in the prompt or argv, which a model can read): the
+// session can produce it in its reply solely by executing something in that
+// environment (`echo $ZPR_PROBE_TOKEN` through the shell). Reviewer hardening
+// (PR #32): the first version asserted a computed marker (`zpr-probe-42` from
+// `$((6*7))`), which a shell-less session could still calculate in prose.
+// Residual, accepted: the probe proves a code-execution path that can observe
+// the child env exists — not specifically the shell tool — but that is the
+// operationally relevant property for phases (a session that cannot execute
+// anything cannot run tests, git, or gh).
+const PROBE_ENV_VAR = "ZPR_PROBE_TOKEN";
 export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buildZcodeArgs, env }) {
-  const args = buildArgs({ prompt: "Reply with the single word: ok", repoRoot });
-  const result = await run(zcode, args, { cwd: repoRoot, timeoutMs: 3 * 60_000, env });
-  if (result.code === 0 && !result.timedOut) {
-    return ok("zcode-headless", "probe turn completed with the worker arg set");
+  const token = `zpr-probe-${randomBytes(16).toString("hex")}`;
+  const args = buildArgs({
+    prompt: `Run the shell command \`echo $${PROBE_ENV_VAR}\` using your shell tool, then reply with exactly the command's output and nothing else.`,
+    repoRoot,
+  });
+  const result = await run(zcode, args, {
+    cwd: repoRoot,
+    timeoutMs: 3 * 60_000,
+    env: { ...(env ?? process.env), [PROBE_ENV_VAR]: token },
+  });
+  if (result.code === 0 && !result.timedOut && String(result.stdout ?? "").includes(token)) {
+    return ok("zcode-headless", "probe turn completed with the worker arg set (execution in the child env exercised)");
   }
-  const firstLine = (result.stderr || result.stdout).split("\n").find((l) => l.trim()) ?? "";
-  return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), and zcode login`);
+  const firstLine = (result.stderr || result.stdout || "").split("\n").find((l) => l.trim()) ?? "";
+  return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), zcode login, and the phase TOOLSET: phases need to execute commands (2026-09-12: worker and reviewer ran shell-less while text-only probes kept passing)`);
 }
 
 export async function gateTests({ run, repoRoot }) {
