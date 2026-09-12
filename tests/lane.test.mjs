@@ -1169,6 +1169,29 @@ describe("lane contract-flake resilience (PR #23 dogfood round)", () => {
     assert.match(outcome.reason, /lane output began: ".*red text.*more"/, "readable text survives sanitization");
   });
 
+  it("strips Unicode bidirectional controls from the excerpt (round-5 P2 — they cannot spoof the rendered reason)", async () => {
+    // RLO + LRI wrap "safe" text so a terminal renders it reordered; PDF/PDI
+    // close the overrides. All must be neutralized before the excerpt exists.
+    const hostile = "a\u202esafe\u2066looking\u202c\u2069text";
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: hostile } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({
+      lane: HEAVY_LANE,
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000,
+      createRuntime,
+    });
+    assert.equal(outcome.status, "failed");
+    assert.doesNotMatch(outcome.reason, /\u202e|\u2066|\u202c|\u2069/, "bidi controls are stripped from the excerpt");
+    assert.match(outcome.reason, /lane output began: "a safe looking text"/, "readable text survives sanitization");
+  });
+
   it("an empty lane output discloses its emptiness in the contract-violation reason", async () => {
     const { createRuntime } = fakeRuntime([
       async ({ emit }) => {

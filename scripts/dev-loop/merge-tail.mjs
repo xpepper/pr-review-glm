@@ -94,7 +94,7 @@ export async function deleteMergedBranch({ run, repoRoot, branch, isCrossReposit
 const MERGE_CONFIRM_ATTEMPTS = 30;
 const MERGE_CONFIRM_DELAY_MS = 10_000;
 
-export async function mergeTail({ run, repoRoot, merged, prNumber, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+export async function mergeTail({ run, repoRoot, merged, prNumber, reservation = null, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   // GitHub must confirm the merge before any release tagging: a merge that
   // reports success but is not yet MERGED must not be tagged. Poll through the
   // transient OPEN/QUEUED window so a briefly delayed merge still gets tagged;
@@ -108,7 +108,7 @@ export async function mergeTail({ run, repoRoot, merged, prNumber, sleep = (ms) 
       const parsed = JSON.parse(viewed.stdout || "{}");
       state = parsed.state ?? null;
       if (viewed.code === 0 && state === "MERGED" && parsed.mergeCommit?.oid) {
-        return await tagConfirmedMerge({ run, repoRoot, merged, prNumber, mergeOid: parsed.mergeCommit.oid });
+        return await tagConfirmedMerge({ run, repoRoot, merged, prNumber, mergeOid: parsed.mergeCommit.oid, reservation });
       }
       if (state === "CLOSED" && viewed.code === 0) {
         return { code: 1, stdout: "", stderr: `PR ${prNumber} is CLOSED, not MERGED (terminal state — not polling further): ${(viewed.stderr || "the squash-merge did not land").slice(0, 200)}`, timedOut: false };
@@ -123,7 +123,7 @@ export async function mergeTail({ run, repoRoot, merged, prNumber, sleep = (ms) 
   return { code: 1, stdout: "", stderr: `PR ${prNumber} not confirmed MERGED by GitHub after ${MERGE_CONFIRM_ATTEMPTS} attempts over ~${Math.round((MERGE_CONFIRM_ATTEMPTS * MERGE_CONFIRM_DELAY_MS) / 1000)}s (state=${state ?? "unknown"}): ${viewError} — the squash-merge may already have completed; the release tag was NOT created and post-merge checks did NOT run: verify the PR state, tag vX.Y.Z manually if merged, and run the post-merge gates by hand`, timedOut: false };
 }
 
-async function tagConfirmedMerge({ run, repoRoot, merged, prNumber, mergeOid }) {
+async function tagConfirmedMerge({ run, repoRoot, merged, prNumber, mergeOid, reservation }) {
   const checkout = await run("git", ["checkout", "main"], { cwd: repoRoot });
   if (checkout.code !== 0) {
     return { code: checkout.code, stdout: checkout.stdout, stderr: `git checkout main failed (merge completed, release tagging aborted): ${checkout.stderr.slice(0, 200)}`, timedOut: false };
@@ -142,7 +142,7 @@ async function tagConfirmedMerge({ run, repoRoot, merged, prNumber, mergeOid }) 
   if (head.stdout.trim() !== mergeOid) {
     return { code: 1, stdout: "", stderr: `main HEAD ${head.stdout.trim().slice(0, 7)} is not PR ${prNumber}'s merge commit ${mergeOid.slice(0, 7)} — another merge landed first; not tagging the wrong commit (human decides: tag ${mergeOid.slice(0, 7)} manually or leave untagged)`, timedOut: false };
   }
-  const tagged = await tagMergedRelease({ run, repoRoot });
+  const tagged = await tagMergedRelease({ run, repoRoot, reservation });
   if (!tagged.ok) {
     return { code: 1, stdout: "", stderr: `release tag failed (merge itself completed): ${tagged.detail}`, timedOut: false };
   }

@@ -63,6 +63,14 @@ describe("mergeTail", () => {
       ["git", "push", "origin", "v0.3.1"],
     ]);
   }));
+  it("retargets the pre-merge tag reservation onto the merge commit (force-with-lease pinned to the reserved OID)", withManifest(async (repoRoot) => {
+    const RESERVED_AT = "c".repeat(40);
+    const { calls, run } = fakeRun({ states: ["MERGED"] });
+    const result = await mergeTail({ run, repoRoot, merged: ok("merged"), prNumber: 23, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT }, sleep: noSleep });
+    assert.equal(result.code, 0);
+    assert.ok(calls.some(([command, ...args]) => command === "git" && args.includes(`--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`)),
+      "the tail must move only our own reservation, never clobber a moved tag");
+  }));
   it("polls through a transient OPEN/QUEUED window instead of giving up", withManifest(async (repoRoot) => {
     const { calls, run } = fakeRun({ states: ["OPEN", "QUEUED", "MERGED"] });
     const sleeps = [];

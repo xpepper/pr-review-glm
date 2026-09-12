@@ -95,16 +95,19 @@ export async function gateVersionBump({ run, repoRoot }) {
 // The freshly fetched OID must equal the reviewed head the loop pinned — a
 // version re-check of one head must never merge another. Version uniqueness
 // has no server-side pin (unlike the head, GitHub holds no "expected version"),
-// so the release TAG is the serialization point: every merged release tags
-// vX.Y.Z, the tag is checked on origin here (pre-merge), and the tail's
-// non-forced `git push origin vX.Y.Z` is itself atomic (rejected if the tag
-// exists) — the backstop if a same-version release lands inside the residual
-// check→merge window. Fail-closed aborts the merge; the next run re-assesses
-// against the moved main. The seconds-wide check→merge window that remains is
-// the same one the head pin accepts by design, and the merge tail's
-// merge-commit pin backstops it post-hoc: if another merge sneaks in anyway,
-// main's HEAD will not be this PR's merge commit and the tail refuses to tag
-// (loud stop, human decides).
+// so the release TAG is the serialization point — but a read-only check is not
+// one: a bare ls-remote leaves a check→merge window in which a concurrent loop
+// run can pass the same check and merge the same version (round-5 review P1).
+// Instead the tag is RESERVED here by pushing it to origin pointing at the
+// pinned PR head; git ref creation is atomic server-side, so exactly one run
+// can create refs/tags/vX.Y.Z — every other run (concurrent or later) fails
+// the push and aborts the merge. After the merge is confirmed, the tail
+// retargets the reservation onto the merge commit with a force-with-lease
+// pinned to the reserved OID (only our own reservation may be overwritten — a
+// tag that moved otherwise is a human decision, never a silent clobber). If
+// the merge mutation is refused, the caller releases the reservation so the
+// version is not stranded. Fail-closed aborts the merge; the next run
+// re-assesses against the moved main.
 export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid }) {
   // The explicit refspec is load-bearing: a bare `git fetch origin main`
   // updates only FETCH_HEAD, so `git show origin/main:plugin.json` below would
@@ -140,10 +143,12 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
   if (ordering <= 0) {
     return { ok: false, detail: `plugin.json version ${head.version} is ${ordering === 0 ? "unchanged vs" : "not greater than"} main's ${main.version} at merge time — main moved since assessment; merge aborted, re-run the loop to re-assess` };
   }
-  // Duplicate-version guard: every merged release tags vX.Y.Z, so a tag that
-  // already exists on origin means this version was already released — merging
-  // anyway would land a duplicate version whose tagging the tail must then
-  // refuse. Asked of origin directly (ls-remote), never local state.
+  // Duplicate-version pre-check: a tag that already exists on origin means
+  // this version was already released — merging anyway would land a duplicate
+  // version whose tagging the tail must then refuse. Asked of origin directly
+  // (ls-remote), never local state. This is only the diagnostic pass; the
+  // atomic reservation push below is what actually closes the concurrent-run
+  // race.
   const tag = `v${head.version}`;
   const tags = await run("git", ["ls-remote", "--tags", "origin", `refs/tags/${tag}`], { cwd: repoRoot });
   if (tags.code !== 0) {
@@ -152,7 +157,19 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
   if (tags.stdout.trim() !== "") {
     return { ok: false, detail: `release tag ${tag} already exists on origin — version ${head.version} was already released; merge aborted, bump the PR's version and re-run the loop` };
   }
-  return { ok: true, detail: `version ${main.version} → ${head.version} confirmed at merge time (PR head ${headRefOid.slice(0, 7)}, tag ${tag} free)` };
+  // Atomic reservation (round-5 review P1): push the tag pointing at the
+  // pinned PR head. Git creates the ref server-side only if absent, so two
+  // concurrent loop runs cannot both pass — the loser's push is rejected and
+  // its merge aborts here, before any mutation. The head OID is a valid
+  // target: the object exists on origin (the PR branch lives there), and the
+  // tail later retargets the tag onto the merge commit. The reservation is
+  // returned so the caller can release it if the merge is refused and the
+  // tail can retarget it with force-with-lease on success.
+  const reserved = await run("git", ["push", "origin", `${headRefOid}:refs/tags/${tag}`], { cwd: repoRoot });
+  if (reserved.code !== 0) {
+    return { ok: false, detail: `reserving release tag ${tag} on origin failed (merge aborted) — another run likely released version ${head.version} concurrently, or the push failed: ${(reserved.stderr || reserved.stdout || "").slice(0, 200)}` };
+  }
+  return { ok: true, tag, reservedAt: headRefOid, detail: `version ${main.version} → ${head.version} confirmed at merge time (PR head ${headRefOid.slice(0, 7)}, release tag ${tag} reserved on origin at ${headRefOid.slice(0, 7)})` };
 }
 
 // Tagging tail of the merge path: after squash-merge + checkout main + ff-only
@@ -162,15 +179,26 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
 // tag makes `git tag` fail, which is exactly the fail-closed outcome. An
 // unreadable main manifest is that same documented release-tag failure, not an
 // escaped exception.
-export async function tagMergedRelease({ run, repoRoot }) {
+// When the caller passes the pre-merge reservation (verifyBumpAtMerge pushed
+// refs/tags/vX.Y.Z at the PR head to serialize concurrent runs), the tag push
+// RETARGETS that reservation onto the merge commit with an explicit
+// force-with-lease: the move is accepted only if origin's tag still sits at
+// the reserved OID, so we can never silently clobber a tag someone else moved.
+export async function tagMergedRelease({ run, repoRoot, reservation = null }) {
   const parsed = readManifestVersion(join(repoRoot, "plugin.json"), "plugin.json (main)");
   if (parsed.error) return { ok: false, detail: parsed.error };
   const tag = `v${parsed.version}`;
+  if (reservation && reservation.tag !== tag) {
+    return { ok: false, detail: `reserved release tag ${reservation.tag} does not match main's version ${parsed.version} (${tag}) — refusing to retarget a reservation that is not ours` };
+  }
   const created = await run("git", ["tag", tag], { cwd: repoRoot });
   if (created.code !== 0) {
     return { ok: false, detail: `git tag ${tag} failed: ${created.stderr.slice(0, 200)}` };
   }
-  const pushed = await run("git", ["push", "origin", tag], { cwd: repoRoot });
+  const pushArgs = reservation
+    ? ["push", `--force-with-lease=refs/tags/${tag}:${reservation.reservedAt}`, "origin", tag]
+    : ["push", "origin", tag];
+  const pushed = await run("git", pushArgs, { cwd: repoRoot });
   if (pushed.code !== 0) {
     // Drop the local tag so a retried release tagging starts clean instead of
     // tripping over a tag that exists locally but not on origin. If the delete

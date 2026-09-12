@@ -119,11 +119,21 @@ describe("verifyBumpAtMerge", () => {
   it("confirms the bump against a freshly fetched main, reading the PR head by its pinned remote OID", async () => {
     const { calls, run } = fake({ main: "0.1.0", head: "0.2.0" });
     const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
-    assert.deepEqual(result, { ok: true, detail: `version 0.1.0 → 0.2.0 confirmed at merge time (PR head ${OID.slice(0, 7)}, tag v0.2.0 free)` });
+    assert.deepEqual(result, { ok: true, tag: "v0.2.0", reservedAt: OID, detail: `version 0.1.0 → 0.2.0 confirmed at merge time (PR head ${OID.slice(0, 7)}, release tag v0.2.0 reserved on origin at ${OID.slice(0, 7)})` });
     assert.ok(calls.includes(`git show ${OID}:plugin.json`), "must read the PR head manifest by OID, not the local checkout");
     assert.ok(!calls.includes("git show HEAD:plugin.json"), "the local checkout is never the re-check source");
     assert.ok(calls.includes("git ls-remote --tags origin refs/tags/v0.2.0"),
       "must check the release tag on origin before merging (duplicate-version guard)");
+    assert.ok(calls.includes(`git push origin ${OID}:refs/tags/v0.2.0`),
+      "must atomically reserve the release tag on origin before the merge (concurrent-run guard)");
+  });
+  it("aborts the merge when the atomic tag reservation is rejected — a concurrent run released the same version (round-5 P1)", async () => {
+    const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { [`git push origin ${OID}:refs/tags/v0.2.0`]: res("", 1, " ! [rejected] refs/tags/v0.2.0 -> refs/tags/v0.2.0 (already exists)") } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /reserving release tag v0\.2\.0 on origin failed/);
+    assert.match(result.detail, /merge aborted/);
+    assert.match(result.detail, /concurrently/);
   });
   it("aborts the merge when the release tag already exists on origin (duplicate version)", async () => {
     const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { "git ls-remote --tags origin refs/tags/v0.2.0": res("abc123\trefs/tags/v0.2.0\n") } });
@@ -250,5 +260,35 @@ describe("tagMergedRelease", () => {
     assert.equal(result.ok, false);
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);
     assert.match(result.detail, /removing the un-pushed local tag failed/);
+  }));
+  it("retargets the pre-merge reservation onto the merge commit with a force-with-lease pinned to the reserved OID (round-5 P1)", withManifest("0.3.1", async (repoRoot) => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args]);
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const RESERVED_AT = "c".repeat(40);
+    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT } });
+    assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
+    assert.deepEqual(calls, [
+      ["git", "tag", "v0.3.1"],
+      ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`, "origin", "v0.3.1"],
+    ], "the push may only move a tag that still sits at our own reservation");
+  }));
+  it("refuses to retarget a reservation whose tag does not match main's version", withManifest("0.3.1", async (repoRoot) => {
+    const calls = [];
+    const result = await tagMergedRelease({ run: async (c, a) => (calls.push([c, ...a]), { code: 0, stdout: "", stderr: "" }), repoRoot, reservation: { tag: "v0.9.9", reservedAt: "c".repeat(40) } });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /does not match main's version/);
+    assert.deepEqual(calls, [], "must not touch any tag on a mismatched reservation");
+  }));
+  it("fails closed when the force-with-lease retarget is rejected (the tag moved off our reservation)", withManifest("0.3.1", async (repoRoot) => {
+    const run = async (command, args) =>
+      args[0] === "push"
+        ? { code: 1, stdout: "", stderr: "stale info" }
+        : { code: 0, stdout: "", stderr: "" };
+    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40) } });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /git push origin v0\.3\.1 failed/);
   }));
 });

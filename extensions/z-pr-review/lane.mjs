@@ -92,11 +92,16 @@ function findingProblem(candidate) {
 // the lane actually said (model text, rendered inert — never parsed, never
 // authoritative).
 function laneExcerpt(laneText) {
-  // Control characters (C0/C1, ANSI escapes) in model output could manipulate
-  // whatever terminal or log renders the failure reason — strip them before
-  // the excerpt exists (round-2 dogfood P2; same neutralization instinct as
-  // renderReview's backtick flattening).
-  const stripped = String(laneText ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+  // Bound the input BEFORE any processing (round-5 review P2): the lane
+  // response is unbounded model text, and each pass below would otherwise copy
+  // the whole thing twice just to keep 120 characters.
+  const bounded = String(laneText ?? "").slice(0, 512);
+  // Control characters (C0/C1, ANSI escapes) and Unicode bidirectional
+  // controls (LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI, LRM/RLM/ALM) in model
+  // output could spoof whatever terminal or log renders the failure reason —
+  // strip them before the excerpt exists (round-2 + round-5 dogfood P2; same
+  // neutralization instinct as renderReview's backtick flattening).
+  const stripped = bounded.replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, " ");
   const flattened = stripped.replace(/\s+/g, " ").trim();
   if (flattened.length === 0) return " — lane output was empty";
   return ` — lane output began: "${flattened.slice(0, 120)}"`;

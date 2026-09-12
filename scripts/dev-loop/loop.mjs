@@ -175,6 +175,11 @@ export async function runLoop(deps) {
     }
     const merged = await timed.merge(iteration.prNumber, iteration.reviewedHeadOid);
     if (merged.code !== 0) return fail(`merge path failed for PR #${iteration.prNumber}: ${merged.stderr.slice(0, 200)}`);
+    // Non-fatal merge-path disclosures (round-5 review P2): a branch deletion
+    // that failed or a fork-note the merge dep returned on success used to be
+    // stuffed into stderr nobody read — log them instead of swallowing.
+    if (merged.warning) log(`warning: PR #${iteration.prNumber} merged, but ${merged.warning}`);
+    if (merged.note) log(`note: ${merged.note}`);
     iteration.merged = true;
     const post = await postMergeGates();
     const postFail = post.find((g) => !g.ok);

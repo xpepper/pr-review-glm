@@ -226,6 +226,21 @@ describe("runLoop head pinning (auto only)", () => {
     assert.equal(summary.stopped, "failure");
     assert.equal(calls.merge, 0);
   });
+  it("logs (not swallows) a merge-path warning/note returned on a successful merge (round-5 P2)", async () => {
+    const lines = [];
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      merge: async (prNumber, expectedHeadRefOid) => {
+        calls.merge++; calls.mergedPr = prNumber; calls.mergeHeads.push(expectedHeadRefOid);
+        return { code: 0, stderr: "", warning: "remote branch i3-x was not deleted (delete it manually): rejected", note: "branch lives in the PR author's fork" };
+      },
+      log: (line) => lines.push(line),
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "completed", "a warning on a successful merge must not fail the iteration");
+    assert.ok(lines.some((line) => /warning:.*not deleted/.test(line)), "the deletion warning is disclosed in the log");
+    assert.ok(lines.some((line) => /note:.*fork/.test(line)), "the fork note is disclosed in the log");
+  });
 });
 
 describe("runLoop mid-iteration resume", () => {
