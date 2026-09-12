@@ -63,6 +63,13 @@ describe("buildPhaseEnv", () => {
     assert.equal(phase.env.GH_CONFIG_DIR, join(home, ".config", "gh"));
     assert.equal(phase.env.ZAI_API_KEY, "k", "auth env passes through");
     assert.equal(phase.env.PATH, "/usr/bin");
+    // Git credentials pin to gh's helper (GCM prompts under the isolated HOME):
+    // one reset + one gh helper entry via command-scope GIT_CONFIG_*.
+    assert.equal(phase.env.GIT_CONFIG_COUNT, "2");
+    assert.equal(phase.env.GIT_CONFIG_KEY_0, "credential.helper");
+    assert.equal(phase.env.GIT_CONFIG_VALUE_0, "");
+    assert.equal(phase.env.GIT_CONFIG_KEY_1, "credential.helper");
+    assert.equal(phase.env.GIT_CONFIG_VALUE_1, "!gh auth git-credential");
     phase.cleanup();
     assert.equal(existsSync(phase.env.HOME), false, "cleanup removes the phase HOME");
   }));
