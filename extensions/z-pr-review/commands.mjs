@@ -97,15 +97,17 @@ export function renderStatus(lastCapture = null, version = null) {
     "  No model calls.",
     "- /z-pr-review N [--quick|--balanced|--full|--deep] [--no-comment] — capture plus a",
     "  concurrent tiered lane batch over the diff (light/medium/heavy models + one fallback",
-    "  each from config; owned Copilot SDK child runtimes under attempt/batch/total budgets);",
-    "  findings rendered in-chat. Publication never runs in v1 without a future gate (I7).",
+    "  each from config; owned Copilot SDK child runtimes under attempt/batch/total budgets).",
+    "  Candidates are host-validated against the diff (anchors, severity ladder, blocking",
+    "  evidence), merged by one isolated adjudicator call, deduplicated, and filtered by the",
+    "  per-mode findings policy — all enforced in code. Publication never runs in v1 without",
+    "  a future gate (I7).",
     "- /z-pr-review-config — inspect and edit personal configuration.",
     "- Custom review roles and modes (schemaVersion 2 config): user-defined lanes",
     "  (prompt + tier, optional model/effort overrides) composed into custom modes;",
     "  edited directly in the config file, shown via /z-pr-review-config show.",
     "",
     "Not implemented yet (ROADMAP order):",
-    "- I5: deterministic validation and adjudication",
     "- I6: finding selection",
     "- I7: gated COMMENT publication",
     "- I8: hardening (large diffs, telemetry)",
@@ -154,45 +156,60 @@ function machineText(text) {
   return singleLine(text).replace(/`+/g, "'");
 }
 
-// In-chat review report for a lane batch (I4: quick/balanced/full/deep
-// topologies). The trailing fenced block is the machine-readable summary the
-// dev-loop's dogfood review maps into its verdict contract; the verdict itself
-// is computed by loop code, not by any model (spec: model text never decides
-// publication or merges). `batch` is runLaneBatch's result with a modelLabel
-// added per lane by the caller (code-owned, from config).
-export function renderReview(capture, batch) {
-  const findings = batch.lanes.flatMap((lane) =>
-    lane.status === "complete" ? lane.findings.map((finding) => ({ ...finding, lane: lane.laneId })) : [],
-  );
-  const dropped = batch.lanes.reduce((total, lane) => total + (lane.status === "complete" ? lane.dropped.length : 0), 0);
+// In-chat review report (I5: validation, adjudication, and policy now assemble
+// the final findings host-side; the lanes section still reports raw coverage).
+// The trailing fenced block is the machine-readable summary the dev-loop's
+// dogfood review maps into its verdict contract; its field shape is a
+// loop↔plugin protocol surface — values change with the assembled findings, the
+// keys must not. The verdict itself is computed by loop code, not by any model
+// (spec: model text never decides publication or merges). `review` is
+// assembleReview's result with a modelLabel added per lane by the caller
+// (code-owned, from config).
+export function renderReview(capture, review) {
+  const findings = review.findings;
+  const { shaping = 0, validation = 0, adjudication: adjudicationDrops = 0, policy = 0 } = review.drops ?? {};
+  const dropped = shaping + validation + adjudicationDrops + policy;
   const lines = [
     `Reviewed PR #${capture.number} — "${capture.title}" (${capture.repo})`,
-    `Mode: ${batch.mode} — ${batch.lanes.length} lane${batch.lanes.length === 1 ? "" : "s"}, ${Math.round(batch.elapsedMs / 100) / 10}s`,
+    `Mode: ${review.mode} — ${review.lanes.length} lane${review.lanes.length === 1 ? "" : "s"}, ${Math.round(review.elapsedMs / 100) / 10}s`,
   ];
-  for (const lane of batch.lanes) {
+  for (const lane of review.lanes) {
     const findingsWord = `${lane.findings.length} finding${lane.findings.length === 1 ? "" : "s"}`;
     const tail = lane.status === "complete" ? `complete — ${findingsWord}` : `FAILED (${lane.reason})`;
     lines.push(`- ${lane.laneId} (${lane.tier}, ${lane.modelLabel}): ${tail}`);
   }
-  if (batch.status === "complete") {
-    if (findings.length === 0) {
-      lines.push("Findings: none. (All lanes completed and reported nothing.)");
-    } else {
-      lines.push(`Findings: ${findings.length}`);
-      for (const finding of findings) {
-        const location = finding.file ? ` — ${finding.file}${finding.line ? `:${finding.line}` : ""}` : "";
-        lines.push(`- [${finding.severity}] ${singleLine(finding.title)} [${finding.lane}]${location}`);
-        if (finding.detail) {
-          lines.push(`  ${singleLine(finding.detail)}`);
-        }
+  const adjudication = review.adjudication ?? { status: "skipped", reason: "not assembled" };
+  if (adjudication.status === "complete") {
+    lines.push(`- adjudication (heavy): complete — merged to ${adjudication.merged} finding${adjudication.merged === 1 ? "" : "s"}`);
+  } else if (adjudication.status === "skipped") {
+    lines.push(`- adjudication (heavy): skipped — ${adjudication.reason ?? "no validated candidates"}`);
+  } else {
+    lines.push(`- adjudication (heavy): FAILED (${adjudication.reason}) — degraded: validated candidates reported unmerged`);
+  }
+  if (findings.length === 0) {
+    lines.push("Findings: none. (Nothing survived host validation, adjudication, and the mode policy.)");
+  } else {
+    lines.push(`Findings: ${findings.length} (validated against the diff${adjudication.status === "complete" ? ", adjudicated" : ""})`);
+    for (const finding of findings) {
+      const location = finding.file ? ` — ${finding.file}${finding.line ? `:${finding.line}` : ""}` : "";
+      lines.push(`- [${finding.severity}] ${singleLine(finding.title)} [${finding.lane}]${location}`);
+      if (finding.detail) {
+        lines.push(`  ${singleLine(finding.detail)}`);
       }
     }
-    if (dropped > 0) {
-      lines.push(`Dropped ${dropped} malformed candidate finding${dropped === 1 ? "" : "s"} — disclosed, not hidden.`);
-    }
-  } else {
+  }
+  if (dropped > 0) {
+    const parts = [
+      shaping > 0 ? `${shaping} malformed` : null,
+      validation > 0 ? `${validation} failing host validation` : null,
+      adjudicationDrops > 0 ? `${adjudicationDrops} malformed in adjudication` : null,
+      policy > 0 ? `${policy} below the ${review.mode} mode policy` : null,
+    ].filter(Boolean);
+    lines.push(`Dropped ${dropped} candidate finding${dropped === 1 ? "" : "s"} (${parts.join(", ")}) — disclosed, not hidden.`);
+  }
+  if (review.status !== "complete") {
     lines.push(
-      `Coverage: ${batch.lanes.filter((lane) => lane.status === "complete").length}/${batch.lanes.length} lane${batch.lanes.length === 1 ? "" : "s"} completed — ${batch.reason}`,
+      `Coverage: ${review.lanes.filter((lane) => lane.status === "complete").length}/${review.lanes.length} lane${review.lanes.length === 1 ? "" : "s"} completed — ${review.reason}`,
     );
     lines.push("This is an incomplete review, never a clean one; failed lanes' findings are not claimed.");
   }
@@ -200,9 +217,9 @@ export function renderReview(capture, batch) {
     "",
     "```z-pr-review-findings",
     JSON.stringify({
-      status: batch.status,
-      reason: batch.status === "complete" ? undefined : batch.reason,
-      mode: batch.mode,
+      status: review.status,
+      reason: review.status === "complete" ? undefined : review.reason,
+      mode: review.mode,
       findings: findings.map((finding) => ({
         severity: finding.severity,
         title: machineText(finding.title),
@@ -212,7 +229,7 @@ export function renderReview(capture, batch) {
         lane: machineText(finding.lane),
       })),
       dropped,
-      lanes: batch.lanes.map((lane) => ({
+      lanes: review.lanes.map((lane) => ({
         id: lane.laneId,
         tier: lane.tier,
         status: lane.status,
@@ -234,7 +251,9 @@ export function renderHelp() {
     "  /z-pr-review <N> --capture-only         Capture PR N read-only (metadata + diff via gh)",
     "                                           [--include-drafts] [--include-closed]",
     "  /z-pr-review <N> [mode] [--no-comment]  Review PR N: capture, then a concurrent tiered",
-    "                                           lane batch; findings in-chat.",
+    "                                           lane batch; candidates host-validated against",
+    "                                           the diff, merged by one adjudicator call,",
+    "                                           deduped, filtered by the mode policy; in-chat.",
     "                                           mode: --quick|--balanced|--full|--deep",
     "                                           (default: config defaultMode, balanced).",
     "                                           [--include-drafts] [--include-closed]",

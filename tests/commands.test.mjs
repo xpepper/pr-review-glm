@@ -127,7 +127,8 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     assert(text.includes("no model calls"), "must state that status/help/capture make no model calls");
     assert(text.includes("--capture-only"), "must name capture as implemented");
     assert(text.includes("tiered lane batch"), "must name the I4 review as implemented");
-    assert(text.includes("I5"), "must name the next increment");
+    assert(text.includes("adjudicator"), "must name the I5 validation/adjudication as implemented");
+    assert(text.includes("I6"), "must name the next increment");
     assert(!text.includes("Last capture"), "no capture section without a capture");
   });
 

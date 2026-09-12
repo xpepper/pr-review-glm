@@ -199,6 +199,9 @@ export async function runLane({
   modelOverride,
   signal = null,
   createRuntime = defaultCreateRuntime,
+  // I5: the adjudicator reuses the whole lane machinery — budgets, envelope
+  // contract, cancellation — with its own prompt over the diff plus candidates.
+  prompt = null,
 }) {
   const tier = config.tiers[lane.tier];
   // C1: a lane (custom role) may override the tier's model/effort; absent
@@ -206,7 +209,7 @@ export async function runLane({
   // session's model either way.
   const tierModel = lane.model !== undefined ? lane.model : tier.model;
   const tierEffort = lane.effort !== undefined ? lane.effort : tier.effort;
-  const prompt = buildLanePrompt(envelope, lane);
+  const lanePrompt = prompt ?? buildLanePrompt(envelope, lane);
   if (signal?.aborted) {
     return { status: "failed", reason: "cancelled before dispatch", findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
   }
@@ -319,7 +322,7 @@ export async function runLane({
     return { status: "failed", reason, cleanup, findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
   }
   const result = await driveLane(session, {
-    prompt,
+    prompt: lanePrompt,
     deadlineAt,
     cleanup: () => client.stop(),
     signal,

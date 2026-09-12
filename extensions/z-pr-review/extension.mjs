@@ -10,6 +10,7 @@ import { readPluginVersion } from "./version.mjs";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
 import { runLaneBatch } from "./batch.mjs";
+import { assembleReview } from "./adjudicate.mjs";
 import { drainUnconfirmedStops } from "./lane.mjs";
 import { describeLanes } from "./topologies.mjs";
 import { resolveMode } from "./roles.mjs";
@@ -106,11 +107,13 @@ async function runCapture(parsed) {
   }
 }
 
-// Full review (I4): capture, then the mode's topology of tiered lanes run
-// concurrently under the config budgets, one fallback attempt per lane. The
-// mode comes from the flag or config defaultMode; flags for later increments
-// are rejected up front with a pointer, never silently ignored. Publication
-// cannot run before I7, so --no-comment is the only posture that exists today.
+// Full review (I5): capture, the mode's topology of tiered lanes under the
+// config budgets, then host-side assembly — candidate validation against the
+// captured diff, one isolated adjudicator call, dedup, and the per-mode
+// findings policy, all code-owned. The mode comes from the flag or config
+// defaultMode; flags for later increments are rejected up front with a pointer,
+// never silently ignored. Publication cannot run before I7, so --no-comment is
+// the only posture that exists today.
 async function runReview(parsed) {
   const { flags, number } = parsed;
   const unimplemented = flags.all
@@ -124,6 +127,7 @@ async function runReview(parsed) {
   const controller = new AbortController();
   const review = { controller, done: Promise.resolve() };
   activeReviews.add(review);
+  const reviewStartedAt = Date.now();
   try {
     await store.load();
     const config = store.get();
@@ -160,9 +164,25 @@ async function runReview(parsed) {
     });
     review.done = batchPromise;
     const batch = await batchPromise;
+    // I5: adjudication runs inside the total hard cap — its deadline is
+    // deadlines.adjudicationMs clipped to whatever of the total budget
+    // remains at assembly time.
+    await session.log("Adjudicating validated candidates (heavy tier)…");
+    const assembled = await assembleReview({
+      batch,
+      mode,
+      envelope: outcome.envelope,
+      config,
+      repoRoot: process.cwd(),
+      adjudicationDeadlineAt: Math.min(
+        Date.now() + config.deadlines.adjudicationMs,
+        reviewStartedAt + config.deadlines.totalMs,
+      ),
+      signal: controller.signal,
+    });
     const decorated = {
-      ...batch,
-      lanes: batch.lanes.map((result) => ({
+      ...assembled,
+      lanes: assembled.lanes.map((result) => ({
         ...result,
         modelLabel: modelLabelFor(config, result),
       })),
