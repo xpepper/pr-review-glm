@@ -6,4 +6,6 @@ Findings (JSON): {FINDINGS_JSON}
 Address every P0 and P1 finding; fix P2s when clearly right, otherwise note why not.
 Follow AGENTS.md conventions. When done, re-run `node --test tests/*.test.mjs` and the
 applicable smoke scripts, push to the branch, and post a PR comment summarizing what
-you fixed. Do NOT merge. Do not expand scope beyond the findings.
+you fixed. Do NOT merge. Do NOT create or push release tags (`vX.Y.Z`) — the loop's
+merge path tags merged main itself, and a tag pushed from the branch collides with it.
+Do not expand scope beyond the findings.

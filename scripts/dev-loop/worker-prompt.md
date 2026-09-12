@@ -12,7 +12,13 @@ the H1 title: `STATUS: next=<next-increment-id>` (use `STATUS: blocked: <one-lin
 reason>` if you cannot complete; `STATUS: done` after the final increment).
 
 Land the increment as a pull request — never push to main, and NEVER merge the PR
-yourself: merging is owned by the dev-loop or the human. Do not reopen settled
+yourself: merging is owned by the dev-loop or the human. Never create or push
+release tags (`vX.Y.Z`) either: version tags are created by the loop's merge
+path on merged main AFTER the PR merges — a tag pushed from your branch lands
+on the pre-squash branch head, collides with the loop's own tag, and stops the
+run (observed 2026-09-12: a pre-pushed `v0.2.1` pointed at the branch head and
+the C1 merge's tagging step died on the collision). Bump `plugin.json` in the
+PR; the loop does the tagging. Do not reopen settled
 decisions. If a doc is stale or ambiguous, flag it in the PR rather than deciding
 silently.
 
