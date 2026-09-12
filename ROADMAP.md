@@ -34,6 +34,39 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-12 (I5 landed + release-tag collision diagnosed and fixed — the
+  C1 "phase pre-tagging" attribution corrected)** — the resumed loop run
+  (22:31) adopted PR #30 at the pinned head 130a505 and completed the cleanest
+  assessment yet: gates green in 4.5m (smoke-i3's lanes + adjudicator ran REAL
+  adjudication against the PR itself), independent approve-with-nits (4 P2s),
+  dogfood approve-with-nits (6 P2s), zero fixer rounds, GraphQL squash merge →
+  main 9804c10. The tagging tail then stopped the run exactly as C1's had:
+  `git tag v0.2.2 failed: tag already exists`. With every phase since 20:35
+  shell-less (worker AND reviewer sessions report no shell tool — see the I5
+  worker entry), no phase could have tagged: the collision source is the loop's
+  OWN V1 tag reservation — `verifyBumpAtMerge` pushes `refs/tags/vX.Y.Z` to
+  origin at the PR head before the merge, the tail's `git pull --ff-only`
+  fetch-follows that tag into the local repo, and `tagMergedRelease`'s
+  unconditional `git tag` then collides with the loop's own reservation. The
+  reservation→retarget handshake could never succeed as written, which means
+  **C1's "a phase agent pre-pushed v0.2.1 on the branch head" attribution was
+  wrong** — the reservation itself is the only thing that ever pushed a tag at
+  a branch head; #29's prompt-side no-phase-tagging rule was harmless but
+  addressed a non-problem. Supervisor repair (the sanctioned exception): tag
+  v0.2.2 deleted local+remote and re-created annotated at the merge commit
+  9804c10 (remote `v0.2.2^{}` verified), leftover remote branch deleted
+  (deleteMergedBranch never ran — the stop precedes it), post-merge main-green
+  run by hand (330/330 tests, smoke-i1/i2 green, smoke-i3 skips on idle main).
+  Fix PR (same day, conventional, outside the loop): `tagMergedRelease` with a
+  reservation accepts a local tag peeling exactly to the reserved OID (its own
+  fetch-followed copy) and replaces it at HEAD with `git tag -f` — the
+  force-with-lease push semantics are unchanged; a local tag anywhere else, or
+  any tag without a reservation, keeps failing closed. Note for the owner: the
+  loop's release tags are lightweight (`git tag`), while v0.2.0–v0.2.2 are
+  annotated because the supervisor re-pointed them — whether the loop should
+  create annotated tags is flagged, not decided (annotated + tag.gpgsign would
+  put a gpg signing step inside the merge tail's authority path).
+
 - **2026-09-12 (I5 implemented — NOT landed; worker session had no shell access)**
   — the I5 worker session (zcode, GLM) had no Bash/shell tool in its own or any
   subagent toolset, so it could not run tests, branch, commit, push, or open a

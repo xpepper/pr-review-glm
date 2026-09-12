@@ -30,8 +30,10 @@ const withManifest = (fn) => async () => {
   }
 };
 // A run fake whose PR views cycle through the given states (each "MERGED"
-// carries the PR's merge commit) and whose git rev-parse HEAD reports headOid.
-const fakeRun = ({ states, headOid = MERGE_OID } = {}) => {
+// carries the PR's merge commit), whose git rev-parse HEAD reports headOid, and
+// whose rev-parse of a tag reports tagOid (the fetch-followed reservation —
+// absent by default, so rev-parse fails as it would with no local tag).
+const fakeRun = ({ states, headOid = MERGE_OID, tagOid = null } = {}) => {
   const calls = [];
   let view = 0;
   const run = async (command, args) => {
@@ -43,7 +45,10 @@ const fakeRun = ({ states, headOid = MERGE_OID } = {}) => {
         ? { state: "MERGED", mergeCommit: { oid: MERGE_OID } }
         : { state }));
     }
-    if (command === "git" && args[0] === "rev-parse") return ok(`${headOid}\n`);
+    if (command === "git" && args[0] === "rev-parse") {
+      if (args[1] === "HEAD") return ok(`${headOid}\n`);
+      return tagOid ? ok(`${tagOid}\n`) : fail("unknown revision or path not in the working tree");
+    }
     return ok();
   };
   return { calls, run };
@@ -65,9 +70,11 @@ describe("mergeTail", () => {
   }));
   it("retargets the pre-merge tag reservation onto the merge commit (force-with-lease pinned to the reserved OID)", withManifest(async (repoRoot) => {
     const RESERVED_AT = "c".repeat(40);
-    const { calls, run } = fakeRun({ states: ["MERGED"] });
+    const { calls, run } = fakeRun({ states: ["MERGED"], tagOid: RESERVED_AT });
     const result = await mergeTail({ run, repoRoot, merged: ok("merged"), prNumber: 23, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT }, sleep: noSleep });
     assert.equal(result.code, 0);
+    assert.ok(calls.some(([command, ...args]) => command === "git" && args[0] === "tag" && args[1] === "-f" && args[2] === "v0.3.1"),
+      "the fetch-followed local copy of our own reservation is replaced at HEAD, not collided with");
     assert.ok(calls.some(([command, ...args]) => command === "git" && args.includes(`--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`)),
       "the tail must move only our own reservation, never clobber a moved tag");
   }));

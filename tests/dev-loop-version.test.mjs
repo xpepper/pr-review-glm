@@ -263,17 +263,47 @@ describe("tagMergedRelease", () => {
   }));
   it("retargets the pre-merge reservation onto the merge commit with a force-with-lease pinned to the reserved OID (round-5 P1)", withManifest("0.3.1", async (repoRoot) => {
     const calls = [];
+    const RESERVED_AT = "c".repeat(40);
     const run = async (command, args) => {
       calls.push([command, ...args]);
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${RESERVED_AT}\n`, stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     };
-    const RESERVED_AT = "c".repeat(40);
     const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT } });
     assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
     assert.deepEqual(calls, [
+      ["git", "rev-parse", "v0.3.1^{}"],
+      ["git", "tag", "-f", "v0.3.1"],
+      ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`, "origin", "v0.3.1"],
+    ], "a local tag at the reserved OID is our own fetch-followed reservation — replace it at HEAD; the push may only move a tag that still sits at our own reservation");
+  }));
+  it("retargets with a plain tag create when no local copy of the reservation was fetch-followed", withManifest("0.3.1", async (repoRoot) => {
+    const calls = [];
+    const RESERVED_AT = "c".repeat(40);
+    const run = async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === "git" && args[0] === "rev-parse") return { code: 128, stdout: "", stderr: "unknown revision" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT } });
+    assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
+    assert.deepEqual(calls, [
+      ["git", "rev-parse", "v0.3.1^{}"],
       ["git", "tag", "v0.3.1"],
       ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`, "origin", "v0.3.1"],
-    ], "the push may only move a tag that still sits at our own reservation");
+    ]);
+  }));
+  it("fails closed when a local tag exists but does not sit at the reserved OID (I5 release-stop regression)", withManifest("0.3.1", async (repoRoot) => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${"d".repeat(40)}\n`, stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40) } });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /refusing to overwrite a tag we did not reserve/);
+    assert.deepEqual(calls, [["git", "rev-parse", "v0.3.1^{}"]], "no tag may be created, replaced, or pushed");
   }));
   it("refuses to retarget a reservation whose tag does not match main's version", withManifest("0.3.1", async (repoRoot) => {
     const calls = [];
@@ -286,7 +316,9 @@ describe("tagMergedRelease", () => {
     const run = async (command, args) =>
       args[0] === "push"
         ? { code: 1, stdout: "", stderr: "stale info" }
-        : { code: 0, stdout: "", stderr: "" };
+        : args[0] === "rev-parse"
+          ? { code: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" }
+          : { code: 0, stdout: "", stderr: "" };
     const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40) } });
     assert.equal(result.ok, false);
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);

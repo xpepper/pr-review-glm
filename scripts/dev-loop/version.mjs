@@ -191,7 +191,30 @@ export async function tagMergedRelease({ run, repoRoot, reservation = null }) {
   if (reservation && reservation.tag !== tag) {
     return { ok: false, detail: `reserved release tag ${reservation.tag} does not match main's version ${parsed.version} (${tag}) — refusing to retarget a reservation that is not ours` };
   }
-  const created = await run("git", ["tag", tag], { cwd: repoRoot });
+  // With a reservation, a LOCAL copy of the reserved tag is expected: the tail's
+  // own `git pull` fetch-follows the reservation (verifyBumpAtMerge pushed it to
+  // origin at the PR head) into the local repo, so a plain `git tag` collides
+  // with our own reservation — "tag 'vX.Y.Z' already exists" stopped the I5
+  // release after a completed merge (2026-09-12; the same signature had been
+  // misattributed at C1 to a phase agent pre-tagging — phases cannot tag, the
+  // reservation is the only thing that ever pushed the tag at the branch head).
+  // Only a local tag peeling exactly to the reserved OID may be replaced: -f
+  // retargets it onto HEAD, which tagConfirmedMerge already verified is this
+  // PR's merge commit, and the force-with-lease push below moves only our own
+  // remote reservation. A local tag anywhere else is a tag we did not reserve —
+  // a human decision, never a silent clobber. Without a reservation an existing
+  // local tag keeps failing closed exactly as before.
+  let createArgs = ["tag", tag];
+  if (reservation) {
+    const existing = await run("git", ["rev-parse", `${tag}^{}`], { cwd: repoRoot });
+    if (existing.code === 0) {
+      if (existing.stdout.trim() !== reservation.reservedAt) {
+        return { ok: false, detail: `local tag ${tag} exists at ${existing.stdout.trim().slice(0, 7)}, not the reserved ${reservation.reservedAt.slice(0, 7)} — refusing to overwrite a tag we did not reserve` };
+      }
+      createArgs = ["tag", "-f", tag];
+    }
+  }
+  const created = await run("git", createArgs, { cwd: repoRoot });
   if (created.code !== 0) {
     return { ok: false, detail: `git tag ${tag} failed: ${created.stderr.slice(0, 200)}` };
   }
