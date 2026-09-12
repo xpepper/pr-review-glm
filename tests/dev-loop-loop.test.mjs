@@ -13,7 +13,7 @@ const HEAD_B = oid("b");
 const HEAD_C = oid("c");
 
 function deps(overrides = {}) {
-  const calls = { worker: 0, reviewer: 0, dogfood: 0, fixer: 0, merge: 0, postMerge: 0, assessments: 0, mergedPr: null, sleeps: [] };
+  const calls = { worker: 0, reviewer: 0, dogfood: 0, fixer: 0, merge: 0, postMerge: 0, assessments: 0, mergedPr: null, mergeHeads: [], sleeps: [] };
   const base = {
     readStatus: async () => ({ kind: "next", increment: "I3" }),
     preflight: async () => [gate("idle")],
@@ -26,7 +26,7 @@ function deps(overrides = {}) {
     runDogfood: async () => { calls.dogfood++; return { ...cleanRun, review: review("approve") }; },
     runFixer: async () => { calls.fixer++; return cleanRun; },
     fetchPrHead: async () => ({ headRefOid: HEAD_A }),
-    merge: async (prNumber) => { calls.merge++; calls.mergedPr = prNumber; return { code: 0, stderr: "" }; },
+    merge: async (prNumber, expectedHeadRefOid) => { calls.merge++; calls.mergedPr = prNumber; calls.mergeHeads.push(expectedHeadRefOid); return { code: 0, stderr: "" }; },
     postMergeGates: async () => { calls.postMerge++; return [gate("main-green")]; },
     sleep: async (ms) => calls.sleeps.push(ms),
     log: () => {},
@@ -111,6 +111,7 @@ describe("runLoop merge modes (L2)", () => {
     assert.equal(summary.stopped, "completed");
     assert.equal(calls.merge, 1);
     assert.equal(calls.dogfood, 1);
+    assert.deepEqual(calls.mergeHeads, [HEAD_A], "the merge must be pinned to the reviewed head OID");
     assert.equal(summary.iterations[0].merged, true);
   });
   it("auto: never merges on blocking findings — fixer runs, budget exhaustion stops it", async () => {
@@ -174,6 +175,7 @@ describe("runLoop head pinning (auto only)", () => {
     assert.equal(summary.stopped, "completed");
     assert.equal(calls.merge, 1);
     assert.equal(calls.mergedPr, 7);
+    assert.deepEqual(calls.mergeHeads, [HEAD_B], "after re-assessment the merge pins the re-reviewed head");
     assert.equal(calls.reviewer, 2); // the moved head was fully re-reviewed, not trusted
     assert.equal(calls.assessments, 2);
     assert.equal(summary.iterations[0].merged, true);
@@ -223,6 +225,21 @@ describe("runLoop head pinning (auto only)", () => {
     const summary = await runLoop(d);
     assert.equal(summary.stopped, "failure");
     assert.equal(calls.merge, 0);
+  });
+  it("logs (not swallows) a merge-path warning/note returned on a successful merge (round-5 P2)", async () => {
+    const lines = [];
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      merge: async (prNumber, expectedHeadRefOid) => {
+        calls.merge++; calls.mergedPr = prNumber; calls.mergeHeads.push(expectedHeadRefOid);
+        return { code: 0, stderr: "", warning: "remote branch i3-x was not deleted (delete it manually): rejected", note: "branch lives in the PR author's fork" };
+      },
+      log: (line) => lines.push(line),
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "completed", "a warning on a successful merge must not fail the iteration");
+    assert.ok(lines.some((line) => /warning:.*not deleted/.test(line)), "the deletion warning is disclosed in the log");
+    assert.ok(lines.some((line) => /note:.*fork/.test(line)), "the fork note is disclosed in the log");
   });
 });
 

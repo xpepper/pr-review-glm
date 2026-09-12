@@ -131,6 +131,13 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     assert(!text.includes("Last capture"), "no capture section without a capture");
   });
 
+  it("status reports the running version (V1), degrading to unknown", () => {
+    assert(renderStatus(null, "0.2.0").includes("Version: 0.2.0"));
+    const unknown = renderStatus(null, null);
+    assert(unknown.includes("Version: (unknown"), "unreadable plugin.json must degrade, not error");
+    assert(!unknown.includes("Version: null"));
+  });
+
   it("status reports the session's last capture when one exists", () => {
     const text = renderStatus(captureSummary);
     assert(text.includes("Last capture (this session)"));

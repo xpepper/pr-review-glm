@@ -12,6 +12,8 @@ import {
   gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
+import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
+import { deleteMergedBranch, mergeTail, squashMergeAtHead } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
 
@@ -203,6 +205,10 @@ async function runMain(options, { zcode, phaseEnv }) {
         if (!branchHead.ok) return { results: [branchHead], prNumber, headRefOid };
         results.push(branchHead);
         results.push(await gateTests({ run, repoRoot }));
+        // V1: every merged increment bumps plugin.json's version — checked
+        // BEFORE the inference-consuming smokes so a bump-less PR fails in
+        // seconds instead of after burning model calls (round-2 dogfood P2).
+        results.push(await gateVersionBump({ run, repoRoot }));
         results.push(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] }));
         results.push(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement }));
       } else {
@@ -268,13 +274,52 @@ async function runMain(options, { zcode, phaseEnv }) {
         return { error: String(error) };
       }
     },
-    merge: async (prNumber) => {
-      const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
-      if (merged.code === 0) {
-        await run("git", ["checkout", "main"], { cwd: repoRoot });
-        await run("git", ["pull", "--ff-only"], { cwd: repoRoot });
+    merge: async (prNumber, expectedHeadRefOid) => {
+      // The loop passes the reviewed head OID it pinned; the merge path must
+      // hold that same OID (gh pr merge cannot pin one itself), otherwise it
+      // could integrate a head nobody re-checked.
+      if (!isFullOid(expectedHeadRefOid)) {
+        return { code: 1, stdout: "", stderr: `merge requires the pinned reviewed head OID for PR ${prNumber} (got ${String(expectedHeadRefOid)})`, timedOut: false };
       }
-      return merged;
+      // V1 pre-merge bump re-check: the gate's origin/main baseline was read at
+      // assessment time; re-verify against a fresh main so a release landing in
+      // between cannot turn this PR's bump into an unchanged version (the
+      // version-side twin of the headRefOid pin).
+      const bump = await verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid });
+      if (!bump.ok) return { code: 1, stdout: "", stderr: bump.detail, timedOut: false };
+      // gh pr merge cannot pin a head, so the local pin above can lose a race;
+      // the GraphQL mutation enforces the reviewed head atomically at GitHub.
+      const merged = await squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadRefOid });
+      if (merged.code !== 0) {
+        // The mutation was refused atomically, so the merge did not happen —
+        // release the tag reservation verifyBumpAtMerge just took, or the
+        // version stays stranded (every later run would abort on the reserved
+        // tag). A failed release is disclosed as a warning on the refusal; the
+        // reservation is ours alone to delete.
+        const released = await run("git", ["push", "origin", "--delete", `refs/tags/${bump.tag}`], { cwd: repoRoot });
+        if (released.code !== 0) {
+          return { ...merged, stderr: `${merged.stderr}\nwarning: could not release the reserved tag ${bump.tag} after the refused merge (delete it manually): ${(released.stderr || released.stdout || "").slice(0, 200)}` };
+        }
+        return merged;
+      }
+      // V1 tagging tail: GitHub confirms the merge, main is checked out and
+      // fast-forwarded, then the merged main is tagged vX.Y.Z — every step
+      // checked and fail-closed (the merge itself stays put on tail failure).
+      // The reservation retargets the pre-merge tag onto the merge commit.
+      const tailed = await mergeTail({ run, repoRoot, merged, prNumber, reservation: { tag: bump.tag, reservedAt: bump.reservedAt } });
+      if (tailed.code !== 0) return tailed;
+      // --delete-branch equivalent, run ONLY after GitHub confirmed MERGED and
+      // the release tag landed (run-3 dogfood P1: deleting earlier means a
+      // failed confirmation or tail strands a merged PR whose branch is already
+      // gone). Failure is disclosed as a warning — it cannot un-merge. The
+      // warning/note ride a dedicated field (round-5 review P2: stuffing it
+      // into stderr on a code-0 result was never shown to anyone) which the
+      // loop logs after a successful merge.
+      const del = await deleteMergedBranch({ run, repoRoot, branch: merged.branch, isCrossRepository: merged.isCrossRepository });
+      if (!del.ok) {
+        return { ...tailed, warning: del.detail };
+      }
+      return del.note ? { ...tailed, note: del.note } : tailed;
     },
     postMergeGates: async () => {
       const results = [await gateMainGreen({ run, repoRoot })];

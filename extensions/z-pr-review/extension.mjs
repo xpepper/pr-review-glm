@@ -6,6 +6,7 @@
 // LLM never orchestrates anything here (spec: "Architecture A"); every
 // handler is plain code and the model runs only inside the lane children.
 import { joinSession } from "@github/copilot-sdk/extension";
+import { readPluginVersion } from "./version.mjs";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
 import { runLaneBatch } from "./batch.mjs";
@@ -38,7 +39,7 @@ const session = await joinSession({
           throw new Error(parsed.message);
         }
         if (parsed.kind === "status") {
-          await session.log(renderStatus(lastCapture));
+          await session.log(renderStatus(lastCapture, readPluginVersion()));
           return;
         }
         if (parsed.kind === "help") {
@@ -172,6 +173,8 @@ async function runReview(parsed) {
     activeReviews.delete(review);
   }
 }
+
+// readPluginVersion lives in ./version.mjs (unit-tested there).
 
 function modelLabelFor(config, laneResult) {
   // The label names the model that actually ran for this lane — the most
