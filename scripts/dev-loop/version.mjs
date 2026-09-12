@@ -3,6 +3,7 @@
 // and the merge path tags the merged main vX.Y.Z. Both are code-owned and
 // fail-closed — no model output ever decides a release.
 import { readFileSync } from "node:fs";
+import { isFullOid } from "./gates.mjs";
 import { join } from "node:path";
 
 // Strict X.Y.Z (no prerelease/build suffixes): pre-1.0 bumps move patch (additive)
@@ -112,7 +113,7 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
   const pr = await run("gh", ["pr", "view", String(prNumber), "--json", "headRefOid"], { cwd: repoRoot });
   let headRefOid = null;
   try { headRefOid = JSON.parse(pr.stdout || "{}").headRefOid ?? null; } catch { /* validated below */ }
-  if (pr.code !== 0 || !/^[0-9a-f]{40}$/.test(String(headRefOid))) {
+  if (pr.code !== 0 || !isFullOid(headRefOid)) {
     return { ok: false, detail: `cannot pin PR ${prNumber} headRefOid for the bump re-check (merge aborted): ${(pr.stderr || pr.stdout || "").slice(0, 200)}` };
   }
   if (headRefOid !== expectedHeadRefOid) {

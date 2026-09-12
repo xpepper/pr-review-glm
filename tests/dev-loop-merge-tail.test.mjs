@@ -1,16 +1,17 @@
 // tests/dev-loop-merge-tail.test.mjs — the merge path's server-pinned squash
-// merge (GraphQL mergePullRequest with headRefOid, so the reviewed head is
+// merge (GraphQL mergePullRequest with expectedHeadOid, so the reviewed head is
 // enforced atomically at GitHub) and the tagging tail (merge confirmed, with
 // polling through transient OPEN/QUEUED, then checkout main → ff-only pull →
 // HEAD must equal this PR's merge commit → tag → push). The wiring in
-// scripts/dev-loop.mjs delegates to both; all git/gh interaction is faked and
-// the poll delay is stubbed to zero.
+// scripts/dev-loop.mjs delegates to both and deletes the branch only after the
+// tail confirms; all git/gh interaction is faked and the poll delay is stubbed
+// to zero.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mergeTail, squashMergeAtHead } from "../scripts/dev-loop/merge-tail.mjs";
+import { deleteMergedBranch, mergeTail, squashMergeAtHead } from "../scripts/dev-loop/merge-tail.mjs";
 
 const MERGE_OID = "a".repeat(40);
 const OTHER_OID = "b".repeat(40);
@@ -97,6 +98,20 @@ describe("mergeTail", () => {
     assert.equal(result.code, 1);
     assert.match(result.stderr, /not confirmed MERGED/);
   }));
+  it("fails fast on terminal CLOSED instead of burning the whole poll window (run-3 independent P2)", withManifest(async (repoRoot) => {
+    const views = [];
+    const run = async (command, args) => {
+      if (command === "gh" && args[1] === "view") {
+        views.push(1);
+        return ok(JSON.stringify({ state: "CLOSED" }));
+      }
+      return ok();
+    };
+    const result = await mergeTail({ run, repoRoot, merged: ok("merged"), prNumber: 23, sleep: noSleep });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /CLOSED, not MERGED/);
+    assert.equal(views.length, 1, "must not keep polling a terminal state");
+  }));
   it("aborts before tagging when git checkout main fails", withManifest(async (repoRoot) => {
     const { calls, run } = fakeRun({ states: ["MERGED"] });
     const wrapped = async (command, args) =>
@@ -136,7 +151,7 @@ describe("squashMergeAtHead", () => {
   const HEAD = "c".repeat(40);
   // A run fake for the merge path: `gh pr view` resolves the GraphQL id and
   // branch, `gh api graphql` performs (or refuses) the pinned mutation.
-  const mergeFake = ({ graphql = { data: { mergePullRequest: { mergeCommit: { oid: MERGE_OID } } } }, graphqlRaw = null, deleteFails = false, overrides = {} } = {}) => {
+  const mergeFake = ({ graphql = { data: { mergePullRequest: { mergeCommit: { oid: MERGE_OID } } } }, graphqlRaw = null, overrides = {} } = {}) => {
     const calls = [];
     const run = async (command, args) => {
       const key = [command, ...args].join(" ");
@@ -146,24 +161,27 @@ describe("squashMergeAtHead", () => {
         return ok(JSON.stringify({ id: "PR_23", headRefName: "i9-example" }));
       }
       if (command === "gh" && args[0] === "api") return ok(graphqlRaw ?? JSON.stringify(graphql));
-      if (command === "git" && args[0] === "push" && args.includes("--delete")) {
-        return deleteFails ? fail("remote ref delete failed") : ok();
-      }
       return ok();
     };
     return { calls, run };
   };
-  it("merges via the GraphQL mutation pinned to the reviewed head, then deletes the branch", async () => {
+  it("merges via the GraphQL mutation pinned to the reviewed head (expectedHeadOid), returning the branch for post-confirmation deletion", async () => {
     const { calls, run } = mergeFake();
     const result = await squashMergeAtHead({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: HEAD });
     assert.equal(result.code, 0);
     const graphql = calls.find((key) => key.startsWith("gh api graphql"));
     assert.ok(graphql, "must call the GraphQL mergePullRequest mutation");
     assert.match(graphql, /mergePullRequest/, "the mutation must be mergePullRequest");
-    assert.match(graphql, /headRefOid/, "the mutation must pin the head OID");
+    // MergePullRequestInput has expectedHeadOid — an earlier draft used
+    // `headRefOid`, a field that does not exist in the schema, which every
+    // real merge attempt would have died on (run-3 dogfood P1; the fake run
+    // cannot schema-check, so the assertion pins the field name).
+    assert.match(graphql, /expectedHeadOid/, "the mutation must pin via expectedHeadOid");
+    assert.doesNotMatch(graphql, /headRefOid/, "headRefOid is not a MergePullRequestInput field");
     assert.ok(graphql.includes(`head=${HEAD}`), "the pinned head is the reviewed OID");
-    assert.ok(calls.includes("git push origin --delete i9-example"), "must delete the branch (--delete-branch equivalent)");
-    assert.equal(result.stderr, "");
+    assert.equal(result.branch, "i9-example", "the branch is returned for the merge dep to delete only after confirmation");
+    assert.equal(result.mergeCommitOid, MERGE_OID);
+    assert.ok(!calls.some((key) => key.includes("--delete")), "must NOT delete the branch before the merge is confirmed");
   });
   it("aborts when GitHub refuses the mutation because the head moved (atomic server-side pin)", async () => {
     const { calls, run } = mergeFake({ graphql: { errors: [{ message: "Head branch was modified. Try and perform the merge again." }] } });
@@ -172,6 +190,13 @@ describe("squashMergeAtHead", () => {
     assert.match(result.stderr, /merge aborted/);
     assert.match(result.stderr, /Head branch was modified/);
     assert.ok(!calls.some((key) => key.includes("--delete")), "must not delete the branch of a refused merge");
+  });
+  it("fails closed when data.mergePullRequest arrives WITHOUT a mergeCommit oid (that is not a confirmed merge)", async () => {
+    const { calls, run } = mergeFake({ graphql: { data: { mergePullRequest: { mergeCommit: null } } } });
+    const result = await squashMergeAtHead({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: HEAD });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /did not confirm the squash-merge/);
+    assert.ok(!calls.some((key) => key.includes("--delete")), "must not delete the branch on unconfirmed merges");
   });
   it("fails closed when the PR's GraphQL id / branch cannot be resolved", async () => {
     const { run } = mergeFake({ overrides: { "gh pr view 23 --json id,headRefName": fail("gh down") } });
@@ -185,10 +210,20 @@ describe("squashMergeAtHead", () => {
     assert.equal(result.code, 1);
     assert.match(result.stderr, /merge aborted/);
   });
-  it("discloses a branch-delete failure without failing the already-completed merge", async () => {
-    const { run } = mergeFake({ deleteFails: true });
-    const result = await squashMergeAtHead({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: HEAD });
-    assert.equal(result.code, 0, "the merge itself succeeded; the tail must still run");
-    assert.match(result.stderr, /branch i9-example was not deleted/);
+});
+
+describe("deleteMergedBranch", () => {
+  it("deletes the branch on the remote and reports success", async () => {
+    const calls = [];
+    const run = async (command, args) => { calls.push([command, ...args]); return ok(); };
+    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example" });
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(calls, [["git", "push", "origin", "--delete", "i9-example"]]);
+  });
+  it("reports a disclosed warning (not a failure) when the deletion fails — it cannot un-merge", async () => {
+    const run = async () => fail("remote ref delete failed");
+    const result = await deleteMergedBranch({ run, repoRoot: "/tmp/any", branch: "i9-example" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /branch i9-example was not deleted/);
   });
 });

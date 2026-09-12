@@ -10,18 +10,21 @@ import { tagMergedRelease } from "./version.mjs";
 // Server-side enforcement of the reviewed head (P1: `gh pr merge` merges
 // whatever head GitHub currently holds, so the loop's local pin can lose a
 // race in the seconds between fetchPrHead/verifyBumpAtMerge and the merge).
-// The GraphQL mergePullRequest mutation takes the head OID itself and GitHub
-// rejects the whole mutation if the head moved — the pin is atomic at the
-// server, closing the window the CLI command leaves open.
+// The GraphQL mergePullRequest mutation takes the head OID itself — via its
+// `expectedHeadOid` input field (MergePullRequestInput; an earlier draft used
+// a field name that does not exist in the schema, which every merge attempt
+// would have died on) — and GitHub rejects the whole mutation if the head
+// moved: the pin is atomic at the server, closing the window the CLI command
+// leaves open.
 const MERGE_MUTATION = [
   "mutation($pr: ID!, $head: GitObjectID!) {",
-  "  mergePullRequest(input: {pullRequestId: $pr, mergeMethod: SQUASH, headRefOid: $head}) { mergeCommit { oid } }",
+  "  mergePullRequest(input: {pullRequestId: $pr, mergeMethod: SQUASH, expectedHeadOid: $head}) { mergeCommit { oid } }",
   "}",
 ].join("\n");
 
 export async function squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadRefOid }) {
   // The mutation needs the PR's GraphQL id (not its number) and its branch
-  // name (for the --delete-branch equivalent below).
+  // name (returned for the post-confirmation branch deletion in the merge dep).
   const view = await run("gh", ["pr", "view", String(prNumber), "--json", "id,headRefName"], { cwd: repoRoot });
   let pr = null;
   try { pr = JSON.parse(view.stdout || "{}"); } catch { /* handled below */ }
@@ -32,17 +35,29 @@ export async function squashMergeAtHead({ run, repoRoot, prNumber, expectedHeadR
   let payload = null;
   try { payload = JSON.parse(api.stdout || "{}"); } catch { /* handled below */ }
   const errors = Array.isArray(payload?.errors) ? payload.errors : null;
-  if (api.code !== 0 || errors || !payload?.data?.mergePullRequest) {
+  const mergeCommitOid = payload?.data?.mergePullRequest?.mergeCommit?.oid ?? null;
+  if (api.code !== 0 || errors || !payload?.data?.mergePullRequest || !mergeCommitOid) {
+    // A data.mergePullRequest object without a mergeCommit oid is NOT a
+    // confirmed merge (e.g. an already-merged edge) — treat it as refused, not
+    // as success: the branch must never be deleted or tagged on that basis.
     const detail = errors?.map((error) => error?.message ?? String(error)).join("; ")
       ?? (api.stderr || api.stdout || "no output").slice(0, 200);
-    return { code: 1, stdout: api.stdout, stderr: `GitHub refused the squash-merge of PR ${prNumber} pinned to reviewed head ${expectedHeadRefOid.slice(0, 7)} (merge aborted — the head likely moved; re-run the loop to re-assess): ${detail}`, timedOut: false };
+    return { code: 1, stdout: api.stdout, stderr: `GitHub did not confirm the squash-merge of PR ${prNumber} pinned to reviewed head ${expectedHeadRefOid.slice(0, 7)} (merge aborted — the head likely moved or the PR was not mergeable; re-run the loop to re-assess): ${detail}`, timedOut: false };
   }
-  // --delete-branch equivalent: the mutation has no such flag, so the branch
-  // is deleted after the merge. Failure is disclosed but cannot un-merge — the
-  // tail still runs so the merged head gets tagged and post-merge gates run.
-  const del = await run("git", ["push", "origin", "--delete", pr.headRefName], { cwd: repoRoot });
-  const warning = del.code === 0 ? "" : `\nwarning: branch ${pr.headRefName} was not deleted (delete it manually): ${(del.stderr || del.stdout || "").slice(0, 200)}`;
-  return { code: 0, stdout: api.stdout, stderr: warning, timedOut: false };
+  return { code: 0, stdout: api.stdout, stderr: "", timedOut: false, branch: pr.headRefName, mergeCommitOid };
+}
+
+// The --delete-branch equivalent, isolated so the merge dep can run it ONLY
+// after the tail confirmed MERGED and the release tag landed (run-3 dogfood
+// P1: deleting before confirmation strands a possibly-unmerged PR without its
+// branch). Failure is disclosed as a warning, never a failed merge — it cannot
+// un-merge what already landed.
+export async function deleteMergedBranch({ run, repoRoot, branch }) {
+  const del = await run("git", ["push", "origin", "--delete", branch], { cwd: repoRoot });
+  if (del.code !== 0) {
+    return { ok: false, detail: `branch ${branch} was not deleted (delete it manually): ${(del.stderr || del.stdout || "").slice(0, 200)}` };
+  }
+  return { ok: true };
 }
 
 // A merge can report success while GitHub still shows OPEN for a moment, or sit
@@ -57,7 +72,9 @@ const MERGE_CONFIRM_DELAY_MS = 10_000;
 export async function mergeTail({ run, repoRoot, merged, prNumber, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   // GitHub must confirm the merge before any release tagging: a merge that
   // reports success but is not yet MERGED must not be tagged. Poll through the
-  // transient OPEN/QUEUED window so a briefly delayed merge still gets tagged.
+  // transient OPEN/QUEUED window so a briefly delayed merge still gets tagged;
+  // CLOSED is terminal (a closed-unmerged PR can never become MERGED), so it
+  // fails immediately instead of burning the whole window.
   let state = null;
   let viewError = "";
   for (let attempt = 1; attempt <= MERGE_CONFIRM_ATTEMPTS; attempt++) {
@@ -67,6 +84,9 @@ export async function mergeTail({ run, repoRoot, merged, prNumber, sleep = (ms) 
       state = parsed.state ?? null;
       if (viewed.code === 0 && state === "MERGED" && parsed.mergeCommit?.oid) {
         return await tagConfirmedMerge({ run, repoRoot, merged, prNumber, mergeOid: parsed.mergeCommit.oid });
+      }
+      if (state === "CLOSED" && viewed.code === 0) {
+        return { code: 1, stdout: "", stderr: `PR ${prNumber} is CLOSED, not MERGED (terminal state — not polling further): ${(viewed.stderr || "the squash-merge did not land").slice(0, 200)}`, timedOut: false };
       }
       viewError = (viewed.stderr || viewed.stdout || "").slice(0, 200);
     } catch {

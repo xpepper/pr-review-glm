@@ -13,7 +13,7 @@ import {
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
-import { mergeTail, squashMergeAtHead } from "./dev-loop/merge-tail.mjs";
+import { deleteMergedBranch, mergeTail, squashMergeAtHead } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
 
@@ -273,7 +273,17 @@ async function main() {
       // V1 tagging tail: GitHub confirms the merge, main is checked out and
       // fast-forwarded, then the merged main is tagged vX.Y.Z — every step
       // checked and fail-closed (the merge itself stays put on tail failure).
-      return mergeTail({ run, repoRoot, merged, prNumber });
+      const tailed = await mergeTail({ run, repoRoot, merged, prNumber });
+      if (tailed.code !== 0) return tailed;
+      // --delete-branch equivalent, run ONLY after GitHub confirmed MERGED and
+      // the release tag landed (run-3 dogfood P1: deleting earlier means a
+      // failed confirmation or tail strands a merged PR whose branch is already
+      // gone). Failure is disclosed as a warning — it cannot un-merge.
+      const del = await deleteMergedBranch({ run, repoRoot, branch: merged.branch });
+      if (!del.ok) {
+        return { ...tailed, stderr: `${tailed.stderr}\nwarning: ${del.detail}` };
+      }
+      return tailed;
     },
     postMergeGates: async () => {
       const results = [await gateMainGreen({ run, repoRoot })];
