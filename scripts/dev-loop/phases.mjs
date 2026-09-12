@@ -56,6 +56,19 @@ export function buildPhaseEnv({
       HOME: phaseHome,
       GIT_CONFIG_GLOBAL: join(home, ".gitconfig"),
       GH_CONFIG_DIR: join(home, ".config", "gh"),
+      // Git credentials, pinned to gh's helper. The operator's helper chain
+      // (observed: osxkeychain, a reset line, then git-credential-manager)
+      // breaks under the isolated HOME — GCM has no config there and falls
+      // back to interactive prompting (observed in the V1 run 3 fixer:
+      // "Username for 'https://github.com':" mid-push). These GIT_CONFIG_*
+      // entries are command-scope config: the empty value resets whatever the
+      // global file accumulated, then exactly one helper remains — gh's, which
+      // reads GH_CONFIG_DIR above. Phase pushes become deterministic.
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: "credential.helper",
+      GIT_CONFIG_VALUE_1: "!gh auth git-credential",
     },
     cleanup: () => rmSync(phaseHome, { recursive: true, force: true }),
   };
