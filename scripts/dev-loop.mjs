@@ -253,12 +253,18 @@ async function main() {
         return { error: String(error) };
       }
     },
-    merge: async (prNumber) => {
+    merge: async (prNumber, expectedHeadRefOid) => {
+      // The loop passes the reviewed head OID it pinned; the merge path must
+      // hold that same OID (gh pr merge cannot pin one itself), otherwise it
+      // could integrate a head nobody re-checked.
+      if (!isFullOid(expectedHeadRefOid)) {
+        return { code: 1, stdout: "", stderr: `merge requires the pinned reviewed head OID for PR ${prNumber} (got ${String(expectedHeadRefOid)})`, timedOut: false };
+      }
       // V1 pre-merge bump re-check: the gate's origin/main baseline was read at
       // assessment time; re-verify against a fresh main so a release landing in
       // between cannot turn this PR's bump into an unchanged version (the
       // version-side twin of the headRefOid pin).
-      const bump = await verifyBumpAtMerge({ run, repoRoot, prNumber });
+      const bump = await verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid });
       if (!bump.ok) return { code: 1, stdout: "", stderr: bump.detail, timedOut: false };
       const merged = await run("gh", ["pr", "merge", String(prNumber), "--squash", "--delete-branch"], { cwd: repoRoot });
       if (merged.code !== 0) return merged;

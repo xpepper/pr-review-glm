@@ -173,7 +173,7 @@ export async function runLoop(deps) {
       log(`PR #${iteration.prNumber} head moved ${short(state.headRefOid)} → ${short(current.headRefOid)} after assessment; re-assessing`);
       state = await assess();
     }
-    const merged = await timed.merge(iteration.prNumber);
+    const merged = await timed.merge(iteration.prNumber, iteration.reviewedHeadOid);
     if (merged.code !== 0) return fail(`merge failed for PR #${iteration.prNumber}: ${merged.stderr.slice(0, 200)}`);
     iteration.merged = true;
     const post = await postMergeGates();

@@ -38,7 +38,7 @@ describe("parseVersion", () => {
   it("rejects unparseable JSON, missing, and non-X.Y.Z versions", () => {
     assert.match(parseVersion("{oops", "m").error, /not parseable JSON/);
     assert.match(parseVersion("{}", "m").error, /no strict X\.Y\.Z/);
-    for (const bad of ["0.1", "1.2.3-rc1", "v1.2.3", "latest", 3, "01.2.3", "1.02.3", "1.2.03"]) {
+    for (const bad of ["0.1", "1.2.3-rc1", "v1.2.3", "latest", 3, "01.2.3", "1.02.3", "1.2.03", "1.2.3\n", "1.2.3 ", "1.2.3\nx"]) {
       assert.match(parseVersion(manifest(bad), "m").error, /no strict X\.Y\.Z/);
     }
   });
@@ -118,27 +118,35 @@ describe("verifyBumpAtMerge", () => {
   };
   it("confirms the bump against a freshly fetched main, reading the PR head by its pinned remote OID", async () => {
     const { calls, run } = fake({ main: "0.1.0", head: "0.2.0" });
-    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23 });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.deepEqual(result, { ok: true, detail: `version 0.1.0 → 0.2.0 confirmed at merge time (PR head ${OID.slice(0, 7)})` });
     assert.ok(calls.includes(`git show ${OID}:plugin.json`), "must read the PR head manifest by OID, not the local checkout");
     assert.ok(!calls.includes("git show HEAD:plugin.json"), "the local checkout is never the re-check source");
   });
+  it("aborts the merge when the head at re-check time differs from the pinned reviewed head", async () => {
+    const OTHER = "d".repeat(40);
+    const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { "gh pr view 23 --json headRefOid": res(JSON.stringify({ headRefOid: OTHER })) } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /pinned the reviewed head/);
+    assert.match(result.detail, /merge aborted/);
+  });
   it("aborts the merge when main moved to the PR's version (stale gate baseline)", async () => {
     const { run } = fake({ main: "0.2.0", head: "0.2.0" });
-    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23 });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.equal(result.ok, false);
     assert.match(result.detail, /unchanged vs main's 0\.2\.0 at merge time/);
     assert.match(result.detail, /merge aborted/);
   });
   it("aborts the merge when main moved past the PR's version", async () => {
     const { run } = fake({ main: "0.3.0", head: "0.2.0" });
-    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23 });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.equal(result.ok, false);
     assert.match(result.detail, /not greater than main's 0\.3\.0 at merge time/);
   });
   it("fails closed when the fetch fails", async () => {
     const { run } = fake({ overrides: { "git fetch --quiet origin main": res("", 1, "network") } });
-    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23 });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.equal(result.ok, false);
     assert.match(result.detail, /git fetch origin main failed/);
   });
@@ -146,20 +154,20 @@ describe("verifyBumpAtMerge", () => {
     const ghDown = fake({ overrides: { "gh pr view 23 --json headRefOid": res("", 1, "gh down") } });
     const unpinned = fake({ overrides: { "gh pr view 23 --json headRefOid": res(JSON.stringify({ headRefOid: "short" })) } });
     for (const { run } of [ghDown, unpinned]) {
-      const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23 });
+      const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
       assert.equal(result.ok, false);
       assert.match(result.detail, /cannot pin PR 23 headRefOid/);
     }
   });
   it("fails closed when main's manifest cannot be read at merge time", async () => {
     const { run } = fake({ overrides: { "git show origin/main:plugin.json": res("", 128, "bad object") } });
-    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23 });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.equal(result.ok, false);
     assert.match(result.detail, /cannot read plugin\.json on origin\/main/);
   });
   it("fails closed when the PR head's manifest is not valid semver", async () => {
     const { run } = fake({ overrides: { [`git show ${OID}:plugin.json`]: res("not json") } });
-    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23 });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.equal(result.ok, false);
     assert.match(result.detail, /not parseable JSON/);
   });

@@ -8,7 +8,10 @@ import { join } from "node:path";
 // Strict X.Y.Z (no prerelease/build suffixes): pre-1.0 bumps move patch (additive)
 // or minor (breaking), and the loop only ever compares strings, so a suffix
 // would be un-tagged territory the design never settled.
-const SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
+// (?![\s\S]) anchors truly to end-of-string: JS `$` also matches just before a
+// final "\n", so "1.2.3\n" would otherwise pass validation and later produce a
+// `git tag` argument with an embedded newline — a merge that cannot be tagged.
+const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?![\s\S])/;
 // Strict semver also forbids leading zeros in numeric identifiers ("01.2.3").
 const hasLeadingZero = (part) => part.length > 1 && part.startsWith("0");
 
@@ -87,13 +90,16 @@ export async function gateVersionBump({ run, repoRoot }) {
 // release merging in between could already carry this PR's version, landing an
 // "unchanged" version after all. The version-side twin of the headRefOid pin:
 // fetch main, read the PR head's manifest BY ITS REMOTE OID (never the local
-// checkout), and re-verify the ordering immediately before gh pr merge.
+// checkout), and re-verify the ordering immediately before gh pr merge. The
+// freshly fetched OID must equal the reviewed head the loop pinned — gh pr
+// merge has no OID parameter, so without this equality check the merge could
+// integrate a head that neither the review nor this re-check certified.
 // Fail-closed aborts the merge; the next run re-assesses against the moved
 // main. The seconds-wide fetch→merge window that remains is the same one the
 // head pin accepts by design, and the merge tail's merge-commit pin backstops
 // it post-hoc: if another merge sneaks in anyway, main's HEAD will not be this
 // PR's merge commit and the tail refuses to tag (loud stop, human decides).
-export async function verifyBumpAtMerge({ run, repoRoot, prNumber }) {
+export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid }) {
   const fetched = await run("git", ["fetch", "--quiet", "origin", "main"], { cwd: repoRoot });
   if (fetched.code !== 0) {
     return { ok: false, detail: `git fetch origin main failed (merge aborted): ${(fetched.stderr || fetched.stdout || "").slice(0, 200)}` };
@@ -103,6 +109,9 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber }) {
   try { headRefOid = JSON.parse(pr.stdout || "{}").headRefOid ?? null; } catch { /* validated below */ }
   if (pr.code !== 0 || !/^[0-9a-f]{40}$/.test(String(headRefOid))) {
     return { ok: false, detail: `cannot pin PR ${prNumber} headRefOid for the bump re-check (merge aborted): ${(pr.stderr || pr.stdout || "").slice(0, 200)}` };
+  }
+  if (headRefOid !== expectedHeadRefOid) {
+    return { ok: false, detail: `PR ${prNumber} head is ${headRefOid.slice(0, 7)} but the loop pinned the reviewed head ${String(expectedHeadRefOid).slice(0, 7)} — a version re-check of one head must never merge another; merge aborted, re-run the loop to re-assess` };
   }
   const mainText = await run("git", ["show", "origin/main:plugin.json"], { cwd: repoRoot });
   if (mainText.code !== 0) {
