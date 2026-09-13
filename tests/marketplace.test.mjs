@@ -4,7 +4,7 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { checkMarketplaceConsistency } from "./smoke-m1.mjs";
+import { checkMarketplaceConsistency, fetchMarketplaceManifest } from "./smoke-m1.mjs";
 
 const entry = (overrides = {}, sourceOverrides = {}) => ({
   name: "z-pr-review",
@@ -80,5 +80,52 @@ describe("checkMarketplaceConsistency", () => {
       pluginVersion: "0.2.5",
     });
     assert.equal(problems.length, 3);
+  });
+
+  it("fails when the entry does not use the github source form", () => {
+    const { problems } = checkMarketplaceConsistency({
+      manifest: manifestWith([entry({}, { source: "git", repo: "xpepper/pr-review-glm" })]),
+      pluginVersion: "0.2.5",
+    });
+    assert.match(problems[0], /must use the github source form, found "git"/);
+  });
+});
+
+describe("fetchMarketplaceManifest token handling", () => {
+  const stubFetch = (capture) => async (url, init) => {
+    capture.url = url;
+    capture.headers = init.headers;
+    return { ok: true, json: async () => ({ plugins: [] }) };
+  };
+  const realFetch = globalThis.fetch;
+
+  it("sends GH_TOKEN only to the api.github.com host", async () => {
+    process.env.GH_TOKEN = "tok";
+    try {
+      const toGithub = {};
+      globalThis.fetch = stubFetch(toGithub);
+      await fetchMarketplaceManifest();
+      assert.equal(toGithub.headers.Authorization, "Bearer tok");
+
+      const toElsewhere = {};
+      globalThis.fetch = stubFetch(toElsewhere);
+      await fetchMarketplaceManifest("https://evil.example.com/manifest.json");
+      assert.equal(toElsewhere.headers.Authorization, undefined, "token must not leak to an overridden URL host");
+    } finally {
+      delete process.env.GH_TOKEN;
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("never sends an Authorization header without GH_TOKEN", async () => {
+    assert.equal(process.env.GH_TOKEN, undefined, "test requires a clean env");
+    const capture = {};
+    globalThis.fetch = stubFetch(capture);
+    try {
+      await fetchMarketplaceManifest();
+      assert.equal(capture.headers.Authorization, undefined);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

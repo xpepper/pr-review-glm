@@ -26,6 +26,13 @@ const DEFAULT_MANIFEST_URL =
 // Pure consistency rules, exported for unit tests (tests/marketplace.test.mjs).
 // Every problem line names the marketplace repo so a failing gate points at the
 // place to fix, not just the symptom.
+//
+// Deliberate scope (dogfood P2, dispositioned design-inherent 2026-09-13): the
+// rules verify MANIFEST consistency only — the pinned tag v{version} cannot be
+// existence-checked here because it is pushed at the increment merge (never from
+// a branch), so pre-merge assessments would always fail it. Tag existence is
+// enforced by the merge-time tagging plus the post-merge marketplace install
+// verification.
 export function checkMarketplaceConsistency({ manifest, pluginVersion }) {
   const problems = [];
   const plugins = Array.isArray(manifest?.plugins) ? manifest.plugins : null;
@@ -35,6 +42,11 @@ export function checkMarketplaceConsistency({ manifest, pluginVersion }) {
   const entry = plugins.find((p) => p?.name === PLUGIN_NAME);
   if (!entry) {
     return { problems: [`marketplace ${MARKETPLACE_REPO} has no ${PLUGIN_NAME} entry`] };
+  }
+  if (entry.source?.source !== "github") {
+    problems.push(
+      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must use the github source form, found ${JSON.stringify(entry.source?.source)}`,
+    );
   }
   if (entry.source?.repo !== PLUGIN_REPO) {
     problems.push(
@@ -61,7 +73,11 @@ export function checkMarketplaceConsistency({ manifest, pluginVersion }) {
 
 export async function fetchMarketplaceManifest(url = process.env.ZPR_MARKETPLACE_MANIFEST_URL ?? DEFAULT_MANIFEST_URL) {
   const headers = { Accept: "application/vnd.github.raw" };
-  if (process.env.GH_TOKEN) headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  // The token is only ever sent to GitHub's API host — a overridden manifest URL
+  // is often exactly how a leak gets set up (dogfood P2, 2026-09-13).
+  if (process.env.GH_TOKEN && new URL(url).host === "api.github.com") {
+    headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
+  }
   const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
   if (!response.ok) {
     throw new Error(`marketplace ${MARKETPLACE_REPO} manifest fetch failed: HTTP ${response.status}`);
