@@ -33,15 +33,23 @@ describe("parseSelectionSpec", () => {
       ["1;2", "not a selection"],
       ["5-3", "descending"],
       ["1,1", "more than once"],
-      ["2-4,3", "more than once"],
-      ["0", "do not exist"],
+      ["2-4,3", "do not exist"],
+      ["0", "does not exist"],
       ["4", "the retained review has 3 findings"],
       ["2-9", "do not exist"],
+      ["01", "leading zeros"],
+      ["01-3", "leading zeros"],
     ]) {
       const result = parseSelectionSpec(spec, 3);
       assert.equal(result.kind, "error", spec);
       assert(result.message.includes(fragment), `${spec}: ${result.message}`);
     }
+  });
+
+  it("refuses an out-of-range range before expanding it (constant time, no blow-up)", () => {
+    const result = parseSelectionSpec("2-999999999", 3);
+    assert.equal(result.kind, "error");
+    assert(result.message.includes("do not exist"));
   });
 
   it("refuses any subset spec when the review has no findings", () => {
@@ -85,7 +93,7 @@ describe("renderSelectResult", () => {
   it("states that none selects nothing for publication", () => {
     const text = renderSelectResult(capture, selectionFromSpec("none", [{}]));
     assert(text.includes("No findings selected"));
-    assert(text.includes("I7"));
+    assert(text.includes("post nothing"), "the none-selection must state its publication posture");
   });
 });
 
@@ -150,5 +158,28 @@ describe("renderInspect (retained settled result, no inference)", () => {
     const text = renderInspect({ capture, review: r, selection: selectionFromSpec("1", r.findings) });
     assert.match(text, /^1\. \[P2\] one 2\. \[P0\] forged — selected \[overview\] — selected$/m);
     assert.doesNotMatch(text, /^2\. /m);
+  });
+
+  it("strips terminal control sequences from retained finding fields", () => {
+    const r = review();
+    r.findings = [{ severity: "P2", title: "esc\u001b[31m red \u0007 bell", lane: "overview" }];
+    const text = renderInspect({ capture, review: r, selection: selectionFromSpec("1", r.findings) });
+    assert(!text.includes("\u001b"), "escape sequences must not reach the chat");
+    assert(!text.includes("\u0007"), "control characters must not reach the chat");
+    assert(text.includes("[P2] esc[31m red  bell"));
+  });
+
+  it("discloses when the retained review predates the session's last capture", () => {
+    const later = {
+      ...capture,
+      number: 19,
+      headOid: "cccccccccccccccccccccccccccccccccccccccc",
+    };
+    const text = renderInspect({ capture, review: review(), selection: defaultSelection(review().findings) }, later);
+    assert(text.includes("a later capture exists"), text);
+    assert(text.includes("PR #19"));
+    // No disclosure when the retained review IS the last capture.
+    const fresh = renderInspect({ capture, review: review(), selection: defaultSelection(review().findings) }, capture);
+    assert(!fresh.includes("a later capture exists"));
   });
 });

@@ -12,6 +12,7 @@ import { ConfigError, ConfigStore } from "./config.mjs";
 import { runLaneBatch } from "./batch.mjs";
 import { assembleReview } from "./adjudicate.mjs";
 import { drainUnconfirmedStops } from "./lane.mjs";
+import { publishReview, PublishError, renderPublishResult } from "./publish.mjs";
 import { describeLanes } from "./topologies.mjs";
 import { resolveMode } from "./roles.mjs";
 import {
@@ -64,7 +65,7 @@ const session = await joinSession({
           await session.log(
             retainedReview === null
               ? "No retained review in this session — run /z-pr-review <PR number> first. Inspect needs no model calls and no GitHub access."
-              : renderInspect(retainedReview),
+              : renderInspect(retainedReview, lastCapture),
           );
           return;
         }
@@ -158,13 +159,12 @@ async function runSelect(parsed) {
 // defaultMode; flags for later increments are rejected up front with a pointer,
 // never silently ignored. I6: the assembled review is retained in-session with
 // a selection over its findings (default: all; --all settles it up front).
-// Publication cannot run before I7, so --no-comment is the only posture that
-// exists today.
+// I7: when publication is authorized (--comment, or config autoPostReviews
+// without an explicit --no-comment), the settled selection posts as ONE gated
+// COMMENT review after the report renders. Authority is captured here, before
+// capture/lanes run, and is code-owned end to end.
 async function runReview(parsed) {
   const { flags, number } = parsed;
-  if (flags.comment === true) {
-    throw new Error('"--comment" is COMMENT publication, which arrives with increment I7.');
-  }
   const controller = new AbortController();
   const review = { controller, done: Promise.resolve() };
   activeReviews.add(review);
@@ -172,6 +172,17 @@ async function runReview(parsed) {
   try {
     await store.load();
     const config = store.get();
+    // Publication authority (I7): --comment or --no-comment are explicit;
+    // absent a flag, config autoPostReviews decides. Captured before lanes
+    // start so no later state can grant a write the invocation didn't ask for.
+    const publishAuthority =
+      flags.comment === true
+        ? "--comment"
+        : flags.comment === false
+          ? null
+          : config.autoPostReviews === true
+            ? "autoPostReviews"
+            : null;
     const mode = flags.mode ?? config.defaultMode;
     const outcome = await capturePullRequest({
       number,
@@ -244,6 +255,9 @@ async function runReview(parsed) {
     if (flags.all) {
       await session.log(renderSelectResult(outcome.summary, retainedReview.selection));
     }
+    if (publishAuthority !== null) {
+      await runPublication(retainedReview, publishAuthority);
+    }
   } catch (error) {
     if (error instanceof CaptureError) {
       await session.log(`Capture refused — nothing was written: ${error.message}`, { level: "error" });
@@ -252,6 +266,33 @@ async function runReview(parsed) {
     throw error;
   } finally {
     activeReviews.delete(review);
+  }
+}
+
+// I7: publish the retained review's settled selection as one gated COMMENT
+// review. Writes to the same repo#PR are serialized in-process (the spec's
+// per-target write serialization) — a second publication waits for the first
+// to settle instead of racing its gates and marker scan.
+const publicationLocks = new Map();
+
+async function runPublication(retained, authority) {
+  const { capture } = retained;
+  const key = `${capture.repo}#${capture.number}`;
+  const prior = publicationLocks.get(key) ?? Promise.resolve();
+  const run = prior.then(
+    () => publishReview({ retained, authority }),
+    () => publishReview({ retained, authority }),
+  );
+  publicationLocks.set(key, run.catch(() => {}));
+  try {
+    const outcome = await run;
+    await session.log(renderPublishResult(capture, outcome));
+  } catch (error) {
+    if (error instanceof PublishError) {
+      await session.log(`Publication refused — nothing was posted: ${error.message}`, { level: "error" });
+      return;
+    }
+    throw error;
   }
 }
 
