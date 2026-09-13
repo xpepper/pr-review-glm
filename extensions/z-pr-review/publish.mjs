@@ -115,8 +115,8 @@ function sanitize(text) {
     .replaceAll("<!--", "<! --");
 }
 
-export function idempotencyMarker(repo, number, headOid) {
-  return `<!-- z-pr-review ${repo}#${number}@${headOid} -->`;
+export function idempotencyMarker(repo, number, headOid, baseOid) {
+  return `<!-- z-pr-review ${repo}#${number}@${headOid}+${baseOid} -->`;
 }
 
 // The selected findings of a retained review, in report order. The numbers are
@@ -228,7 +228,13 @@ export function buildPublication({ capture, review, selected, anchorMap, current
       `Coverage: ${coverage}/${review.lanes.length} lanes completed — ${review.status}${review.reason !== undefined ? ` (${review.reason})` : ""}. This is an incomplete review, never a clean one.`,
     );
   }
-  lines.push("", idempotencyMarker(capture.repo, capture.number, currentHead));
+  // The marker names the CAPTURE binding (head+base), never the live head:
+  // a stale publication (captured H1, posted after the PR reached H2) must
+  // not occupy H2's slot and suppress a distinct fresh review at H2 — and a
+  // base-only move re-diffs the PR just as a head move does, so the base
+  // belongs in the identity too. Re-running the same publication still finds
+  // its own marker and skips.
+  lines.push("", idempotencyMarker(capture.repo, capture.number, capture.headOid, capture.baseOid));
   const body = lines.join("\n");
   // Final belt over the incremental checks above (the marker and coverage
   // lines are appended after the notes loop).
@@ -368,8 +374,9 @@ export async function publishReview({
   // Idempotency: a review carrying this exact marker already exists → skip.
   // The marker text is deterministic, so any PR participant could paste it
   // into their own review — only the authenticated viewer's reviews can
-  // legitimately carry OUR marker.
-  const marker = idempotencyMarker(capture.repo, capture.number, currentHead);
+  // legitimately carry OUR marker. Keyed on the capture binding (head+base):
+  // the same key buildPublication embeds in the body.
+  const marker = idempotencyMarker(capture.repo, capture.number, capture.headOid, capture.baseOid);
   const carriesMarker = (r) =>
     r.user?.login === viewer.login && typeof r.body === "string" && r.body.includes(marker);
   const existingReviews = await ghListOrThrow(runGh, cwd, prPath + "/reviews", {
@@ -495,7 +502,7 @@ export function renderPublishResult(capture, outcome) {
   }
   if (outcome.status === "already-published") {
     return [
-      `${head} already published for this head (idempotency marker found) — no second POST was made.`,
+      `${head} already published for this review's capture binding (idempotency marker found) — no second POST was made.`,
       outcome.reviewUrl ? `Existing review: ${outcome.reviewUrl}` : "Existing review: (URL unavailable)",
     ].join("\n");
   }

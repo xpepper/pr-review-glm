@@ -1,3 +1,5 @@
+import { verifyIncrementPrOwnedByViewer } from "./gates.mjs";
+
 // Mid-iteration resume (spec Amendments, 2026-09-11): a stop after the worker
 // opened its PR (gate failure, review crash, killed run) leaves exactly the
 // debris these probes recognize — the checkout stranded on the increment
@@ -50,7 +52,7 @@ export async function findResumablePr({ run, repoRoot, increment }) {
   const refs = await run("git", ["rev-parse", "main", "origin/main"], { cwd: repoRoot });
   const [local, remote] = refs.stdout.trim().split("\n");
   if (refs.code !== 0 || local !== remote) return null;
-  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName"], { cwd: repoRoot });
+  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,author"], { cwd: repoRoot });
   if (prs.code !== 0) return null;
   let open = [];
   try { open = JSON.parse(prs.stdout || "[]"); } catch { return null; }
@@ -58,5 +60,11 @@ export async function findResumablePr({ run, repoRoot, increment }) {
   const matches = open.filter((pr) => typeof pr?.headRefName === "string" && typeof pr?.number === "number" && pr.headRefName.toLowerCase().startsWith(prefix));
   if (matches.length !== 1) return null;
   const [pr] = matches;
+  // Adoption hands the PR to the full assessment and the auto-merge tail: the
+  // same viewer-ownership rule as the gates applies (a branch name is not
+  // provenance) — a foreign-owned PR is not resumable, so the loud repo-idle
+  // failure surfaces it instead.
+  const owned = await verifyIncrementPrOwnedByViewer({ run, repoRoot, pr });
+  if (!owned.ok) return null;
   return { prNumber: pr.number, headRefName: pr.headRefName };
 }

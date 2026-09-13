@@ -255,7 +255,8 @@ describe("gateIncrementPr", () => {
     const seen = [];
     const run = async (command, args) => {
       seen.push(args.join(" "));
-      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}"}]`, stderr: "" };
+      if (args.join(" ").includes("api user")) return { code: 0, stdout: "xpepper\n", stderr: "" };
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}","author":{"login":"xpepper"}}]`, stderr: "" };
     };
     const one = await gateIncrementPr({ run, repoRoot, increment: "I3" });
     assert.equal(one.ok, true);
@@ -264,10 +265,37 @@ describe("gateIncrementPr", () => {
     assert.equal(one.headRefOid, "a".repeat(40));
     // The head pin (L2) depends on gh returning headRefOid, so the field must be requested.
     assert.match(seen[0], /--json number,headRefName,url,headRefOid/);
+    // The selection is bound to the authenticated viewer before it can feed the pin/merge.
+    assert.equal(seen.some((c) => c.includes("api user")), true);
+  });
+  it("refuses a matching increment PR opened by someone other than the viewer", async () => {
+    const run = async (command, args) => {
+      if (args.join(" ").includes("api user")) return { code: 0, stdout: "xpepper\n", stderr: "" };
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}","author":{"login":"someone-else"}}]`, stderr: "" };
+    };
+    const gate = await gateIncrementPr({ run, repoRoot, increment: "I3" });
+    assert.equal(gate.ok, false);
+    assert.equal(gate.name, "increment-pr");
+    assert.match(gate.detail, /someone-else.*not the authenticated viewer xpepper/);
+  });
+  it("fails closed when the viewer cannot be established", async () => {
+    const run = async (command, args) => {
+      if (args.join(" ").includes("api user")) return { code: 1, stdout: "", stderr: "auth down" };
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}","author":{"login":"xpepper"}}]`, stderr: "" };
+    };
+    const gate = await gateIncrementPr({ run, repoRoot, increment: "I3" });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /could not establish the authenticated viewer/);
   });
   it("tolerates stacked non-increment PRs, disclosing them (PR #38 on #37, 2026-09-13)", async () => {
-    const stacked = `[{"number":37,"headRefName":"i7-gated-comment-publication","headRefOid":"${"b".repeat(40)}"},{"number":38,"headRefName":"fix-loop-smoke-retry","headRefOid":"${"c".repeat(40)}"}]`;
-    const gate = await gateIncrementPr({ run: runOk(stacked), repoRoot, increment: "I7" });
+    const stacked = `[{"number":37,"headRefName":"i7-gated-comment-publication","headRefOid":"${"b".repeat(40)}","author":{"login":"xpepper"}},{"number":38,"headRefName":"fix-loop-smoke-retry","headRefOid":"${"c".repeat(40)}"}]`;
+    const gate = await gateIncrementPr({
+      run: async (command, args) =>
+        args.join(" ").includes("api user")
+          ? { code: 0, stdout: "xpepper\n", stderr: "" }
+          : { code: 0, stdout: stacked, stderr: "" },
+      repoRoot, increment: "I7",
+    });
     assert.equal(gate.ok, true);
     assert.equal(gate.prNumber, 37);
     assert.equal(gate.headRefName, "i7-gated-comment-publication");

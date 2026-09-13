@@ -9,7 +9,7 @@ import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { buildPhaseEnv, PHASE_LIMITS, buildZcodeArgs, persistPhaseOutput, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
   gateBranchHead, gateDocsUpdated, gateMainGreen,
-  gateSmokes, gateTests, isFullOid, mergeabilityGate, reportGates, runPreflightGates, selectIncrementPr,
+  gateSmokes, gateTests, isFullOid, mergeabilityGate, reportGates, runPreflightGates, selectIncrementPr, verifyIncrementPrOwnedByViewer,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
@@ -199,7 +199,7 @@ async function runMain(options, { zcode, phaseEnv }) {
       })();
     },
     workerGates: async () => {
-      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid,mergeable"], { cwd: repoRoot });
+      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid,mergeable,author"], { cwd: repoRoot });
       let open = [];
       try { open = JSON.parse(prs.stdout || "[]"); } catch { /* gate below reports */ }
       const results = [];
@@ -213,6 +213,14 @@ async function runMain(options, { zcode, phaseEnv }) {
         const pr = selected.pr;
         prNumber = pr.number;
         headRefOid = pr.headRefOid ?? null;
+        // The PR that feeds this iteration's head pin and merge must be the
+        // viewer's own — a matching branch name is not provenance.
+        const owned = await verifyIncrementPrOwnedByViewer({ run, repoRoot, pr });
+        const ownedGate = owned.ok
+          ? { name: "increment-pr-owned", ok: true, detail: owned.detail }
+          : { name: "increment-pr-owned", ok: false, detail: owned.detail };
+        logGate(ownedGate);
+        if (!ownedGate.ok) return { results: [ownedGate], prNumber, headRefOid };
         if (selected.others.length) {
           log(`[dev-loop] note: ignoring ${selected.others.length} other open PR(s): ${selected.others.map((p) => `#${p.number} (${p.headRefName})`).join(", ")}`);
         }

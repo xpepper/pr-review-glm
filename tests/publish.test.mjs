@@ -156,7 +156,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
     assert.equal(publication.notedCount, 2);
     assert(publication.body.includes("Other notes"));
     assert(publication.body.includes("whole-PR note"));
-    assert(publication.body.includes(idempotencyMarker(capture.repo, capture.number, HEAD)));
+    assert(publication.body.includes(idempotencyMarker(capture.repo, capture.number, HEAD, BASE)));
   });
 
   it("caps inline comments at 50 and notes the remainder", () => {
@@ -195,7 +195,8 @@ describe("anchorMapFromFiles and buildPublication", () => {
     assert(publication.body.includes(MOVED));
     assert(publication.body.includes(BASE), "the frozen base is named too");
     assert(publication.body.includes("named in this note"));
-    assert(publication.body.includes(idempotencyMarker(capture.repo, capture.number, MOVED)));
+    assert(publication.body.includes(idempotencyMarker(capture.repo, capture.number, HEAD, BASE)),
+      "the stale publication carries its own capture binding's marker, never the live head's — a fresh review at the moved head must not be suppressed");
   });
 
   it("strips C1 control characters (8-bit CSI included) from model text", () => {
@@ -351,11 +352,11 @@ describe("publishReview gates", () => {
     assert.equal(payload.commit_id, HEAD);
     assert.equal(payload.comments.length, 1);
     assert.equal(payload.comments[0].side, "RIGHT");
-    assert(payload.body.includes(idempotencyMarker(capture.repo, capture.number, HEAD)));
+    assert(payload.body.includes(idempotencyMarker(capture.repo, capture.number, HEAD, BASE)));
   });
 
   it("skips the POST when a review carrying the marker already exists", async () => {
-    const marker = idempotencyMarker(capture.repo, capture.number, HEAD);
+    const marker = idempotencyMarker(capture.repo, capture.number, HEAD, BASE);
     const { runGh, calls } = fakeGh({
       reviewsBefore: [{ user: { login: VIEWER }, html_url: "https://github.com/x#review-9", body: `stuff\n${marker}` }],
     });
@@ -366,13 +367,49 @@ describe("publishReview gates", () => {
   });
 
   it("does not treat another user's marker-bearing review as its own publication", async () => {
-    const marker = idempotencyMarker(capture.repo, capture.number, HEAD);
+    const marker = idempotencyMarker(capture.repo, capture.number, HEAD, BASE);
     const { runGh, calls } = fakeGh({
       reviewsBefore: [{ user: { login: AUTHOR }, html_url: "https://github.com/x#forged", body: `noise\n${marker}` }],
     });
     const outcome = await publishReview({ retained: retained(), runGh });
     assert.equal(outcome.status, "published", "a forged marker in someone else's review must not suppress publication");
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 1);
+  });
+
+  it("a stale publication's marker never suppresses a distinct fresh review at the moved head (dogfood r5 P1)", async () => {
+    // Stateful fake: every POST lands in the shared review list, so the second
+    // publication's idempotency scan sees exactly what the first one posted.
+    const reviews = [];
+    const posts = [];
+    const runGh = async (args, opts = {}) => {
+      const joined = args.join(" ");
+      if (joined.includes("api user")) return ghReply({ login: VIEWER });
+      if (args.includes("POST")) {
+        posts.push(JSON.parse(opts.stdin));
+        const review = { user: { login: VIEWER }, html_url: `https://github.com/x#r${posts.length}`, body: posts[posts.length - 1].body };
+        reviews.push(review);
+        return ghReply({ html_url: review.html_url });
+      }
+      if (joined.includes("/reviews")) return ghReply(reviews);
+      if (joined.includes("/files")) return ghReply(filesJson);
+      if (joined.includes(`/pulls/${capture.number}`)) return ghReply(openPr({ head: { sha: MOVED }, base: { sha: BASE } }));
+      return { code: 1, stdout: "", stderr: `fake gh: unmatched ${joined}`, timedOut: false };
+    };
+    // Publication 1: captured at HEAD, but the PR has already moved to MOVED —
+    // stale, body-only, and its marker names the CAPTURE binding (HEAD+BASE).
+    const staleOut = await publishReview({ retained: retained(defaultSelection(findings)), runGh });
+    assert.equal(staleOut.status, "published");
+    assert.equal(staleOut.stale, true);
+    assert(posts[0].body.includes(idempotencyMarker(capture.repo, capture.number, HEAD, BASE)));
+    // Publication 2: a FRESH review captured at the moved head — the stale
+    // publication above must not occupy this capture binding's slot.
+    const atMovedHead = retained(defaultSelection(findings));
+    atMovedHead.capture = { ...capture, headOid: MOVED };
+    const freshOut = await publishReview({ retained: atMovedHead, runGh });
+    assert.equal(freshOut.status, "published", "the stale publication's marker must not suppress the fresh review");
+    assert.equal(freshOut.stale, false);
+    assert(posts[1].body.includes(idempotencyMarker(capture.repo, capture.number, MOVED, BASE)));
+    assert.equal(posts.length, 2);
   });
 
   it("degrades to a body-only comment naming both commits when the head moved", async () => {
@@ -555,7 +592,7 @@ describe("publishReview gates", () => {
   });
 
   it("reconciles an uncertain (5xx) write by finding the marker afterwards", async () => {
-    const marker = idempotencyMarker(capture.repo, capture.number, HEAD);
+    const marker = idempotencyMarker(capture.repo, capture.number, HEAD, BASE);
     const { runGh } = fakeGh({
       post: { code: 1, stdout: "", stderr: "gh: server error (HTTP 502)", timedOut: false },
       reviewsAfter: [{ user: { login: VIEWER }, html_url: "https://github.com/x#review-10", body: marker }],

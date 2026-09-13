@@ -199,7 +199,7 @@ export function selectIncrementPr(open, increment) {
 }
 
 export async function gateIncrementPr({ run, repoRoot, increment }) {
-  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid"], { cwd: repoRoot });
+  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid,author"], { cwd: repoRoot });
   let open = [];
   try { open = JSON.parse(prs.stdout || "[]"); } catch { /* handled below */ }
   if (prs.code !== 0) {
@@ -208,8 +208,30 @@ export async function gateIncrementPr({ run, repoRoot, increment }) {
   const selected = selectIncrementPr(open, increment);
   if (!selected.ok) return bad("increment-pr", selected.detail);
   const { pr, others } = selected;
+  const owned = await verifyIncrementPrOwnedByViewer({ run, repoRoot, pr });
+  if (!owned.ok) return bad("increment-pr", owned.detail);
   const detail = `PR #${pr.number} (${pr.headRefName})${others.length ? ` — ${others.length} other open PR(s) ignored: ${others.map((p) => `#${p.number} (${p.headRefName})`).join(", ")}` : ""}`;
   return { name: "increment-pr", ok: true, detail, prNumber: pr.number, headRefName: pr.headRefName, headRefOid: pr.headRefOid };
+}
+
+// The selected increment PR feeds the head pin and the loop's auto-merge:
+// a branch NAME is not provenance. Any push-access account (or a fork
+// contributor naming their branch i<N>-…) could otherwise ride the loop's
+// merge authority past the repo's human-review protection. The loop assesses
+// and merges only the authenticated viewer's own PRs — the same
+// viewer-ownership posture as the plugin's publish marker scan.
+export async function verifyIncrementPrOwnedByViewer({ run, repoRoot, pr }) {
+  const who = await run("gh", ["api", "user", "--jq", ".login"], { cwd: repoRoot });
+  const viewer = who.code === 0 ? String(who.stdout ?? "").trim() : "";
+  if (!viewer) {
+    const firstLine = String(who.stderr ?? "").split("\n").find((l) => l.trim()) ?? "";
+    return { ok: false, detail: `could not establish the authenticated viewer (gh api user exit ${who.code}): ${firstLine || "no output"}` };
+  }
+  const author = pr?.author?.login;
+  if (author !== viewer) {
+    return { ok: false, detail: `PR #${pr?.number} (${pr?.headRefName ?? "?"}) was opened by ${author ?? "an unknown author"}, not the authenticated viewer ${viewer} — the loop assesses and merges only its own increment PRs` };
+  }
+  return { ok: true, detail: `viewer ${viewer} owns PR #${pr?.number}` };
 }
 
 // Mergeability is checked at assessment time, not discovered at merge time: a
