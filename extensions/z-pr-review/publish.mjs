@@ -176,9 +176,17 @@ export function buildPublication({ capture, review, selected, anchorMap, current
   const noted = [];
   for (const finding of selected) {
     if (!stale && inline.length < MAX_INLINE_ANCHORS && anchorable(finding, anchorMap)) {
+      const body = commentBody(finding);
+      // Per-comment cap at composition time: an oversized inline body must
+      // fail our gate here, not after the whole payload was built.
+      if (body.length > MAX_COMMENT_CHARS) {
+        throw new PublishError(
+          `an inline comment body is ${body.length} characters (cap ${MAX_COMMENT_CHARS}); failing closed — nothing was posted.`,
+        );
+      }
       // `side: "RIGHT"` is required by the reviews API for a `line` anchor and
       // matches the anchor map, which is built from new-side hunk ranges only.
-      inline.push({ path: finding.file, line: finding.line, side: "RIGHT", body: commentBody(finding) });
+      inline.push({ path: finding.file, line: finding.line, side: "RIGHT", body });
     } else {
       noted.push(finding);
     }
@@ -202,6 +210,15 @@ export function buildPublication({ capture, review, selected, anchorMap, current
       const location = finding.file ? ` — ${sanitize(finding.file)}${typeof finding.line === "number" ? `:${finding.line}` : ""}` : "";
       lines.push(`${index + 1}. **[${finding.severity}] ${sanitize(finding.title)}**${location}`);
       if (finding.detail) lines.push(`   ${sanitize(finding.detail)}`);
+      // Body cap at composition time: bail as soon as the assembled body trips
+      // the cap instead of materializing the complete payload first. The
+      // running check bounds the work — once the cap trips nothing more is
+      // composed.
+      if (lines.join("\n").length > MAX_BODY_CHARS) {
+        throw new PublishError(
+          `composed review body exceeds the cap (${MAX_BODY_CHARS} characters); failing closed — nothing was posted.`,
+        );
+      }
     });
   }
   if (review.status !== "complete") {
@@ -212,7 +229,15 @@ export function buildPublication({ capture, review, selected, anchorMap, current
     );
   }
   lines.push("", idempotencyMarker(capture.repo, capture.number, currentHead));
-  return { body: lines.join("\n"), inline, notedCount: noted.length };
+  const body = lines.join("\n");
+  // Final belt over the incremental checks above (the marker and coverage
+  // lines are appended after the notes loop).
+  if (body.length > MAX_BODY_CHARS) {
+    throw new PublishError(
+      `composed review body exceeds the cap (${MAX_BODY_CHARS} characters); failing closed — nothing was posted.`,
+    );
+  }
+  return { body, inline, notedCount: noted.length };
 }
 
 async function ghJson(runGh, cwd, args, doingWhat, { stdin } = {}) {
@@ -376,19 +401,9 @@ export async function publishReview({
     currentBase,
     stale,
   });
-  if (publication.body.length > MAX_BODY_CHARS) {
-    throw new PublishError(
-      `composed review body is ${publication.body.length} characters (cap ${MAX_BODY_CHARS}); failing closed — nothing was posted.`,
-    );
-  }
-  // Per-comment cap, same posture as the body cap: an oversized inline body
-  // must fail our gate before the POST, not GitHub's after it.
-  const oversized = publication.inline.find((comment) => comment.body.length > MAX_COMMENT_CHARS);
-  if (oversized !== undefined) {
-    throw new PublishError(
-      `an inline comment body is ${oversized.body.length} characters (cap ${MAX_COMMENT_CHARS}); failing closed — nothing was posted.`,
-    );
-  }
+  // Body and per-comment caps are enforced inside buildPublication at
+  // composition time — an oversized payload fails our gate there, before the
+  // pre-write re-check and the POST, and is never fully materialized.
 
   // Final pre-write re-check: gates, files, and body were all composed against
   // the earlier fetch; if the PR closed, turned draft, its head moved, or its
@@ -425,7 +440,13 @@ export async function publishReview({
     timeoutMs: DEFAULT_GH_TIMEOUT_MS,
     stdin: payload,
   });
-  const base = { inlineCount: publication.inline.length, notedCount: publication.notedCount, stale };
+  const base = {
+    inlineCount: publication.inline.length,
+    notedCount: publication.notedCount,
+    stale,
+    staleHead,
+    staleBase,
+  };
   if (post.code === 0) {
     let created = {};
     try {
@@ -482,7 +503,15 @@ export function renderPublishResult(capture, outcome) {
     `${head} posted one COMMENT review with ${outcome.inlineCount} inline comment${outcome.inlineCount === 1 ? "" : "s"} and ${outcome.notedCount} note${outcome.notedCount === 1 ? "" : "s"} in the body.`,
   ];
   if (outcome.stale) {
-    lines.push("The head had moved since capture — the comment is body-only and names both commits.");
+    // Base-only staleness must be reported as what it is — the base advancing
+    // under an unchanged head re-diffs the PR just the same, but saying "the
+    // head had moved" would be false.
+    const moved = outcome.staleHead && outcome.staleBase
+      ? "head and base had moved"
+      : outcome.staleBase
+        ? "base had advanced (head unchanged)"
+        : "head had moved";
+    lines.push(`The ${moved} since capture — the comment is body-only and names both commits and bases.`);
   }
   if (outcome.reconciled === true) {
     lines.push("The POST's response was uncertain; the published state was reconciled by finding the idempotency marker on an existing review.");

@@ -7,6 +7,7 @@ import {
   defaultSelection,
   describeSelection,
   parseSelectionSpec,
+  publicationTarget,
   renderInspect,
   renderSelectResult,
   selectionFromFlag,
@@ -182,5 +183,49 @@ describe("renderInspect (retained settled result, no inference)", () => {
     // No disclosure when the retained review IS the last capture.
     const fresh = renderInspect({ capture, review: review(), selection: defaultSelection(review().findings) }, capture);
     assert(!fresh.includes("a later capture exists"));
+  });
+
+  it("discloses a later capture of the same PR that moved only the base (head unchanged)", () => {
+    const later = { ...capture, baseOid: "dddddddddddddddddddddddddddddddddddddddd" };
+    const text = renderInspect({ capture, review: review(), selection: defaultSelection(review().findings) }, later);
+    assert(text.includes("a later capture exists"), "same-head base movement must still disclose");
+    assert(text.includes("base moved"), text);
+    assert(!text.includes("head moved"), text);
+    // Same head AND same base: the binding is identical, no staleness note.
+    const same = renderInspect(
+      { capture, review: review(), selection: defaultSelection(review().findings) },
+      { ...capture, capturedAt: "2026-09-13T02:00:00.000Z" },
+    );
+    assert(!same.includes("a later capture exists"));
+  });
+});
+
+describe("publicationTarget", () => {
+  const cap = (number, headOid = "a".repeat(40)) => ({
+    repo: "xpepper/pr-review-glm",
+    number,
+    headOid,
+    baseOid: "b".repeat(40),
+  });
+  const fresh = { capture: cap(18), review: {}, selection: { via: "default" } };
+
+  it("publishes the fresh review when nothing select-settled exists or it is another PR", () => {
+    assert.equal(publicationTarget(null, fresh, false), fresh);
+    const defaultOutgoing = { capture: cap(18), review: {}, selection: { via: "default" } };
+    assert.equal(publicationTarget(defaultOutgoing, fresh, false), fresh);
+    const otherPr = { capture: cap(19), review: {}, selection: { via: "select" } };
+    assert.equal(publicationTarget(otherPr, fresh, false), fresh);
+  });
+
+  it("publishes the select-settled outgoing review for the same PR, including select none", () => {
+    const settled = { capture: cap(18), review: {}, selection: { via: "select", kind: "subset", count: 2, total: 5 } };
+    assert.equal(publicationTarget(settled, fresh, false), settled);
+    const none = { capture: cap(18), review: {}, selection: { via: "select", kind: "none", count: 0, total: 5 } };
+    assert.equal(publicationTarget(none, fresh, false), none);
+  });
+
+  it("lets an explicit --all settle the fresh review over the outgoing selection", () => {
+    const settled = { capture: cap(18), review: {}, selection: { via: "select" } };
+    assert.equal(publicationTarget(settled, fresh, true), fresh);
   });
 });

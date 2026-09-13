@@ -93,6 +93,25 @@ export function describeSelection(selection) {
   return `${what} (${selection.count} of ${selection.total} finding${selection.total === 1 ? "" : "s"}, ${how})`;
 }
 
+// Which retained result an authorized publication posts (I7). A select-settled
+// selection for the same PR is the user's settled publication posture — up to
+// and including `select none` — so a re-review must never silently discard it
+// in favor of the fresh default all-selection. The fresh review wins when
+// nothing was settled, when the invocation settles it explicitly with --all,
+// or when the settled review belongs to another PR.
+export function publicationTarget(outgoing, fresh, explicitAll) {
+  if (explicitAll) return fresh;
+  if (
+    outgoing !== null &&
+    outgoing.capture.repo === fresh.capture.repo &&
+    outgoing.capture.number === fresh.capture.number &&
+    outgoing.selection.via === "select"
+  ) {
+    return outgoing;
+  }
+  return fresh;
+}
+
 // Renders the confirmation after /z-pr-review select settles a selection.
 export function renderSelectResult(capture, selection) {
   return [
@@ -126,9 +145,20 @@ export function renderInspect(retained, laterCapture = null) {
     `Coverage: ${review.lanes.filter((lane) => lane.status === "complete").length}/${review.lanes.length} lane${review.lanes.length === 1 ? "" : "s"} completed`,
     `Selection: ${describeSelection(selection)}`,
   ];
-  if (laterCapture !== null && laterCapture.headOid !== capture.headOid) {
+  // Staleness by a later capture is symmetric in head and base: a capture with
+  // the SAME head but a moved base still re-diffs the PR, so the retained
+  // review must be disclosed as predating it, not silently treated as current.
+  if (
+    laterCapture !== null &&
+    (laterCapture.headOid !== capture.headOid || laterCapture.baseOid !== capture.baseOid)
+  ) {
+    const samePr = laterCapture.repo === capture.repo && laterCapture.number === capture.number;
+    const moved = [
+      laterCapture.headOid !== capture.headOid ? "head" : null,
+      laterCapture.baseOid !== capture.baseOid ? "base" : null,
+    ].filter(Boolean);
     lines.push(
-      `Note: a later capture exists in this session (PR #${laterCapture.number} @ ${laterCapture.headOid.slice(0, 7)}) — this retained review predates it; re-run the review to replace it.`,
+      `Note: a later capture exists in this session (PR #${laterCapture.number} @ ${laterCapture.headOid.slice(0, 7)})${samePr ? ` — its ${moved.join(" and ")} moved since this review's capture` : ""}; this retained review predates it; re-run the review to replace it.`,
     );
   }
   const selected = new Set(selection.kind === "subset" ? selection.indexes : []);

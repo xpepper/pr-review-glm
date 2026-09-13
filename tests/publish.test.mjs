@@ -287,6 +287,28 @@ describe("anchorMapFromFiles and buildPublication", () => {
     assert(publication.body.includes("Coverage: 1/1 lanes"));
     assert(publication.body.includes("partial"));
   });
+
+  it("fails closed during composition once the body notes trip the cap", () => {
+    const fat = [
+      // Unanchorable lines force both findings into body notes.
+      { severity: "P2", title: "fat one", file: "a.mjs", line: 999, detail: "x".repeat(40_000), lane: "x" },
+      { severity: "P2", title: "fat two", file: "a.mjs", line: 998, detail: "y".repeat(40_000), lane: "x" },
+    ];
+    assert.throws(
+      () =>
+        buildPublication({
+          capture,
+          review,
+          selected: fat,
+          anchorMap: anchorMapFromFiles(filesJson),
+          currentHead: HEAD,
+          currentBase: BASE,
+          stale: false,
+        }),
+      (error) => error instanceof PublishError && error.message.includes("cap"),
+      "the cap fires while composing, before the complete payload exists",
+    );
+  });
 });
 
 describe("publishReview gates", () => {
@@ -370,6 +392,8 @@ describe("publishReview gates", () => {
     const outcome = await publishReview({ retained: retained(), runGh });
     assert.equal(outcome.status, "published");
     assert.equal(outcome.stale, true);
+    assert.equal(outcome.staleHead, false, "the head did NOT move — only the base did");
+    assert.equal(outcome.staleBase, true);
     assert.equal(outcome.inlineCount, 0, "findings validated against the captured diff must not anchor on the re-based live diff");
     assert.equal(outcome.notedCount, 3);
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 1);
@@ -602,5 +626,29 @@ describe("renderPublishResult", () => {
     });
     assert(text.includes("body-only"));
     assert(text.includes("reconciled"));
+  });
+
+  it("reports base-only staleness as the base advancing, not the head moving", () => {
+    const text = renderPublishResult(capture, {
+      status: "published",
+      reviewUrl: "https://x/r",
+      inlineCount: 0,
+      notedCount: 3,
+      stale: true,
+      staleHead: false,
+      staleBase: true,
+    });
+    assert(text.includes("base had advanced"), text);
+    assert(!text.includes("head had moved"), text);
+    const both = renderPublishResult(capture, {
+      status: "published",
+      reviewUrl: "https://x/r",
+      inlineCount: 0,
+      notedCount: 3,
+      stale: true,
+      staleHead: true,
+      staleBase: true,
+    });
+    assert(both.includes("head and base had moved"), both);
   });
 });

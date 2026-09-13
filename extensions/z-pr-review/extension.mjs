@@ -17,6 +17,7 @@ import { describeLanes } from "./topologies.mjs";
 import { resolveMode } from "./roles.mjs";
 import {
   defaultSelection,
+  publicationTarget,
   renderInspect,
   renderSelectResult,
   selectionFromFlag,
@@ -240,18 +241,22 @@ async function runReview(parsed) {
       })),
     };
     await session.log(renderReview(outcome.summary, decorated));
-    // One review is one selection surface (I6): replacing the retained review
-    // discards its selection. When the outgoing selection was settled
-    // explicitly via `select` — especially `select none`, a publication
-    // posture — say so instead of silently starting from the default all.
-    if (
+    // The outgoing retained result for THIS PR, if any — captured before the
+    // replacement below so an authorized publication can honor its settled
+    // selection (publicationTarget) instead of silently discarding it.
+    const outgoing =
       retainedReview !== null &&
       retainedReview.capture.repo === outcome.summary.repo &&
-      retainedReview.capture.number === outcome.summary.number &&
-      retainedReview.selection.via === "select"
-    ) {
+      retainedReview.capture.number === outcome.summary.number
+        ? retainedReview
+        : null;
+    // One review is one selection surface (I6): replacing the retained review
+    // resets its selection. When the outgoing selection was settled explicitly
+    // via `select` — especially `select none`, a publication posture — say so
+    // instead of silently starting from the default all.
+    if (outgoing !== null && outgoing.selection.via === "select") {
       await session.log(
-        `Replacing the retained review for PR #${outcome.summary.number}: its select-settled selection (${retainedReview.selection.count} of ${retainedReview.selection.total} findings) is discarded — a new review starts from the default all-selection. Re-settle with /z-pr-review select before or after any publication.`,
+        `Replacing the retained review for PR #${outcome.summary.number}: its select-settled selection (${outgoing.selection.count} of ${outgoing.selection.total} findings) no longer covers the new findings — the new review starts from the default all-selection. Re-settle with /z-pr-review select after this run.`,
       );
     }
     // I6: retain the settled-in-progress result. The default selection keeps
@@ -270,9 +275,20 @@ async function runReview(parsed) {
       await session.log(renderSelectResult(outcome.summary, retainedReview.selection));
     }
     if (publishAuthority !== null) {
+      // A settled selection is never silently discarded by a re-review: when
+      // the outgoing retained result for this PR carries a select-settled
+      // selection (and this run did not explicitly settle --all), publication
+      // posts THAT settled result — publication re-validates it against the
+      // live PR and degrades to body-only if the head or base moved since.
+      const target = publicationTarget(outgoing, retainedReview, flags.all === true);
+      if (target === outgoing) {
+        await session.log(
+          `Publication uses the select-settled selection for PR #${outcome.summary.number} (${outgoing.selection.count} of ${outgoing.selection.total} findings from the retained review at head ${outgoing.capture.headOid.slice(0, 7)}) — not this run's default. Pass --all to publish the new review's findings instead.`,
+        );
+      }
       // The review's controller rides along: a cancelled review (session end)
       // must not reach the POST even if it reached publication.
-      await runPublication(retainedReview, controller.signal);
+      await runPublication(target, controller.signal);
     }
   } catch (error) {
     if (error instanceof CaptureError) {
