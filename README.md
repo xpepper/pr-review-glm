@@ -31,16 +31,31 @@ working review onward, **reviewed by this tool itself** before merging (dogfoodi
 
 ## Install (personal use)
 
-Load locally from a checkout (extensions need `--experimental` for now; start a fresh
-session after edits):
+From the public marketplace (two commands; installs from THIS repository, pinned to the
+release tag named by the marketplace entry — no `--experimental` needed for
+marketplace-installed plugins on Copilot CLI 1.0.83):
+
+```sh
+copilot plugin marketplace add xpepper/copilot-plugins
+copilot plugin install z-pr-review@xpepper-copilot-plugins
+```
+
+The marketplace ([xpepper/copilot-plugins](https://github.com/xpepper/copilot-plugins))
+is a generic index of the author's Copilot plugins: it holds only the manifest + README,
+and each entry references the plugin's own repository. `copilot plugin update
+z-pr-review` follows the entry's pinned tag when a new release lands.
+
+Local development from a checkout instead (needs `--experimental`; start a fresh session
+after edits — and `copilot plugin uninstall z-pr-review` first if the marketplace copy is
+installed, or command dispatch is ambiguous):
 
 ```sh
 copilot --plugin-dir /path/to/pr-review-glm --experimental
 ```
 
-`/z-pr-review` shows the capability boundary, `/z-pr-review N --capture-only` captures a
-PR read-only (needs an authenticated `gh`), and `/z-pr-review-config` manages
-configuration. Reviews arrive with later increments.
+`/z-pr-review` shows the capability boundary and running version, `/z-pr-review N`
+reviews PR N (see [ROADMAP.md](ROADMAP.md) for the current surface), and
+`/z-pr-review-config` manages configuration.
 
 ## Repository map
 
