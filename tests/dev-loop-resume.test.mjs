@@ -35,6 +35,12 @@ describe("recoverCheckout", () => {
     assert.equal(result.ok, true);
     assert.match(result.detail, /was stranded on "i4-topologies-tiers"/);
   });
+  it("recovers an M-series increment branch too (marketplace increments, M1)", async () => {
+    const run = fakeRun({ ...onBranch("m1-plugin-marketplace") });
+    const result = await recoverCheckout({ run, repoRoot });
+    assert.equal(result.ok, true);
+    assert.match(result.detail, /was stranded on "m1-plugin-marketplace"/);
+  });
   it("fails closed on a dirty tree, git failures, or a non-ff pull", async () => {
     const cases = [
       fakeRun({ ...onBranch("i4-x"), "git status --porcelain": { code: 0, stdout: " M file\n", stderr: "" } }),
