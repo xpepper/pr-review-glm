@@ -19,6 +19,8 @@ import { defaultSelection } from "../extensions/z-pr-review/select.mjs";
 
 const HEAD = "1111111111111111111111111111111111111111";
 const MOVED = "2222222222222222222222222222222222222222";
+const BASE = "4444444444444444444444444444444444444444";
+const REBASED = "5555555555555555555555555555555555555555";
 const AUTHOR = "someone";
 const VIEWER = "reviewer";
 
@@ -94,12 +96,16 @@ function fakeGh(behavior = {}) {
   return { runGh, calls };
 }
 
+// REST shape (what `gh api repos/…/pulls/N` actually returns): lowercase
+// lifecycle state, boolean draft. Fixtures stay realistic so a gate comparing
+// the wrong casing fails HERE, not in production.
 function openPr(overrides = {}) {
   return {
-    state: "OPEN",
+    state: "open",
     draft: false,
     user: { login: AUTHOR },
     head: { sha: HEAD },
+    base: { sha: BASE },
     ...overrides,
   };
 }
@@ -181,6 +187,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
     assert.equal(publication.inline.length, 0);
     assert(publication.body.includes(HEAD));
     assert(publication.body.includes(MOVED));
+    assert(publication.body.includes("named in this note"));
     assert(publication.body.includes(idempotencyMarker(capture.repo, capture.number, MOVED)));
   });
 
@@ -211,6 +218,26 @@ describe("anchorMapFromFiles and buildPublication", () => {
     assert.equal(bodyFinding.body.split("<!--").length, 2);
   });
 
+  it("defuses marker-shaped filenames in body-note locations", () => {
+    const markerText = `<!-- z-pr-review ${capture.repo}#${capture.number}@${HEAD} -->`;
+    const hostile = [
+      // Unanchorable so it lands in a body NOTE, where the filename renders.
+      { severity: "P2", title: "t", file: `evil${markerText}.mjs`, line: 999, lane: "x" },
+    ];
+    const publication = buildPublication({
+      capture,
+      review,
+      selected: hostile,
+      anchorMap: anchorMapFromFiles(filesJson),
+      currentHead: HEAD,
+      stale: false,
+    });
+    assert.equal(publication.inline.length, 0);
+    assert(publication.body.includes("evil<! --"));
+    // Only the code-generated marker survives as raw "<!--".
+    assert.equal(publication.body.split("<!--").length, 2);
+  });
+
   it("discloses coverage for non-complete reviews", () => {
     const publication = buildPublication({
       capture,
@@ -234,10 +261,11 @@ describe("publishReview gates", () => {
   });
 
   it("refuses closed and draft PRs with no POST", async () => {
-    for (const pr of [openPr({ state: "MERGED" }), openPr({ draft: true })]) {
+    for (const pr of [openPr({ state: "closed" }), openPr({ draft: true })]) {
       const { runGh, calls } = fakeGh({ pr });
       const outcome = await publishReview({ retained: retained(), runGh });
       assert.equal(outcome.status, "refused");
+      if (pr.state === "closed") assert(outcome.reason.includes("closed"));
       assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0);
     }
   });
@@ -302,8 +330,80 @@ describe("publishReview gates", () => {
     );
   });
 
+  it("fails closed when the base advances between gates and the POST", async () => {
+    let prFetches = 0;
+    const behavior = {
+      get pr() {
+        prFetches += 1;
+        return openPr(prFetches <= 1 ? {} : { base: { sha: REBASED } });
+      },
+    };
+    const { runGh, calls } = fakeGh(behavior);
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh }),
+      (error) => error instanceof PublishError && error.message.includes("base moved during publication"),
+    );
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "no POST after the base advanced");
+  });
+
+  it("fails closed on a malformed base sha at gate time", async () => {
+    const { runGh, calls } = fakeGh({ pr: openPr({ base: {} }) });
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh }),
+      (error) => error instanceof PublishError && error.message.includes("malformed base sha"),
+    );
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0);
+  });
+
+  it("refuses with no gh traffic when the review was already cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("parent session ended"));
+    const { runGh, calls } = fakeGh();
+    const outcome = await publishReview({ retained: retained(), signal: controller.signal, runGh });
+    assert.equal(outcome.status, "refused");
+    assert(outcome.reason.includes("cancelled"));
+    assert.equal(calls.length, 0, "a cancelled review performs no gh call at all");
+  });
+
+  it("fails closed when the review is cancelled between the re-check and the POST", async () => {
+    const controller = new AbortController();
+    let prFetches = 0;
+    const behavior = {
+      get pr() {
+        prFetches += 1;
+        if (prFetches > 1) controller.abort(new Error("parent session ended"));
+        return openPr();
+      },
+    };
+    const { runGh, calls } = fakeGh(behavior);
+    await assert.rejects(
+      publishReview({ retained: retained(), signal: controller.signal, runGh }),
+      (error) => error instanceof PublishError && error.message.includes("cancelled during publication"),
+    );
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "a cancelled review never POSTs");
+  });
+
+  it("publishes normally with a live (unaborted) signal threaded through", async () => {
+    const controller = new AbortController();
+    const { runGh } = fakeGh();
+    const outcome = await publishReview({ retained: retained(), signal: controller.signal, runGh });
+    assert.equal(outcome.status, "published");
+  });
+
+  it("fails closed when one inline comment body exceeds the per-comment cap", async () => {
+    const fat = [
+      { severity: "P2", title: "huge", file: "a.mjs", line: 2, detail: "x".repeat(60_001), lane: "x" },
+    ];
+    const { runGh, calls } = fakeGh();
+    await assert.rejects(
+      publishReview({ retained: retained(defaultSelection(fat), { findings: fat }), runGh }),
+      (error) => error instanceof PublishError && error.message.includes("cap 60000"),
+    );
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "the cap fires before the POST");
+  });
+
   it("fails closed when the PR closes or turns draft between gates and the POST", async () => {
-    for (const late of [openPr({ state: "MERGED" }), openPr({ draft: true })]) {
+    for (const late of [openPr({ state: "closed" }), openPr({ draft: true })]) {
       let prFetches = 0;
       const behavior = {
         get pr() {

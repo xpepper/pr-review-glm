@@ -256,7 +256,9 @@ async function runReview(parsed) {
       await session.log(renderSelectResult(outcome.summary, retainedReview.selection));
     }
     if (publishAuthority !== null) {
-      await runPublication(retainedReview, publishAuthority);
+      // The review's controller rides along: a cancelled review (session end)
+      // must not reach the POST even if it reached publication.
+      await runPublication(retainedReview, controller.signal);
     }
   } catch (error) {
     if (error instanceof CaptureError) {
@@ -270,20 +272,23 @@ async function runReview(parsed) {
 }
 
 // I7: publish the retained review's settled selection as one gated COMMENT
-// review. Writes to the same repo#PR are serialized in-process (the spec's
-// per-target write serialization) — a second publication waits for the first
-// to settle instead of racing its gates and marker scan. A settled lock
-// deletes itself when it is still the tail entry, so the map holds only
-// in-flight publications, not one retained promise per PR ever seen.
+// review (the invocation's authority was already settled in runReview — this
+// path only runs when publication was authorized). The review's abort signal
+// is threaded through so a cancelled review cannot write. Writes to the same
+// repo#PR are serialized in-process (the spec's per-target write
+// serialization) — a second publication waits for the first to settle instead
+// of racing its gates and marker scan. A settled lock deletes itself when it
+// is still the tail entry, so the map holds only in-flight publications, not
+// one retained promise per PR ever seen.
 const publicationLocks = new Map();
 
-async function runPublication(retained, authority) {
+async function runPublication(retained, signal) {
   const { capture } = retained;
   const key = `${capture.repo}#${capture.number}`;
   const prior = publicationLocks.get(key) ?? Promise.resolve();
   const run = prior.then(
-    () => publishReview({ retained, authority }),
-    () => publishReview({ retained, authority }),
+    () => publishReview({ retained, signal }),
+    () => publishReview({ retained, signal }),
   );
   const tail = run.catch(() => {});
   publicationLocks.set(key, tail);

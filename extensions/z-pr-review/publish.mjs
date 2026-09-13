@@ -7,14 +7,18 @@
 // `pulls/N/files` hunks; everything else goes to body notes. Draft, closed,
 // and self-author PRs are refused; a moved head degrades to a body-only
 // comment naming both commits; an idempotency marker makes re-runs skip and
-// lets an uncertain write response be reconciled. No selected findings means
-// no POST at all.
+// lets an uncertain write response be reconciled. The head AND base are
+// re-pinned immediately before the POST, and a cancelled review (its abort
+// signal) never writes. No selected findings means no POST at all.
 import { spawn } from "node:child_process";
 
 export const MAX_INLINE_ANCHORS = 50;
 // GitHub's documented review-body cap is 65,536 characters; stop well short so
 // composition can never trip the API's own limit instead of our gate.
 export const MAX_BODY_CHARS = 60_000;
+// Same posture per inline comment: the API's own per-comment cap is larger,
+// but a single oversized finding must fail our gate, not the POST.
+export const MAX_COMMENT_CHARS = 60_000;
 const DEFAULT_GH_TIMEOUT_MS = 30_000;
 const FILES_PAGE_SIZE = 100;
 const MAX_FILE_PAGES = 5; // 500 files; beyond that the anchor map fails closed
@@ -40,6 +44,8 @@ export function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
     const child = spawn("gh", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let timedOut = false;
     let overflowed = false;
     let settled = false;
@@ -50,18 +56,21 @@ export function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
       if (timer !== null) clearTimeout(timer);
       resolve(result);
     };
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-      if (stdout.length > MAX_OUTPUT_BYTES && !overflowed) {
+    // Byte counters, not string lengths: `length` counts UTF-16 code units, so
+    // multibyte output would silently under-report against a byte budget.
+    const capped = (stream, chunk) => {
+      if (stream === "out") stdout += chunk;
+      else stderr += chunk;
+      const total = (stream === "out" ? (stdoutBytes += Buffer.byteLength(chunk)) : (stderrBytes += Buffer.byteLength(chunk)));
+      if (total > MAX_OUTPUT_BYTES && !overflowed) {
         overflowed = true;
         child.kill("SIGKILL");
       }
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => capped("out", chunk));
+    child.stderr.on("data", (chunk) => capped("err", chunk));
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
         timedOut = true;
@@ -176,13 +185,16 @@ export function buildPublication({ capture, review, selected, anchorMap, current
   if (stale) {
     lines.push(
       "",
-      `This review ran against head \`${capture.headOid}\`, but the PR head is now \`${currentHead}\` — findings are attached here rather than inline, and the moved commits are both named above.`,
+      `This review ran against head \`${capture.headOid}\`, but the PR head is now \`${currentHead}\` — findings are attached here rather than inline, and both commits are named in this note.`,
     );
   }
   if (noted.length > 0) {
     lines.push("", "### Other notes");
     noted.forEach((finding, index) => {
-      const location = finding.file ? ` — ${finding.file}${typeof finding.line === "number" ? `:${finding.line}` : ""}` : "";
+      // The filename is model-influenced text like title/detail (host-validated
+      // against the diff, but still rendered): sanitize it too, or a path
+      // carrying marker-shaped text could forge the idempotency marker.
+      const location = finding.file ? ` — ${sanitize(finding.file)}${typeof finding.line === "number" ? `:${finding.line}` : ""}` : "";
       lines.push(`${index + 1}. **[${finding.severity}] ${sanitize(finding.title)}**${location}`);
       if (finding.detail) lines.push(`   ${sanitize(finding.detail)}`);
     });
@@ -243,8 +255,16 @@ function httpStatusOf(stderr) {
   return /\(HTTP (\d+)\)/.exec(stderr)?.[1];
 }
 
+// REST reports lifecycle state lowercase ("open"/"closed"); the gate is
+// case-normalized so a live open PR can never be refused on spelling.
+const isOpenState = (pr) => String(pr.state ?? "").toUpperCase() === "OPEN";
+
 // Publishes the retained review's selected findings as ONE gated COMMENT
-// review. Outcomes (never a silent partial write):
+// review. `signal` is the owning review's AbortController signal: a cancelled
+// review must not write — checked before any gh call and again immediately
+// before the POST (an abort landing during the POST itself is reconciled by
+// the marker scan on any later run; that residual window is accepted).
+// Outcomes (never a silent partial write):
 //   { status: "skipped", reason }            — no selected findings; no POST
 //   { status: "refused", reason }            — a gate declined the PR; no POST
 //   { status: "already-published", reviewUrl, marker } — idempotency skip
@@ -252,10 +272,13 @@ function httpStatusOf(stderr) {
 // Throws PublishError on every fail-closed condition.
 export async function publishReview({
   retained,
-  authority,
+  signal = null,
   runGh = defaultRunGh,
   cwd = process.cwd(),
 }) {
+  if (signal?.aborted) {
+    return { status: "refused", reason: "the review was cancelled before publication; nothing was posted." };
+  }
   const { capture, review, selection } = retained;
   const selected = selectedFindings(review.findings, selection);
   if (selected.length === 0) {
@@ -266,8 +289,8 @@ export async function publishReview({
   // Lifecycle, self-author, and head gates read ONE fresh PR fetch; the
   // captured binding names the repo/PR, never a live one.
   const pr = await ghJsonOrThrow(runGh, cwd, ["api", prPath], `fetching PR #${capture.number} for publication gates`);
-  if (pr.state !== "OPEN") {
-    return { status: "refused", reason: `PR #${capture.number} is ${pr.state}; nothing was posted.` };
+  if (!isOpenState(pr)) {
+    return { status: "refused", reason: `PR #${capture.number} is ${pr.state ?? "in an unknown state"}; nothing was posted.` };
   }
   if (pr.draft === true) {
     return { status: "refused", reason: `PR #${capture.number} is a draft; nothing was posted.` };
@@ -286,6 +309,13 @@ export async function publishReview({
   const currentHead = pr.head?.sha;
   if (typeof currentHead !== "string" || !/^[0-9a-f]{40}$/.test(currentHead)) {
     throw new PublishError(`PR #${capture.number} has a malformed head sha; failing closed — nothing was posted.`);
+  }
+  // The base is pinned with the head: the anchor map is derived from this same
+  // fetch, and a base that advances without moving the head re-diffs the PR —
+  // previously validated RIGHT-side lines may stop being commentable.
+  const currentBase = pr.base?.sha;
+  if (typeof currentBase !== "string" || !/^[0-9a-f]{40}$/.test(currentBase)) {
+    throw new PublishError(`PR #${capture.number} has a malformed base sha; failing closed — nothing was posted.`);
   }
   const stale = currentHead !== capture.headOid;
 
@@ -319,20 +349,37 @@ export async function publishReview({
       `composed review body is ${publication.body.length} characters (cap ${MAX_BODY_CHARS}); failing closed — nothing was posted.`,
     );
   }
+  // Per-comment cap, same posture as the body cap: an oversized inline body
+  // must fail our gate before the POST, not GitHub's after it.
+  const oversized = publication.inline.find((comment) => comment.body.length > MAX_COMMENT_CHARS);
+  if (oversized !== undefined) {
+    throw new PublishError(
+      `an inline comment body is ${oversized.body.length} characters (cap ${MAX_COMMENT_CHARS}); failing closed — nothing was posted.`,
+    );
+  }
 
   // Final pre-write re-check: gates, files, and body were all composed against
-  // the earlier fetch; if the PR closed, turned draft, or its head moved in
-  // between, posting now would write against a state the gates never cleared.
+  // the earlier fetch; if the PR closed, turned draft, its head moved, or its
+  // base advanced (re-diffing the PR under the validated anchors) in between,
+  // posting now would write against a state the gates never cleared.
   const recheck = await ghJsonOrThrow(runGh, cwd, ["api", prPath], "re-checking the PR immediately before posting");
-  if (recheck.state !== "OPEN" || recheck.draft === true) {
+  if (!isOpenState(recheck) || recheck.draft === true) {
     throw new PublishError(
-      `PR #${capture.number} became ${recheck.state !== "OPEN" ? recheck.state : "a draft"} during publication; nothing was posted.`,
+      `PR #${capture.number} became ${!isOpenState(recheck) ? recheck.state ?? "an unknown state" : "a draft"} during publication; nothing was posted.`,
     );
   }
   if (recheck.head?.sha !== currentHead) {
     throw new PublishError(
       `PR #${capture.number}'s head moved during publication (${currentHead.slice(0, 7)} -> ${String(recheck.head?.sha).slice(0, 7)}); nothing was posted. Re-run the review.`,
     );
+  }
+  if (recheck.base?.sha !== currentBase) {
+    throw new PublishError(
+      `PR #${capture.number}'s base moved during publication (${currentBase.slice(0, 7)} -> ${String(recheck.base?.sha).slice(0, 7)}) — the live diff may no longer match the validated anchors; nothing was posted. Re-run the review.`,
+    );
+  }
+  if (signal?.aborted) {
+    throw new PublishError(`the review was cancelled during publication; nothing was posted.`);
   }
 
   const payload = JSON.stringify({
