@@ -79,6 +79,33 @@ describe("gateSmokes", () => {
     const failing = await gateSmokes({ run: async () => ({ code: 2, stdout: "", stderr: "x" }), repoRoot: realRoot, exclude: [] });
     assert.equal(failing.ok, false);
   });
+
+  it("retries a failed smoke exactly once and passes with the retry disclosed", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push(args.join(" "));
+      const isTarget = args[0]?.includes("smoke-i1.mjs");
+      const first = isTarget && calls.filter((c) => c.includes("smoke-i1.mjs")).length === 1;
+      return first
+        ? { code: 1, stdout: "PASS one", stderr: "AssertionError [ERR_ASSERTION]: capture must report PR #3, got: refused" }
+        : { code: 0, stdout: "PASS", stderr: "" };
+    };
+    const gate = await gateSmokes({ run, repoRoot: realRoot, exclude: ["smoke-l1.mjs"] });
+    assert.equal(gate.ok, true);
+    assert.match(gate.detail, /retried once after failure: smoke-i1\.mjs/);
+    assert.match(gate.detail, /first attempt: PASS one \| stderr: AssertionError/);
+    assert.equal(calls.filter((c) => c.includes("smoke-i1.mjs")).length, 2, "exactly one retry");
+    for (const other of calls.filter((c) => !c.includes("smoke-i1.mjs"))) {
+      assert.equal(calls.filter((c) => c === other).length, 1, "healthy smokes run once");
+    }
+  });
+
+  it("fails with stderr in the detail when the retry fails too", async () => {
+    const run = async () => ({ code: 1, stdout: "PASS lines only", stderr: "AssertionError: capture must report PR #3, got: timeout", timedOut: false });
+    const gate = await gateSmokes({ run, repoRoot: realRoot, exclude: [] });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /stderr: AssertionError: capture must report/);
+  });
 });
 
 describe("gateZcodeHeadless", () => {
