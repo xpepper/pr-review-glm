@@ -10,7 +10,7 @@ import { verifyIncrementPrOwnedByViewer } from "./gates.mjs";
 // Increment-branch convention (AGENTS.md: "Branch i<N>-<slug>") — the debris
 // signature. Anything else falls through to the loud repo-idle failure instead
 // of being silently moved.
-const INCREMENT_BRANCH = /^([ilvc]\d+)-/i;
+const INCREMENT_BRANCH = /^([ilvcm]\d+)-/i;
 
 const bad = (detail) => ({ name: "checkout-recovery", ok: false, detail });
 

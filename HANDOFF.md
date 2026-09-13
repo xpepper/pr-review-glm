@@ -1,6 +1,6 @@
 # HANDOFF.md — instructions for the next session
 
-STATUS: next=I8
+STATUS: next=M1
 
 Written for a **fresh session** continuing this project. This file is rewritten at
 the end of every increment; it is the single source of "where we stopped".
@@ -15,7 +15,7 @@ The `STATUS:` line above is machine-owned (dev-loop protocol,
 `^STATUS: ` in this file is one of `next=<increment-id>` · `blocked: <one-line reason>`
 · `done`. The worker writes it when rewriting this file; `scripts/dev-loop.mjs` only
 parses and validates it. Keep it directly under the H1 title. The grammar accepts
-`I`/`L`/`V`/`C` ids since I4 (PR #18).
+`I`/`L`/`V`/`C` ids since I4 (PR #18) and `M` (marketplace infra) since M1 prep.
 
 ## Recorded state (2026-09-13, after I7)
 
@@ -37,9 +37,10 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
   `partial`/`failed` and `degraded` block the dogfood merge (fail-closed); the I6
   review P2s (leading-zero specs, bounds-before-expansion, control-sequence
   stripping, retained-staleness disclosure) are folded into I7.
-- **After I7:** I8 — hardening: large-diff file-backed transport (≥200 KB manifest +
-  required read ranges), lane/credit telemetry from runtime events, dogfood-driven
-  fixes; `1.0.0` when I8 completes. Bump reminder for I8's worker: additive → `0.2.5`.
+- **After I7:** M1 — generic Copilot plugin marketplace (next section), then I8 —
+  hardening: large-diff file-backed transport (≥200 KB manifest + required read
+  ranges), lane/credit telemetry from runtime events, dogfood-driven fixes; `1.0.0`
+  when I8 completes.
 - **Attribution state:** I3–I7 are original code; `docs/ATTRIBUTION.md` lists no
   reused modules. The upstream LICENSE issue (10ego/pi-pr-review#150) stays open as a
   standing record.
@@ -61,16 +62,46 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
   `HOME` (or `COPILOT_SDK_PATH` set) — the harness resolves the bundled SDK from
   `~/.copilot/pkg`.
 
-## Next increment: I8 — hardening
+## Next increment: M1 — generic Copilot plugin marketplace
 
-Large-diff file-backed transport: diffs ≥200,000 bytes switch to a changed-file
-manifest plus required read ranges (ported from upstream's
-`pr-review-context`/artifact logic — attribution in `docs/ATTRIBUTION.md` if
-code is reused); completeness enforced from tool events. Lane/credit telemetry
-from runtime events (`session.usage_checkpoint` etc.). Dogfood-driven fixes from
-the accumulated review rounds. See the I8 ROADMAP row and the spec's "capture.mjs"
-component plus "Degradation and budgets". `1.0.0` lands when I8 completes.
-Bump `plugin.json` to `0.2.5` if additive (expected).
+Goal (user-commissioned 2026-09-13): one-command install of z-pr-review via a
+GENERIC public marketplace repo the user owns — `xpepper/copilot-plugins`,
+decided with the user (name + public visibility) — designed to host entries for
+ALL the user's Copilot plugins, not just this one.
+
+Verified mechanics (GitHub reference marketplace `github/copilot-plugins`,
+local `copilot plugin --help` on 1.0.48; docs: the plugins-marketplace how-to):
+- Manifest: `.github/plugin/marketplace.json` — the ONLY required component;
+  `.claude-plugin/marketplace.json` accepted as an alternate location.
+- Schema: top-level `name`, `metadata{description,version}`, `owner{name,email}`,
+  `plugins[]`; entry fields: `name`, `description`, `version`, `author{name,url}`,
+  `homepage`, `keywords[]`, `license`, `repository`, `source`.
+- External-repo source (ours): `{"source":"github","repo":"xpepper/pr-review-glm","path":"."}`.
+- Install UX: `copilot plugin marketplace add xpepper/copilot-plugins` →
+  `copilot plugin install z-pr-review@copilot-plugins`.
+
+Scope: (1) create `xpepper/copilot-plugins` public — conventional session work,
+user-commissioned, NOT loop-gated; manifest + README, z-pr-review as the first
+entry with entry version == `plugin.json`; (2) in THIS repo (the loop-gated
+increment PR): README/AGENTS install-path docs, and a no-inference
+marketplace-consistency smoke (entry exists, points at this repo, entry version
+== `plugin.json` version) wired into the gate smokes — its failure message must
+point at the marketplace repo. Release discipline, gate-enforced from now on:
+every increment that bumps `plugin.json` also bumps the marketplace entry
+(one-line direct push to the marketplace repo, disclosed in the increment PR) —
+the consistency smoke fails the next assessment if skipped.
+
+Verify live, document the answers: root `path: "."` acceptance (the reference
+impl only shows subdirectory paths); whether marketplace-installed plugins
+still need `--experimental` on 1.0.83; uninstall any locally installed copy
+before `--plugin-dir` dev sessions (double registration = the I1
+dispatch-ambiguity class).
+
+Bump `plugin.json` 0.2.4 → 0.2.5 (additive), and land the matching marketplace
+entry bump in the same increment. See the M1 ROADMAP row for the full brief.
+
+After M1: I8 — hardening (large-diff file-backed transport, lane/credit
+telemetry, dogfood-driven fixes; `1.0.0` when I8 completes).
 
 Dogfood runs from I3 onward: every increment PR (including I8's) is reviewed by
 this tool via the dev-loop before merge. Never merge your own PR — the loop

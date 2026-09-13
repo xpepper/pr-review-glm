@@ -12,6 +12,7 @@ describe("parseStatusLine", () => {
   });
   it("parses V- and C-series ids (release versioning and custom roles)", () => {
     assert.deepEqual(parseStatusLine(handoff("STATUS: next=V1")), { kind: "next", increment: "V1" });
+    assert.deepEqual(parseStatusLine(handoff("STATUS: next=M1")), { kind: "next", increment: "M1" });
     assert.deepEqual(parseStatusLine(handoff("STATUS: next=c1")), { kind: "next", increment: "C1" });
   });
   it("parses blocked with a reason", () => {
