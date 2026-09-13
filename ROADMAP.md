@@ -4,7 +4,7 @@ The full increment plan and where we are on the journey. Authoritative for statu
 the [design spec](docs/superpowers/specs/2026-09-09-copilot-pr-review-port-design.md) is
 authoritative for what each increment must deliver.
 
-**Where we are:** I7 complete. **Next:** I8 — hardening.
+**Where we are:** I6 complete. **Next:** I7 — gated COMMENT publication.
 
 Core principles (from the spec): small sequential increments, each landing as a PR;
 dogfood from I3 onward — every increment PR is reviewed by this tool itself before merge.
@@ -25,7 +25,7 @@ dogfood from I3 onward — every increment PR is reviewed by this tool itself be
 | C1 | ✅ Done (PR #27) | **Custom review roles:** user-defined reviewer lanes in config — each role is a prompt plus a tier (light/medium/heavy ⇒ budgets/fallback) with optional model and reasoning-effort overrides falling back to the tier's values; custom modes as ordered lists of built-in lane ids and/or role ids, with the four standard modes as code-owned defaults that config may override (`modes.<standard-name>` overrides the topology; a custom mode is selected via `defaultMode`). Custom-role findings flow through the same lane pipeline — budgets, attempt/fallback plans, deterministic shaping, and the future I5/I7 gates — because a role resolves to an ordinary lane descriptor (prompts are model input, never authority). Config schemaVersion 2 (a v1 file is rejected whole-object, defaults activate — the R1 starts-fresh posture); roles/modes edited directly in the config file and surfaced read-only by `/z-pr-review-config show` (the key=value grammar doesn't fit multi-line prompts). Spec amendment recorded (topologies: code-owned defaults + user-configurable composition). Original extension — upstream has fixed topologies, nothing ported. Evidence: 310 unit tests (`node --test tests/*.test.mjs`, incl. roles/modes validation matrix — required keys, override shapes, role-id collision with built-in lane ids, roles↔modes cross-checks, standard-mode override, custom defaultMode — resolveMode resolution/ordering/override/failure cases, runLane override-vs-tier-fallback plumbing, and the batch attempt plan under a role model) + smoke-i1/i2 (SDK dispatch, zero inference; i1 asserts the status `Version:` line against the bumped 0.2.1) + smoke-l1 dry-run green. Protocol surfaces untouched (STATUS grammar, command descriptions, machine-summary shape exactly as main — custom lanes appear in the unchanged summary fields as ordinary lane ids). | I4 |
 | I5 | ✅ Done (PR #30) | Validation and adjudication: `adjudicate.mjs` — deterministic host-side candidate validation (severity ladder via lane shaping plus anchors vs the captured diff: touched-file check, new-side hunk-range check for lines, evidence required for P0/P1), one isolated adjudicator call (heavy tier via the `runLane` machinery with a prompt override, envelope contract, `deadlines.adjudicationMs` clipped to the remaining total budget), code-owned re-validation of its output (ladder, sources shape, anchor/evidence re-check, unknown lane ids stripped from `sources`), dedup (file+line+normalized title, lanes unioned) as the backstop under the merge pass and the only dedup when degraded, per-mode findings policy enforced in code (quick: P0–P2; balanced: P0–P2 + ≤3 diff-anchored P3/nit; full/deep/custom: all), and degraded assembly with coverage disclosure (failed/malformed/expired adjudication → validated candidates reported unmerged, review status `degraded`, never clean; partial batches still synthesize completed lanes' artifacts with the partial disclosure). `renderReview` reports the assembly (validation/adjudication/policy drop breakdown; adjudicator line) while the machine-summary field shape is exactly as main (protocol surface; `degraded` is a new status VALUE that fails closed in the dogfood verdict mapping). Custom-role findings flow through the identical gates — prompts never gain authority. Evidence: 330 unit tests (`node --test tests/*.test.mjs`, incl. the adjudicate matrix — anchor parsing incl. deletions/omitted counts/file boundaries, candidate/adjudicated validation, dedup, per-mode policy, prompt shape, assembly incl. degraded/budget-expired/partial, adjudicator shaping-drop disclosure) + smoke-i1/i2 (SDK dispatch, zero inference; i1 asserts the status `Version:` line against the bumped 0.2.2) + smoke-l1 dry-run green; smoke-i3 (real lanes + real adjudication against the open PR) runs as the loop's assessment gate against this very PR by design. Landed by the supervisor from the shell-less worker's verified tree (both journey entries). | I4 |
 | I6 | ✅ Done (PR #33) | Selection and retention: findings numbered in the report as the selection surface; `/z-pr-review select all\|none\|<numbers, e.g. 1,3-5>` settles (or re-settles) a selection over the retained review in-session — `--all` settles it at review time, the default selection retains every validated finding until then; `/z-pr-review inspect` renders the retained settled result (frozen binding, coverage/status, per-finding selected/not-selected marks) with no model calls and no GitHub access. Selection is pure code over host-validated findings; specs naming nonexistent findings are refused precisely. Elicitation is the chat follow-up turn — the Copilot SDK command-handler surface has no verified interactive-prompt API (flagged vs the spec's "native elicitation"). Evidence: 353 unit tests (`node --test tests/*.test.mjs`, incl. the selection matrix — spec parsing with precise refusals, subset/none/all constructors, inspect rendering incl. model-text flattening and partial-status retention, numbered-report footer; updated grammar/status/help assertions) + smoke-i1 extended (select/inspect answer without a retained review, zero inference; i1 asserts the status `Version:` line against the bumped 0.2.3) + smoke-i2 + smoke-l1 dry-run green; smoke-i3 (real lanes + adjudication) runs as the loop's assessment gate against this very PR by design. | I5 |
-| I7 | ✅ Done (PR #37) | Gated COMMENT publication: `publish.mjs` posts ONE COMMENT review (`gh api -X POST …/reviews --input -`) of the retained review's settled selection. Authority is code-only and captured before lanes start — `--comment`, or config `autoPostReviews` unless `--no-comment` (extension wiring); model text never selects event, commit, repo, or anchors. Gates before the POST, all fail-closed: draft/closed refusal, self-author refusal (vs `gh api user`), empty-selection skip (no POST), stale head → body-only comment naming both commits (no inline anchors), idempotency marker (`<!-- z-pr-review repo#N@head -->`) scanned against existing reviews (a carrier skips the POST; pagination-capped scans), inline anchors = first ≤50 selected findings re-validated against `pulls/N/files` new-side hunks with the remainder to body "Other notes", a body-size cap under GitHub's limit, a final head re-check immediately before the POST, per-target in-process write serialization, and uncertain-write (5xx/timeout/unparseable response) reconciliation by re-scanning for the marker (found → published-reconciled; absent → fail-closed). Model text is sanitized (flattened, control chars stripped, `<!--` defused) so findings can't forge the marker or chat lines; non-complete reviews publish with a coverage disclosure. The I6 review P2s folded in: `parseSelectionSpec` refuses leading zeros and range bounds before expansion, `inspect` strips terminal control sequences and discloses when the retained review predates the session's last capture. Supervisor fold (dogfood round 2 + independent reviewer, same day): REST lifecycle state normalized before the gate comparisons (the round-2 P1 — `gh api` returns lowercase `open` while the gates compared `OPEN`, so every open-PR publication was refused and uppercase test fixtures masked it; fixtures are now REST-shaped so the happy path is itself the regression test), the base sha pinned alongside the head in the pre-POST re-check (a base advancing without moving the head re-diffs the PR under the validated anchors — an explicit fail-closed refusal instead of a late 422), the review's AbortController signal threaded into publication (cancelled reviews refuse before any gh call and fail closed between the re-check and the POST), stderr bounded by the same byte budget as stdout with byte-true counters on both (string `length` counts UTF-16 units and under-reported multibyte output), a per-inline-comment body cap mirroring the body cap, body-note filenames sanitized like every other model-influenced field (a marker-shaped path could forge the idempotency marker in our own posted body), the dead `authority` parameter removed from `publishReview` (authority is the invocation decision in extension.mjs, not a write-path input), and the stale-head note reworded to name the commits where it names them. Supervisor fold 2 (dogfood round 3 on the folded head): staleness made symmetric in head AND base against the capture (a base advancing under an unchanged head re-diffs the PR the findings were validated against — body-only, naming both heads and both bases), stale publications skip the changed-file fetch entirely (a >500-file PR must not fail a body-only comment), the idempotency scans accept only the authenticated viewer's reviews (deterministic marker text is otherwise forgeable by any PR participant), pagination accepts lists of exactly the entry cap (one beyond-cap probe entry distinguishes at-cap from over-cap), C1 controls (U+0080–U+009F, 8-bit CSI) stripped in both publish sanitization and inspect rendering, capture buffers stop retaining data the moment the byte budget trips, and replacing a select-settled retained review now discloses it (one review is one selection surface by design — the spec's autoPostReviews publishes without an interactive selection; carrying selections across reviews is post-v1). Evidence: 396 unit tests (`node --test tests/*.test.mjs`, incl. the fake-gh publish matrix — gate refusals with zero POSTs, one-POST payload shape with pinned `commit_id`, anchor mapping incl. the 50-cap/patchless-file/stale cases, marker forgeries incl. filenames and foreign reviewers, base-advance-since-capture and during-publication fail-closed, malformed-base fail-closed, cancelled-review refusals at entry and pre-POST, per-comment cap, exactly-at-cap pagination, 4xx no-retry vs 5xx reconcile vs uncertain-fail-closed, non-array/oversized fail-closed, renderPublishResult — plus the select/inspect regressions incl. C1) + smoke-i1/i2 green (SDK dispatch, zero inference; i1 asserts `Version: 0.2.4`) + smoke-l1 dry-run green; smoke-i3 (real lanes + adjudication) runs as the loop's assessment gate against this very PR by design. | I6 |
+| I7 | ⬜ Pending | Gated COMMENT publication: single POST, ≤50 validated inline anchors, idempotency marker, stale/draft/self gates, uncertain-write reconciliation; `--comment` / `autoPostReviews`. | I6 |
 | I8 | ⬜ Pending | Hardening: large-diff file-backed transport (≥200 KB manifest + required read ranges), lane/credit telemetry from runtime events, dogfood-driven fixes. | I7 |
 
 Sizes are deliberately small (a focused session each). Later items may split further
@@ -33,75 +33,6 @@ without changing the spec; record splits here. Non-plugin increments (L-series) 
 the development workflow itself.
 
 ## Journey log
-
-- **2026-09-13 (I7 supervisor fold 2 — dogfood round 3, launched from a
-  supervisor shell whose launchd-sourced ZAI key turned out stale)** — the
-  relaunch adopted PR #37 correctly (resume line observed; gates green on the
-  folded head 004ae04), then the reviewer session died in 2s with
-  `Error: Turn execution failed` — reproduced instantly by a manual probe
-  with the same launchctl-sourced key, so that key value is dead and the
-  launch env, not the loop, caused the stop. The dogfood still ran (copilot
-  SDK, no Z.AI auth) and returned a third, again-new family: 2 P1 + 5 P2.
-  All validated real and folded: base-advance-since-capture now degrades to
-  body-only (staleness symmetric in head and base vs the capture), stale
-  publications skip the files fetch (no 500-file failure for body-only
-  posts), marker scans viewer-owned (forge-proof idempotency), pagination
-  accepts exactly-at-cap lists (beyond-cap probe), C1 escapes stripped in
-  publish + inspect, capture buffers stop retaining at the byte trip, and a
-  select-settled retained review being replaced is now disclosed in chat
-  (selection semantics themselves are by design: one review = one selection
-  surface; autoPostReviews publishes without interactive selection —
-  carrying selections across reviews is post-v1). 396/396 green after the
-  fold; loop must be relaunched from the user's terminal (working key).
-
-- **2026-09-13 (I7 supervisor fold — dogfood round 2 + independent reviewer,
-  all nine findings validated against the code, none inaccurate)** — the run
-  stopped fail-closed after its two-round fixer budget with the dogfood still
-  at request-changes (1 P1). The P1 was real: `gh api` returns REST lifecycle
-  state lowercase (`open`) while both gate comparisons read `state === "OPEN"`,
-  so an open PR was always refused — and the fake-gh fixtures returned
-  uppercase, masking it in every test. Folded by the supervisor on this
-  branch: state normalization (fixtures now REST-shaped, making the happy
-  path the regression test), base-sha pinned in the pre-POST re-check
-  (base-advance without a head move re-diffs the PR under validated anchors —
-  explicit fail-closed refusal instead of a late 422), the review's abort
-  signal threaded through publication (cancelled reviews never POST),
-  stderr bounded by stdout's byte budget with byte-true counters (UTF-16
-  `length` under-reported multibyte output), a per-inline-comment body cap,
-  body-note filenames sanitized (marker forging via a changed-file path),
-  the dead `authority` parameter removed, and the stale-head wording fixed.
-  Suite 392 green after the fold; pushed for the loop's reassessment.
-
-- **2026-09-13 (I7 — gated COMMENT publication)** — implemented per the
-  spec's "Publication gates" section over the I6 retained result:
-  `publish.mjs` owns the write path (a `gh api` runner with stdin support so
-  the POST's nested comments payload never touches argv; injected as `runGh`
-  by tests like capture.mjs). The retained settled selection IS what posts —
-  `selectedFindings` maps all/none/subset selections to findings in report
-  order, so only host-validated, adjudicated, policy-passing findings can ever
-  reach GitHub; an empty selection means no POST at all. Design decisions
-  flagged in the PR rather than taken silently: (1) a stale head still posts,
-  body-only, naming both commits (the spec's stale rule) — the marker then
-  keys on the CURRENT head so a re-review at the new head posts its own
-  comment; (2) the pre-POST idempotency scan and the uncertain-write
-  reconciliation share one marker shape, and a definite 4xx is never retried;
-  (3) `--no-comment` overrides config `autoPostReviews` (explicit no beats a
-  config yes), while an absent flag defers to it — matching the spec's
-  "autoPostReviews publishes without an interactive selection" posture; (4)
-  a degraded/partial review may publish (spec: "COMMENT-only if published")
-  with a coverage disclosure line in the body — its findings were host-
-  validated even though the merge pass was skipped; (5) `select` changes do
-  NOT publish — chat selection settles the retained result and the next
-  review invocation with publication authority posts it (`/z-pr-review
-  publish` on the retained result stays post-v1 per the spec's flow note).
-  Sanitization: finding text is flattened, control-char-stripped, and `<!--`
-  defused before reaching any payload or chat line, so model text can neither
-  forge the idempotency marker nor suppress a future publication. The four
-  I6 review P2s folded in (parseSelectionSpec leading zeros + bounds-before-
-  expansion, inspect control-sequence stripping, retained-vs-last-capture
-  staleness disclosure). Protocol surfaces untouched: command registration
-  descriptions, machine-summary field shape, and the STATUS grammar are
-  exactly as main. Bumped 0.2.3 → 0.2.4 (additive).
 
 - **2026-09-13 (two more probe stops after #35 — the gate now retries on code-owned terms and persists every attempt's transcript — loop-side fix)** —
   #35's rephrased probe (the diagnostic-proven goal phrasing) still stopped
