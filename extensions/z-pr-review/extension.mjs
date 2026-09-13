@@ -15,6 +15,13 @@ import { drainUnconfirmedStops } from "./lane.mjs";
 import { describeLanes } from "./topologies.mjs";
 import { resolveMode } from "./roles.mjs";
 import {
+  defaultSelection,
+  renderInspect,
+  renderSelectResult,
+  selectionFromFlag,
+  selectionFromSpec,
+} from "./select.mjs";
+import {
   parseConfigArgs,
   parseReviewArgs,
   renderCapture,
@@ -29,6 +36,11 @@ const store = new ConfigStore();
 // Last successful capture in this session; /z-pr-review status reports it and
 // later increments (publication) will check against its frozen binding.
 let lastCapture = null;
+// I6: the retained settled result — the last completed review's assembled
+// findings plus the selection over them. In-session only (cross-session
+// persistence is out of scope for v1); inspect renders it with no model calls
+// and no GitHub access.
+let retainedReview = null;
 
 const session = await joinSession({
   commands: [
@@ -46,6 +58,18 @@ const session = await joinSession({
         }
         if (parsed.kind === "help") {
           await session.log(renderHelp());
+          return;
+        }
+        if (parsed.kind === "inspect") {
+          await session.log(
+            retainedReview === null
+              ? "No retained review in this session — run /z-pr-review <PR number> first. Inspect needs no model calls and no GitHub access."
+              : renderInspect(retainedReview),
+          );
+          return;
+        }
+        if (parsed.kind === "select") {
+          await runSelect(parsed);
           return;
         }
         // parsed.kind === "review"
@@ -107,22 +131,39 @@ async function runCapture(parsed) {
   }
 }
 
+// I6: settle (or re-settle) the selection over the retained review. Pure code
+// over the in-session state: no model calls, no GitHub access; a spec naming
+// findings that do not exist is refused with a precise reason.
+async function runSelect(parsed) {
+  if (retainedReview === null) {
+    await session.log(
+      "No retained review in this session — run /z-pr-review <PR number> first. Nothing was selected.",
+      { level: "error" },
+    );
+    return;
+  }
+  const selection = selectionFromSpec(parsed.spec, retainedReview.review.findings);
+  if (selection.kind === "error") {
+    await session.log(`Selection not changed: ${selection.message}`, { level: "error" });
+    return;
+  }
+  retainedReview.selection = selection;
+  await session.log(renderSelectResult(retainedReview.capture, selection));
+}
+
 // Full review (I5): capture, the mode's topology of tiered lanes under the
 // config budgets, then host-side assembly — candidate validation against the
 // captured diff, one isolated adjudicator call, dedup, and the per-mode
 // findings policy, all code-owned. The mode comes from the flag or config
 // defaultMode; flags for later increments are rejected up front with a pointer,
-// never silently ignored. Publication cannot run before I7, so --no-comment is
-// the only posture that exists today.
+// never silently ignored. I6: the assembled review is retained in-session with
+// a selection over its findings (default: all; --all settles it up front).
+// Publication cannot run before I7, so --no-comment is the only posture that
+// exists today.
 async function runReview(parsed) {
   const { flags, number } = parsed;
-  const unimplemented = flags.all
-    ? ["--all", "finding selection arrives with increment I6"]
-    : flags.comment === true
-      ? ["--comment", "COMMENT publication arrives with increment I7"]
-      : null;
-  if (unimplemented !== null) {
-    throw new Error(`"${unimplemented[0]}" is ${unimplemented[1]}.`);
+  if (flags.comment === true) {
+    throw new Error('"--comment" is COMMENT publication, which arrives with increment I7.');
   }
   const controller = new AbortController();
   const review = { controller, done: Promise.resolve() };
@@ -188,6 +229,21 @@ async function runReview(parsed) {
       })),
     };
     await session.log(renderReview(outcome.summary, decorated));
+    // I6: retain the settled-in-progress result. The default selection keeps
+    // every validated finding; --all settles that default at review time.
+    // Even a partial/degraded review is retained — its findings were still
+    // host-validated, and its status travels with the retained result.
+    retainedReview = {
+      capture: outcome.summary,
+      review: decorated,
+      selection: flags.all
+        ? selectionFromFlag(decorated.findings)
+        : defaultSelection(decorated.findings),
+      retainedAt: new Date().toISOString(),
+    };
+    if (flags.all) {
+      await session.log(renderSelectResult(outcome.summary, retainedReview.selection));
+    }
   } catch (error) {
     if (error instanceof CaptureError) {
       await session.log(`Capture refused — nothing was written: ${error.message}`, { level: "error" });

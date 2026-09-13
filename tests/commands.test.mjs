@@ -67,8 +67,27 @@ describe("parseReviewArgs", () => {
     });
   });
 
+  it("parses the I6 select and inspect subcommands", () => {
+    assert.deepEqual(parseReviewArgs("inspect"), { kind: "inspect" });
+    assert.deepEqual(parseReviewArgs("select all"), { kind: "select", spec: "all" });
+    assert.deepEqual(parseReviewArgs("select none"), { kind: "select", spec: "none" });
+    assert.deepEqual(parseReviewArgs("select 1,3-5"), { kind: "select", spec: "1,3-5" });
+  });
+
+  it("rejects select without exactly one selection", () => {
+    for (const [args, fragment] of [
+      ["select", "needs a selection"],
+      ["select all none", "reads as several"],
+      ["select all extra", "reads as several"],
+    ]) {
+      const result = parseReviewArgs(args);
+      assert.equal(result.kind, "error", args);
+      assert(result.message.includes(fragment), `${args}: ${result.message}`);
+    }
+  });
+
   it("rejects inputs that are not PR-number invocations, naming the input", () => {
-    for (const args of ["inspect", "cancel", "capture 5", "five", "-5", "0", "007", "--capture-only", "--quick"]) {
+    for (const args of ["cancel", "capture 5", "five", "-5", "0", "007", "--capture-only", "--quick"]) {
       const result = parseReviewArgs(args);
       assert.equal(result.kind, "error", args);
       assert(result.message.includes(args), args);
@@ -128,7 +147,9 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     assert(text.includes("--capture-only"), "must name capture as implemented");
     assert(text.includes("tiered lane batch"), "must name the I4 review as implemented");
     assert(text.includes("adjudicator"), "must name the I5 validation/adjudication as implemented");
-    assert(text.includes("I6"), "must name the next increment");
+    assert(text.includes("/z-pr-review select"), "must name the I6 selection as implemented");
+    assert(text.includes("/z-pr-review inspect"), "must name the I6 retained-result inspect as implemented");
+    assert(text.includes("I7"), "must name the next increment");
     assert(!text.includes("Last capture"), "no capture section without a capture");
   });
 
