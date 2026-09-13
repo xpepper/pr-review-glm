@@ -96,7 +96,12 @@ describe("gateZcodeHeadless", () => {
     assert.equal(gate.ok, true);
     assert.match(gate.detail, /execution in the child env exercised/);
     const probe = spawned[0];
-    assert.match(probe, /--prompt Run the shell command `echo \$ZPR_PROBE_TOKEN` using your shell tool/);
+    // Goal-phrased prompt (2026-09-13 diagnostic): prescribing "your shell
+    // tool" anchored shell-less top-level sessions on the missing tool so
+    // they refused instead of delegating — the phrasing must stay
+    // mechanism-neutral about HOW the command runs.
+    assert.match(probe, /--prompt Use a shell to run: echo \$ZPR_PROBE_TOKEN — show me the exact output/);
+    assert.doesNotMatch(probe, /your shell tool/);
     assert.match(probe, new RegExp(`--cwd ${repoRoot} `));
     assert.match(probe, /--mode yolo /);
     assert.match(probe, /--disallowed-tools Bash\(gh pr merge \*\)/);
@@ -121,6 +126,17 @@ describe("gateZcodeHeadless", () => {
     assert.equal(gate.ok, false);
     assert.match(gate.detail, /I don't have a shell tool available/);
     assert.match(gate.detail, /phase TOOLSET/);
+  });
+  it("quotes the session's stdout reply over stderr noise: an AI SDK warning must not mask the refusal (2026-09-13)", async () => {
+    const run = async () => ({
+      code: 0,
+      stdout: "I can't run that: this session has no shell/Bash tool available to me.\n",
+      stderr: 'AI SDK Warning (anthropic.messages / glm-5.3): The feature "cacheControl breakpoint limit" is not supported. Maximum 4 cache breakpoints exceeded (found 5). This breakpoint will be ignored.\n',
+    });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /no shell\/Bash tool available/);
+    assert.doesNotMatch(gate.detail, /AI SDK Warning/);
   });
   it("fails with the CLI's first error line when the probe exits nonzero (flags, config, auth)", async () => {
     const run = async () => ({ code: 1, stdout: "", stderr: "Error: Model config is missing. Create ~/.zcode/cli/config.json ...\n" });
