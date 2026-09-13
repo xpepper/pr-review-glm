@@ -5,8 +5,8 @@
 // anchors. Publication posts ONE COMMENT review whose inline comments are the
 // first ≤50 selected findings whose anchors re-validate against the live
 // `pulls/N/files` hunks; everything else goes to body notes. Draft, closed,
-// and self-author PRs are refused; a moved head degrades to a body-only
-// comment naming both commits; an idempotency marker makes re-runs skip and
+// and self-author PRs are refused; a moved head OR base (since capture)
+// degrades to a body-only comment naming the frozen commits and bases; an idempotency marker makes re-runs skip and
 // lets an uncertain write response be reconciled. The head AND base are
 // re-pinned immediately before the POST, and a cancelled review (its abort
 // signal) never writes. No selected findings means no POST at all.
@@ -58,7 +58,10 @@ export function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
     };
     // Byte counters, not string lengths: `length` counts UTF-16 code units, so
     // multibyte output would silently under-report against a byte budget.
+    // Once the budget is tripped nothing more is retained — SIGKILL is async,
+    // and buffered data events keep firing until close.
     const capped = (stream, chunk) => {
+      if (overflowed) return;
       if (stream === "out") stdout += chunk;
       else stderr += chunk;
       const total = (stream === "out" ? (stdoutBytes += Buffer.byteLength(chunk)) : (stderrBytes += Buffer.byteLength(chunk)));
@@ -102,12 +105,13 @@ export function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
 }
 
 // Model text is flattened and control-characters stripped before it reaches
-// the GitHub payload; `<!--` is defused so finding text can never forge (or
-// shadow) the idempotency marker.
+// the GitHub payload — C0, DEL, AND the C1 range (U+0080–U+009F, whose U+009B
+// is an 8-bit CSI terminals may interpret as ANSI) — and `<!--` is defused so
+// finding text can never forge (or shadow) the idempotency marker.
 function sanitize(text) {
   return String(text ?? "")
     .replace(/\r?\n/g, " ")
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f]/g, "")
     .replaceAll("<!--", "<! --");
 }
 
@@ -164,9 +168,10 @@ function commentBody(finding) {
 
 // Composes the single COMMENT review: header, optional body notes for every
 // finding that did not become an inline comment, the coverage disclosure for
-// non-complete reviews, and the idempotency marker. A stale head disables
-// inline comments entirely — the body names both commits (spec's stale rule).
-export function buildPublication({ capture, review, selected, anchorMap, currentHead, stale }) {
+// non-complete reviews, and the idempotency marker. A stale review (head OR
+// base moved since capture) disables inline comments entirely — the body names
+// both commits and both bases (spec's stale rule, extended to the base).
+export function buildPublication({ capture, review, selected, anchorMap, currentHead, currentBase, stale }) {
   const inline = [];
   const noted = [];
   for (const finding of selected) {
@@ -185,7 +190,7 @@ export function buildPublication({ capture, review, selected, anchorMap, current
   if (stale) {
     lines.push(
       "",
-      `This review ran against head \`${capture.headOid}\`, but the PR head is now \`${currentHead}\` — findings are attached here rather than inline, and both commits are named in this note.`,
+      `This review ran against head \`${capture.headOid}\` on base \`${capture.baseOid}\`; the PR is now at head \`${currentHead}\` on base \`${currentBase}\` — the diff has moved since capture, so findings are attached here rather than inline, and the frozen commits are named in this note.`,
     );
   }
   if (noted.length > 0) {
@@ -237,6 +242,9 @@ async function ghJsonOrThrow(runGh, cwd, args, doingWhat, options = {}) {
 
 // Paginates a list endpoint up to a page cap; more pages than the cap is a
 // fail-closed condition (the anchor map or marker scan would be incomplete).
+// A list of EXACTLY maxPages*pageSize entries is legitimate: every allowed
+// page being full is indistinguishable from an over-cap list without one
+// probe entry beyond the cap.
 async function ghListOrThrow(runGh, cwd, path, { pageSize, maxPages, doingWhat }) {
   const all = [];
   for (let page = 1; page <= maxPages; page += 1) {
@@ -248,6 +256,13 @@ async function ghListOrThrow(runGh, cwd, path, { pageSize, maxPages, doingWhat }
     all.push(...batch);
     if (batch.length < pageSize) return all;
   }
+  const probe = await ghJsonOrThrow(
+    runGh,
+    cwd,
+    ["api", `${path}?per_page=1&page=${maxPages * pageSize + 1}`],
+    doingWhat,
+  );
+  if (Array.isArray(probe) && probe.length === 0) return all;
   throw new PublishError(`${doingWhat}: more than ${maxPages * pageSize} entries; failing closed — nothing was posted.`);
 }
 
@@ -317,31 +332,48 @@ export async function publishReview({
   if (typeof currentBase !== "string" || !/^[0-9a-f]{40}$/.test(currentBase)) {
     throw new PublishError(`PR #${capture.number} has a malformed base sha; failing closed — nothing was posted.`);
   }
-  const stale = currentHead !== capture.headOid;
+  // Staleness is symmetric in head and base: a moved head re-writes the PR,
+  // but so does a base that advanced under an unchanged head — the live diff
+  // shifts and the captured diff (the one findings were validated against) no
+  // longer describes it. Either way the publication degrades to body-only.
+  const staleHead = currentHead !== capture.headOid;
+  const staleBase = currentBase !== capture.baseOid;
+  const stale = staleHead || staleBase;
 
   // Idempotency: a review carrying this exact marker already exists → skip.
+  // The marker text is deterministic, so any PR participant could paste it
+  // into their own review — only the authenticated viewer's reviews can
+  // legitimately carry OUR marker.
   const marker = idempotencyMarker(capture.repo, capture.number, currentHead);
+  const carriesMarker = (r) =>
+    r.user?.login === viewer.login && typeof r.body === "string" && r.body.includes(marker);
   const existingReviews = await ghListOrThrow(runGh, cwd, prPath + "/reviews", {
     pageSize: REVIEWS_PAGE_SIZE,
     maxPages: MAX_REVIEW_PAGES,
     doingWhat: "scanning existing reviews for the idempotency marker",
   });
-  const prior = existingReviews.find((r) => typeof r.body === "string" && r.body.includes(marker));
+  const prior = existingReviews.find(carriesMarker);
   if (prior !== undefined) {
     return { status: "already-published", reviewUrl: prior.html_url ?? null, marker };
   }
 
-  const files = await ghListOrThrow(runGh, cwd, prPath + "/files", {
-    pageSize: FILES_PAGE_SIZE,
-    maxPages: MAX_FILE_PAGES,
-    doingWhat: "fetching the PR's changed files for anchor validation",
-  });
+  // A stale publication never anchors inline, so it must not depend on the
+  // changed-file list at all — a >500-file PR still gets its body-only stale
+  // comment instead of a pagination failure.
+  const files = stale
+    ? []
+    : await ghListOrThrow(runGh, cwd, prPath + "/files", {
+        pageSize: FILES_PAGE_SIZE,
+        maxPages: MAX_FILE_PAGES,
+        doingWhat: "fetching the PR's changed files for anchor validation",
+      });
   const publication = buildPublication({
     capture,
     review,
     selected,
     anchorMap: anchorMapFromFiles(files),
     currentHead,
+    currentBase,
     stale,
   });
   if (publication.body.length > MAX_BODY_CHARS) {
@@ -421,7 +453,7 @@ export async function publishReview({
     maxPages: MAX_REVIEW_PAGES,
     doingWhat: "reconciling an uncertain review POST",
   });
-  const landed = afterReviews.find((r) => typeof r.body === "string" && r.body.includes(marker));
+  const landed = afterReviews.find(carriesMarker);
   if (landed !== undefined) {
     return { status: "published", reviewUrl: landed.html_url ?? null, ...base, reconciled: true };
   }

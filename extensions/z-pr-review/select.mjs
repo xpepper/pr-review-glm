@@ -104,10 +104,12 @@ export function renderSelectResult(capture, selection) {
 }
 
 // Retained finding fields are model-influenced text; rendering flattens
-// newlines AND strips terminal control characters so a finding can never
-// forge inspect lines or emit escape sequences into the chat.
+// newlines AND strips terminal control characters — C0, DEL, and the C1 range
+// (U+0080–U+009F; U+009B is an 8-bit CSI some terminals interpret as ANSI) —
+// so a finding can never forge inspect lines or emit escape sequences into
+// the chat.
 function inspectText(text) {
-  return String(text).replace(/\r?\n/g, " ").replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "");
+  return String(text).replace(/\r?\n/g, " ").replace(/[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f]/g, "");
 }
 
 // Renders the retained settled result. Pure text over the in-session state:

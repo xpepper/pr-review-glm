@@ -19,7 +19,10 @@ import { defaultSelection } from "../extensions/z-pr-review/select.mjs";
 
 const HEAD = "1111111111111111111111111111111111111111";
 const MOVED = "2222222222222222222222222222222222222222";
-const BASE = "4444444444444444444444444444444444444444";
+// The capture's frozen base (capture.baseOid): the live PR default matches it
+// so the happy path is NOT stale-by-base.
+const BASE = "3333333333333333333333333333333333333333";
+const BASE_MOVED = "4444444444444444444444444444444444444444";
 const REBASED = "5555555555555555555555555555555555555555";
 const AUTHOR = "someone";
 const VIEWER = "reviewer";
@@ -34,7 +37,7 @@ const capture = {
   headRefName: "i6",
   headOid: HEAD,
   baseRefName: "main",
-  baseOid: "3333333333333333333333333333333333333333",
+  baseOid: BASE,
   diffBytes: 1000,
   capturedAt: "2026-09-13T00:00:00.000Z",
   capturePath: "/tmp/x",
@@ -139,6 +142,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
       selected: findings,
       anchorMap: anchorMapFromFiles(filesJson),
       currentHead: HEAD,
+      currentBase: BASE,
       stale: false,
     });
     assert.equal(publication.inline.length, 1);
@@ -169,6 +173,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
       selected: many,
       anchorMap: new Map([["a.mjs", [[1, many.length + 1]]]]),
       currentHead: HEAD,
+      currentBase: BASE,
       stale: false,
     });
     assert.equal(publication.inline.length, MAX_INLINE_ANCHORS);
@@ -182,13 +187,41 @@ describe("anchorMapFromFiles and buildPublication", () => {
       selected: findings,
       anchorMap: anchorMapFromFiles(filesJson),
       currentHead: MOVED,
+      currentBase: BASE,
       stale: true,
     });
     assert.equal(publication.inline.length, 0);
     assert(publication.body.includes(HEAD));
     assert(publication.body.includes(MOVED));
+    assert(publication.body.includes(BASE), "the frozen base is named too");
     assert(publication.body.includes("named in this note"));
     assert(publication.body.includes(idempotencyMarker(capture.repo, capture.number, MOVED)));
+  });
+
+  it("strips C1 control characters (8-bit CSI included) from model text", () => {
+    const hostile = [
+      { severity: "P2", title: "csi\u009b[31mred\u009b[0m", file: "a.mjs", line: 2, lane: "x" },
+    ];
+    const publication = buildPublication({
+      capture,
+      review,
+      selected: hostile,
+      anchorMap: anchorMapFromFiles(filesJson),
+      currentHead: HEAD,
+      currentBase: BASE,
+      stale: false,
+    });
+    assert(!publication.inline[0].body.includes("\u009b"));
+    const noted = buildPublication({
+      capture,
+      review,
+      selected: [{ ...hostile[0], file: undefined, line: undefined }],
+      anchorMap: anchorMapFromFiles(filesJson),
+      currentHead: HEAD,
+      currentBase: BASE,
+      stale: false,
+    });
+    assert(!noted.body.includes("\u009b"));
   });
 
   it("flattens model text and defuses comment-marker forgeries", () => {
@@ -201,6 +234,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
       selected: hostile,
       anchorMap: anchorMapFromFiles(filesJson),
       currentHead: HEAD,
+      currentBase: BASE,
       stale: false,
     });
     assert(publication.inline[0].body.includes("<! --"));
@@ -211,6 +245,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
       selected: [{ ...hostile[0], file: undefined, line: undefined }],
       anchorMap: anchorMapFromFiles(filesJson),
       currentHead: HEAD,
+      currentBase: BASE,
       stale: false,
     });
     assert(bodyFinding.body.includes("<! --"));
@@ -230,6 +265,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
       selected: hostile,
       anchorMap: anchorMapFromFiles(filesJson),
       currentHead: HEAD,
+      currentBase: BASE,
       stale: false,
     });
     assert.equal(publication.inline.length, 0);
@@ -245,6 +281,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
       selected: findings,
       anchorMap: anchorMapFromFiles(filesJson),
       currentHead: HEAD,
+      currentBase: BASE,
       stale: false,
     });
     assert(publication.body.includes("Coverage: 1/1 lanes"));
@@ -298,7 +335,7 @@ describe("publishReview gates", () => {
   it("skips the POST when a review carrying the marker already exists", async () => {
     const marker = idempotencyMarker(capture.repo, capture.number, HEAD);
     const { runGh, calls } = fakeGh({
-      reviewsBefore: [{ html_url: "https://github.com/x#review-9", body: `stuff\n${marker}` }],
+      reviewsBefore: [{ user: { login: VIEWER }, html_url: "https://github.com/x#review-9", body: `stuff\n${marker}` }],
     });
     const outcome = await publishReview({ retained: retained(), runGh });
     assert.equal(outcome.status, "already-published");
@@ -306,13 +343,59 @@ describe("publishReview gates", () => {
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0);
   });
 
+  it("does not treat another user's marker-bearing review as its own publication", async () => {
+    const marker = idempotencyMarker(capture.repo, capture.number, HEAD);
+    const { runGh, calls } = fakeGh({
+      reviewsBefore: [{ user: { login: AUTHOR }, html_url: "https://github.com/x#forged", body: `noise\n${marker}` }],
+    });
+    const outcome = await publishReview({ retained: retained(), runGh });
+    assert.equal(outcome.status, "published", "a forged marker in someone else's review must not suppress publication");
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 1);
+  });
+
   it("degrades to a body-only comment naming both commits when the head moved", async () => {
-    const { runGh } = fakeGh({ pr: openPr({ head: { sha: MOVED } }) });
+    const { runGh, calls } = fakeGh({ pr: openPr({ head: { sha: MOVED } }) });
     const outcome = await publishReview({ retained: retained(), runGh });
     assert.equal(outcome.status, "published");
     assert.equal(outcome.stale, true);
     assert.equal(outcome.inlineCount, 0);
     assert.equal(outcome.notedCount, 3);
+    // A stale publication never anchors inline, so it never fetches files —
+    // a >500-file PR must not fail a body-only stale comment.
+    assert.equal(calls.filter((c) => c.args.join(" ").includes("/files")).length, 0);
+  });
+
+  it("degrades to body-only when the base advanced since capture (head unchanged)", async () => {
+    const { runGh, calls } = fakeGh({ pr: openPr({ base: { sha: BASE_MOVED } }) });
+    const outcome = await publishReview({ retained: retained(), runGh });
+    assert.equal(outcome.status, "published");
+    assert.equal(outcome.stale, true);
+    assert.equal(outcome.inlineCount, 0, "findings validated against the captured diff must not anchor on the re-based live diff");
+    assert.equal(outcome.notedCount, 3);
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 1);
+  });
+
+  it("accepts lists of exactly the entry cap and refuses only beyond it", async () => {
+    const fullPage = Array.from({ length: 100 }, (_, index) => ({ filename: `f${index}.mjs` }));
+    const pageAware = (probeResult) => async (args) => {
+      const joined = args.join(" ");
+      if (args.includes("POST")) return ghReply({ html_url: "https://github.com/x#pullrequestreview-cap" });
+      if (joined.includes("api user")) return ghReply({ login: VIEWER });
+      if (joined.includes("/reviews")) return ghReply([]);
+      if (joined.includes("/files")) {
+        const page = Number(/[?&]page=(\d+)/.exec(joined)[1]);
+        const perPage = Number(/[?&]per_page=(\d+)/.exec(joined)[1]);
+        if (perPage === 1) return ghReply(probeResult); // the beyond-cap probe
+        return ghReply(page <= 5 ? fullPage : []);
+      }
+      return ghReply(openPr());
+    };
+    const exactlyAtCap = await publishReview({ retained: retained(), runGh: pageAware([]) });
+    assert.equal(exactlyAtCap.status, "published", "exactly 500 changed files is at the cap, not over it");
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh: pageAware([{}]) }),
+      (error) => error instanceof PublishError && error.message.includes("more than 500"),
+    );
   });
 
   it("fails closed when the head moves between gates and the POST", async () => {
@@ -451,7 +534,7 @@ describe("publishReview gates", () => {
     const marker = idempotencyMarker(capture.repo, capture.number, HEAD);
     const { runGh } = fakeGh({
       post: { code: 1, stdout: "", stderr: "gh: server error (HTTP 502)", timedOut: false },
-      reviewsAfter: [{ html_url: "https://github.com/x#review-10", body: marker }],
+      reviewsAfter: [{ user: { login: VIEWER }, html_url: "https://github.com/x#review-10", body: marker }],
     });
     const outcome = await publishReview({ retained: retained(), runGh });
     assert.equal(outcome.status, "published");

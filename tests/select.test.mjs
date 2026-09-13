@@ -162,11 +162,12 @@ describe("renderInspect (retained settled result, no inference)", () => {
 
   it("strips terminal control sequences from retained finding fields", () => {
     const r = review();
-    r.findings = [{ severity: "P2", title: "esc\u001b[31m red \u0007 bell", lane: "overview" }];
+    r.findings = [{ severity: "P2", title: "esc\u001b[31m red \u0007 bell c1\u009b[2J", lane: "overview" }];
     const text = renderInspect({ capture, review: r, selection: selectionFromSpec("1", r.findings) });
     assert(!text.includes("\u001b"), "escape sequences must not reach the chat");
     assert(!text.includes("\u0007"), "control characters must not reach the chat");
-    assert(text.includes("[P2] esc[31m red  bell"));
+    assert(!text.includes("\u009b"), "C1 controls (8-bit CSI) must not reach the chat");
+    assert(text.includes("[P2] esc[31m red  bell c1[2J"));
   });
 
   it("discloses when the retained review predates the session's last capture", () => {

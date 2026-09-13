@@ -240,6 +240,20 @@ async function runReview(parsed) {
       })),
     };
     await session.log(renderReview(outcome.summary, decorated));
+    // One review is one selection surface (I6): replacing the retained review
+    // discards its selection. When the outgoing selection was settled
+    // explicitly via `select` — especially `select none`, a publication
+    // posture — say so instead of silently starting from the default all.
+    if (
+      retainedReview !== null &&
+      retainedReview.capture.repo === outcome.summary.repo &&
+      retainedReview.capture.number === outcome.summary.number &&
+      retainedReview.selection.via === "select"
+    ) {
+      await session.log(
+        `Replacing the retained review for PR #${outcome.summary.number}: its select-settled selection (${retainedReview.selection.count} of ${retainedReview.selection.total} findings) is discarded — a new review starts from the default all-selection. Re-settle with /z-pr-review select before or after any publication.`,
+      );
+    }
     // I6: retain the settled-in-progress result. The default selection keeps
     // every validated finding; --all settles that default at review time.
     // Even a partial/degraded review is retained — its findings were still
