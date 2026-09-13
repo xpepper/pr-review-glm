@@ -179,15 +179,37 @@ export async function runPreflightGates({ run, repoRoot, zcode, env, log = () =>
   return results;
 }
 
-export async function gateIncrementPr({ run, repoRoot }) {
+// The assessment requirement is the spec's "exactly one open PR for the
+// increment branch", not exactly one open PR repo-wide: legitimate stacked
+// loop-side fix PRs exist (2026-09-13: #38 fix-loop-smoke-retry stacked on #37
+// i7-gated-comment-publication made the global count 2 and stranded the
+// iteration). Selection is by the increment's documented branch prefix
+// (`i<N>-`, AGENTS.md) — the same signature resume trusts — and other open PRs
+// are disclosed, never silently ignored.
+export function selectIncrementPr(open, increment) {
+  const label = String(increment ?? "");
+  const prefix = `${label.toLowerCase()}-`;
+  const matches = open.filter((p) => typeof p?.headRefName === "string" && p.headRefName.toLowerCase().startsWith(prefix));
+  const others = open.filter((p) => !matches.includes(p));
+  if (matches.length !== 1) {
+    const otherNote = others.length ? `; ${others.length} other open PR(s) present: ${others.map((p) => `#${p.number} (${p.headRefName})`).join(", ")}` : "";
+    return { ok: false, detail: `expected exactly one open PR for ${label || "the increment"} (branch ${prefix}<slug>), found ${matches.length}${otherNote}` };
+  }
+  return { ok: true, pr: matches[0], others };
+}
+
+export async function gateIncrementPr({ run, repoRoot, increment }) {
   const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid"], { cwd: repoRoot });
   let open = [];
   try { open = JSON.parse(prs.stdout || "[]"); } catch { /* handled below */ }
-  if (prs.code !== 0 || open.length !== 1) {
-    return bad("increment-pr", `expected exactly one open PR, found ${open.length}${prs.code !== 0 ? ` (gh exit ${prs.code})` : ""}`);
+  if (prs.code !== 0) {
+    return bad("increment-pr", `gh pr list failed (exit ${prs.code})`);
   }
-  const [pr] = open;
-  return { name: "increment-pr", ok: true, detail: `PR #${pr.number} (${pr.headRefName})`, prNumber: pr.number, headRefName: pr.headRefName, headRefOid: pr.headRefOid };
+  const selected = selectIncrementPr(open, increment);
+  if (!selected.ok) return bad("increment-pr", selected.detail);
+  const { pr, others } = selected;
+  const detail = `PR #${pr.number} (${pr.headRefName})${others.length ? ` — ${others.length} other open PR(s) ignored: ${others.map((p) => `#${p.number} (${p.headRefName})`).join(", ")}` : ""}`;
+  return { name: "increment-pr", ok: true, detail, prNumber: pr.number, headRefName: pr.headRefName, headRefOid: pr.headRefOid };
 }
 
 // Mergeability is checked at assessment time, not discovered at merge time: a

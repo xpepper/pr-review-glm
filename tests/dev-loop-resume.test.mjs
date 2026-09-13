@@ -63,6 +63,17 @@ describe("findResumablePr", () => {
       prNumber: 18, headRefName: "i4-topologies-tiers",
     });
   });
+  it("adopts the increment's PR even with a stacked non-increment PR open (#38 on #37, 2026-09-13)", async () => {
+    const run = fakeRun({
+      ...adoptable,
+      "gh pr list --state open --json number,headRefName": {
+        code: 0, stdout: '[{"number":19,"headRefName":"v1-semver"},{"number":18,"headRefName":"i4-topologies-tiers"}]', stderr: "",
+      },
+    });
+    assert.deepEqual(await findResumablePr({ run, repoRoot, increment: "I4" }), {
+      prNumber: 18, headRefName: "i4-topologies-tiers",
+    });
+  });
   it("returns null for any ambiguous or unsuitable state", async () => {
     const cases = [
       fakeRun({ ...adoptable, "git rev-parse --abbrev-ref HEAD": { code: 0, stdout: "i4-topologies-tiers\n", stderr: "" } }),
@@ -75,7 +86,7 @@ describe("findResumablePr", () => {
       fakeRun({
         ...adoptable,
         "gh pr list --state open --json number,headRefName": {
-          code: 0, stdout: '[{"number":19,"headRefName":"v1-semver"},{"number":20,"headRefName":"i4-x"}]', stderr: "",
+          code: 0, stdout: '[{"number":19,"headRefName":"i4-a"},{"number":20,"headRefName":"i4-b"}]', stderr: "",
         },
       }),
     ];

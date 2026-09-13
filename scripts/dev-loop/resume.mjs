@@ -34,10 +34,12 @@ export async function recoverCheckout({ run, repoRoot }) {
 }
 
 // The checkpoint is adoptable only when it is unambiguous: checkout on a clean
-// synced main, exactly one open PR, and that PR's branch carrying the
-// increment's documented prefix. Any other state returns null — the normal path
-// then either runs a fresh iteration (idle repo) or fails a preflight gate
-// loudly instead of resuming something half-identified.
+// synced main, exactly one open PR for the increment (branch carrying the
+// increment's documented `i<N>-` prefix — other open PRs, e.g. a stacked
+// loop-side fix like #38 on #37, 2026-09-13, don't block adoption). Any other
+// state returns null — the normal path then either runs a fresh iteration
+// (idle repo) or fails a preflight gate loudly instead of resuming something
+// half-identified.
 export async function findResumablePr({ run, repoRoot, increment }) {
   const branch = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: repoRoot });
   if (branch.code !== 0 || branch.stdout.trim() !== "main") return null;
@@ -52,9 +54,9 @@ export async function findResumablePr({ run, repoRoot, increment }) {
   if (prs.code !== 0) return null;
   let open = [];
   try { open = JSON.parse(prs.stdout || "[]"); } catch { return null; }
-  if (open.length !== 1) return null;
-  const [pr] = open;
-  if (typeof pr.headRefName !== "string" || typeof pr.number !== "number") return null;
-  if (!pr.headRefName.toLowerCase().startsWith(`${increment.toLowerCase()}-`)) return null;
+  const prefix = `${increment.toLowerCase()}-`;
+  const matches = open.filter((pr) => typeof pr?.headRefName === "string" && typeof pr?.number === "number" && pr.headRefName.toLowerCase().startsWith(prefix));
+  if (matches.length !== 1) return null;
+  const [pr] = matches;
   return { prNumber: pr.number, headRefName: pr.headRefName };
 }
