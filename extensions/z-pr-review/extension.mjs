@@ -12,10 +12,12 @@ import { ConfigError, ConfigStore } from "./config.mjs";
 import { runLaneBatch } from "./batch.mjs";
 import { assembleReview } from "./adjudicate.mjs";
 import { drainUnconfirmedStops } from "./lane.mjs";
+import { publishReview, PublishError, renderPublishResult } from "./publish.mjs";
 import { describeLanes } from "./topologies.mjs";
 import { resolveMode } from "./roles.mjs";
 import {
   defaultSelection,
+  publicationTarget,
   renderInspect,
   renderSelectResult,
   selectionFromFlag,
@@ -64,7 +66,7 @@ const session = await joinSession({
           await session.log(
             retainedReview === null
               ? "No retained review in this session — run /z-pr-review <PR number> first. Inspect needs no model calls and no GitHub access."
-              : renderInspect(retainedReview),
+              : renderInspect(retainedReview, lastCapture),
           );
           return;
         }
@@ -158,13 +160,12 @@ async function runSelect(parsed) {
 // defaultMode; flags for later increments are rejected up front with a pointer,
 // never silently ignored. I6: the assembled review is retained in-session with
 // a selection over its findings (default: all; --all settles it up front).
-// Publication cannot run before I7, so --no-comment is the only posture that
-// exists today.
+// I7: when publication is authorized (--comment, or config autoPostReviews
+// without an explicit --no-comment), the settled selection posts as ONE gated
+// COMMENT review after the report renders. Authority is captured here, before
+// capture/lanes run, and is code-owned end to end.
 async function runReview(parsed) {
   const { flags, number } = parsed;
-  if (flags.comment === true) {
-    throw new Error('"--comment" is COMMENT publication, which arrives with increment I7.');
-  }
   const controller = new AbortController();
   const review = { controller, done: Promise.resolve() };
   activeReviews.add(review);
@@ -172,6 +173,17 @@ async function runReview(parsed) {
   try {
     await store.load();
     const config = store.get();
+    // Publication authority (I7): --comment or --no-comment are explicit;
+    // absent a flag, config autoPostReviews decides. Captured before lanes
+    // start so no later state can grant a write the invocation didn't ask for.
+    const publishAuthority =
+      flags.comment === true
+        ? "--comment"
+        : flags.comment === false
+          ? null
+          : config.autoPostReviews === true
+            ? "autoPostReviews"
+            : null;
     const mode = flags.mode ?? config.defaultMode;
     const outcome = await capturePullRequest({
       number,
@@ -229,6 +241,24 @@ async function runReview(parsed) {
       })),
     };
     await session.log(renderReview(outcome.summary, decorated));
+    // The outgoing retained result for THIS PR, if any — captured before the
+    // replacement below so an authorized publication can honor its settled
+    // selection (publicationTarget) instead of silently discarding it.
+    const outgoing =
+      retainedReview !== null &&
+      retainedReview.capture.repo === outcome.summary.repo &&
+      retainedReview.capture.number === outcome.summary.number
+        ? retainedReview
+        : null;
+    // One review is one selection surface (I6): replacing the retained review
+    // resets its selection. When the outgoing selection was settled explicitly
+    // via `select` — especially `select none`, a publication posture — say so
+    // instead of silently starting from the default all.
+    if (outgoing !== null && outgoing.selection.via === "select") {
+      await session.log(
+        `Replacing the retained review for PR #${outcome.summary.number}: its select-settled selection (${outgoing.selection.count} of ${outgoing.selection.total} findings) no longer covers the new findings — the new review starts from the default all-selection. Re-settle with /z-pr-review select after this run.`,
+      );
+    }
     // I6: retain the settled-in-progress result. The default selection keeps
     // every validated finding; --all settles that default at review time.
     // Even a partial/degraded review is retained — its findings were still
@@ -244,6 +274,22 @@ async function runReview(parsed) {
     if (flags.all) {
       await session.log(renderSelectResult(outcome.summary, retainedReview.selection));
     }
+    if (publishAuthority !== null) {
+      // A settled selection is never silently discarded by a re-review: when
+      // the outgoing retained result for this PR carries a select-settled
+      // selection (and this run did not explicitly settle --all), publication
+      // posts THAT settled result — publication re-validates it against the
+      // live PR and degrades to body-only if the head or base moved since.
+      const target = publicationTarget(outgoing, retainedReview, flags.all === true);
+      if (target === outgoing) {
+        await session.log(
+          `Publication uses the select-settled selection for PR #${outcome.summary.number} (${outgoing.selection.count} of ${outgoing.selection.total} findings from the retained review at head ${outgoing.capture.headOid.slice(0, 7)}) — not this run's default. Pass --all to publish the new review's findings instead.`,
+        );
+      }
+      // The review's controller rides along: a cancelled review (session end)
+      // must not reach the POST even if it reached publication.
+      await runPublication(target, controller.signal);
+    }
   } catch (error) {
     if (error instanceof CaptureError) {
       await session.log(`Capture refused — nothing was written: ${error.message}`, { level: "error" });
@@ -252,6 +298,42 @@ async function runReview(parsed) {
     throw error;
   } finally {
     activeReviews.delete(review);
+  }
+}
+
+// I7: publish the retained review's settled selection as one gated COMMENT
+// review (the invocation's authority was already settled in runReview — this
+// path only runs when publication was authorized). The review's abort signal
+// is threaded through so a cancelled review cannot write. Writes to the same
+// repo#PR are serialized in-process (the spec's per-target write
+// serialization) — a second publication waits for the first to settle instead
+// of racing its gates and marker scan. A settled lock deletes itself when it
+// is still the tail entry, so the map holds only in-flight publications, not
+// one retained promise per PR ever seen.
+const publicationLocks = new Map();
+
+async function runPublication(retained, signal) {
+  const { capture } = retained;
+  const key = `${capture.repo}#${capture.number}`;
+  const prior = publicationLocks.get(key) ?? Promise.resolve();
+  const run = prior.then(
+    () => publishReview({ retained, signal }),
+    () => publishReview({ retained, signal }),
+  );
+  const tail = run.catch(() => {});
+  publicationLocks.set(key, tail);
+  tail.then(() => {
+    if (publicationLocks.get(key) === tail) publicationLocks.delete(key);
+  });
+  try {
+    const outcome = await run;
+    await session.log(renderPublishResult(capture, outcome));
+  } catch (error) {
+    if (error instanceof PublishError) {
+      await session.log(`Publication refused — nothing was posted: ${error.message}`, { level: "error" });
+      return;
+    }
+    throw error;
   }
 }
 

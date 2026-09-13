@@ -54,12 +54,24 @@ describe("findResumablePr", () => {
   const adoptable = {
     "git rev-parse --abbrev-ref HEAD": { code: 0, stdout: "main\n", stderr: "" },
     "git rev-parse main origin/main": { code: 0, stdout: "sha-a\nsha-a\n", stderr: "" },
-    "gh pr list --state open --json number,headRefName": {
-      code: 0, stdout: '[{"number":18,"headRefName":"i4-topologies-tiers"}]', stderr: "",
+    "gh pr list --state open --json number,headRefName,author": {
+      code: 0, stdout: '[{"number":18,"headRefName":"i4-topologies-tiers","author":{"login":"xpepper"}}]', stderr: "",
     },
+    "gh api user --jq .login": { code: 0, stdout: "xpepper\n", stderr: "" },
   };
   it("adopts the single open PR whose branch carries the increment prefix", async () => {
     assert.deepEqual(await findResumablePr({ run: fakeRun(adoptable), repoRoot, increment: "I4" }), {
+      prNumber: 18, headRefName: "i4-topologies-tiers",
+    });
+  });
+  it("adopts the increment's PR even with a stacked non-increment PR open (#38 on #37, 2026-09-13)", async () => {
+    const run = fakeRun({
+      ...adoptable,
+      "gh pr list --state open --json number,headRefName,author": {
+        code: 0, stdout: '[{"number":19,"headRefName":"v1-semver"},{"number":18,"headRefName":"i4-topologies-tiers","author":{"login":"xpepper"}}]', stderr: "",
+      },
+    });
+    assert.deepEqual(await findResumablePr({ run, repoRoot, increment: "I4" }), {
       prNumber: 18, headRefName: "i4-topologies-tiers",
     });
   });
@@ -69,14 +81,24 @@ describe("findResumablePr", () => {
       fakeRun({ ...adoptable, "git status --porcelain": { code: 0, stdout: " M file\n", stderr: "" } }),
       fakeRun({ ...adoptable, "git fetch --quiet origin": { code: 1, stdout: "", stderr: "network" } }),
       fakeRun({ ...adoptable, "git rev-parse main origin/main": { code: 0, stdout: "aaa\nbbb\n", stderr: "" } }),
-      fakeRun({ ...adoptable, "gh pr list --state open --json number,headRefName": { code: 1, stdout: "", stderr: "gh down" } }),
-      fakeRun({ ...adoptable, "gh pr list --state open --json number,headRefName": { code: 0, stdout: "[]", stderr: "" } }),
-      fakeRun({ ...adoptable, "gh pr list --state open --json number,headRefName": { code: 0, stdout: "not json", stderr: "" } }),
+      fakeRun({ ...adoptable, "gh pr list --state open --json number,headRefName,author": { code: 1, stdout: "", stderr: "gh down" } }),
+      fakeRun({ ...adoptable, "gh pr list --state open --json number,headRefName,author": { code: 0, stdout: "[]", stderr: "" } }),
+      fakeRun({ ...adoptable, "gh pr list --state open --json number,headRefName,author": { code: 0, stdout: "not json", stderr: "" } }),
       fakeRun({
         ...adoptable,
-        "gh pr list --state open --json number,headRefName": {
-          code: 0, stdout: '[{"number":19,"headRefName":"v1-semver"},{"number":20,"headRefName":"i4-x"}]', stderr: "",
+        "gh pr list --state open --json number,headRefName,author": {
+          code: 0, stdout: '[{"number":19,"headRefName":"i4-a"},{"number":20,"headRefName":"i4-b"}]', stderr: "",
         },
+      }),
+      fakeRun({
+        ...adoptable,
+        "gh pr list --state open --json number,headRefName,author": {
+          code: 0, stdout: '[{"number":18,"headRefName":"i4-topologies-tiers","author":{"login":"someone-else"}}]', stderr: "",
+        },
+      }),
+      fakeRun({
+        ...adoptable,
+        "gh api user --jq .login": { code: 1, stdout: "", stderr: "auth down" },
       }),
     ];
     for (const run of cases) {
@@ -86,8 +108,8 @@ describe("findResumablePr", () => {
   it("returns null when the only open PR is another increment's (prefix mismatch)", async () => {
     const run = fakeRun({
       ...adoptable,
-      "gh pr list --state open --json number,headRefName": {
-        code: 0, stdout: '[{"number":19,"headRefName":"v1-semver"}]', stderr: "",
+      "gh pr list --state open --json number,headRefName,author": {
+        code: 0, stdout: '[{"number":19,"headRefName":"v1-semver","author":{"login":"xpepper"}}]', stderr: "",
       },
     });
     assert.equal(await findResumablePr({ run, repoRoot, increment: "I4" }), null);

@@ -251,22 +251,69 @@ describe("gateBranchHead", () => {
 });
 
 describe("gateIncrementPr", () => {
-  it("requires exactly one open PR and surfaces its number, branch, and reviewed head", async () => {
+  it("requires exactly one open PR for the increment and surfaces its number, branch, and reviewed head", async () => {
     const seen = [];
     const run = async (command, args) => {
       seen.push(args.join(" "));
-      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}"}]`, stderr: "" };
+      if (args.join(" ").includes("api user")) return { code: 0, stdout: "xpepper\n", stderr: "" };
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}","author":{"login":"xpepper"}}]`, stderr: "" };
     };
-    const one = await gateIncrementPr({ run, repoRoot });
+    const one = await gateIncrementPr({ run, repoRoot, increment: "I3" });
     assert.equal(one.ok, true);
     assert.equal(one.prNumber, 7);
     assert.equal(one.headRefName, "i3-lanes");
     assert.equal(one.headRefOid, "a".repeat(40));
     // The head pin (L2) depends on gh returning headRefOid, so the field must be requested.
     assert.match(seen[0], /--json number,headRefName,url,headRefOid/);
-    for (const stdout of ["[]", '[{"number":1,"headRefName":"a"},{"number":2,"headRefName":"b"}]']) {
-      assert.equal((await gateIncrementPr({ run: runOk(stdout), repoRoot })).ok, false);
+    // The selection is bound to the authenticated viewer before it can feed the pin/merge.
+    assert.equal(seen.some((c) => c.includes("api user")), true);
+  });
+  it("refuses a matching increment PR opened by someone other than the viewer", async () => {
+    const run = async (command, args) => {
+      if (args.join(" ").includes("api user")) return { code: 0, stdout: "xpepper\n", stderr: "" };
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}","author":{"login":"someone-else"}}]`, stderr: "" };
+    };
+    const gate = await gateIncrementPr({ run, repoRoot, increment: "I3" });
+    assert.equal(gate.ok, false);
+    assert.equal(gate.name, "increment-pr");
+    assert.match(gate.detail, /someone-else.*not the authenticated viewer xpepper/);
+  });
+  it("fails closed when the viewer cannot be established", async () => {
+    const run = async (command, args) => {
+      if (args.join(" ").includes("api user")) return { code: 1, stdout: "", stderr: "auth down" };
+      return { code: 0, stdout: `[{"number":7,"headRefName":"i3-lanes","headRefOid":"${"a".repeat(40)}","author":{"login":"xpepper"}}]`, stderr: "" };
+    };
+    const gate = await gateIncrementPr({ run, repoRoot, increment: "I3" });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /could not establish the authenticated viewer/);
+  });
+  it("tolerates stacked non-increment PRs, disclosing them (PR #38 on #37, 2026-09-13)", async () => {
+    const stacked = `[{"number":37,"headRefName":"i7-gated-comment-publication","headRefOid":"${"b".repeat(40)}","author":{"login":"xpepper"}},{"number":38,"headRefName":"fix-loop-smoke-retry","headRefOid":"${"c".repeat(40)}"}]`;
+    const gate = await gateIncrementPr({
+      run: async (command, args) =>
+        args.join(" ").includes("api user")
+          ? { code: 0, stdout: "xpepper\n", stderr: "" }
+          : { code: 0, stdout: stacked, stderr: "" },
+      repoRoot, increment: "I7",
+    });
+    assert.equal(gate.ok, true);
+    assert.equal(gate.prNumber, 37);
+    assert.equal(gate.headRefName, "i7-gated-comment-publication");
+    assert.match(gate.detail, /#38 \(fix-loop-smoke-retry\)/);
+  });
+  it("fails on zero or ambiguous increment PRs, other increments' PRs, and gh failure", async () => {
+    for (const stdout of [
+      "[]",
+      '[{"number":1,"headRefName":"i3-a"},{"number":2,"headRefName":"i3-b"}]',
+      '[{"number":9,"headRefName":"v1-semver"},{"number":10,"headRefName":"l2-auto"}]',
+    ]) {
+      const gate = await gateIncrementPr({ run: runOk(stdout), repoRoot, increment: "I3" });
+      assert.equal(gate.ok, false, stdout);
+      assert.equal(gate.name, "increment-pr");
+      assert.match(gate.detail, /expected exactly one open PR for I3/);
     }
+    const ghFail = async () => ({ code: 1, stdout: "", stderr: "gh down" });
+    assert.equal((await gateIncrementPr({ run: ghFail, repoRoot, increment: "I3" })).ok, false);
   });
 });
 

@@ -9,7 +9,7 @@
 //
 // Usage:
 //   node tests/smoke-i3.mjs
-// Env: SMOKE_PR_NUMBER (default: this repo's single open PR; with no open PR
+// Env: SMOKE_PR_NUMBER (default: this repo's open increment PR; with no such PR
 //      the scenario is SKIPPED — capture needs a live PR, and preflight on
 //      idle main must not fail the gate),
 //      COPILOT_CLI_PATH / COPILOT_SDK_PATH (see smoke-harness.mjs).
@@ -23,14 +23,20 @@ import { runCommand, startPluginSession, stopClient, waitForCommands } from "./s
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
+// Default target: the increment PR (branch i<N>-<slug>, the same convention the
+// loop's gates select by). A stacked loop-side fix PR may also be open
+// (2026-09-13: #38 fix-loop-smoke-retry beside #37) — those don't match the
+// prefix and are ignored; SMOKE_PR_NUMBER forces any PR explicitly.
+const INCREMENT_BRANCH = /^[ilvc]\d+-/i;
 function resolvePrNumber() {
   if (process.env.SMOKE_PR_NUMBER) return Number(process.env.SMOKE_PR_NUMBER);
   const open = JSON.parse(
-    execFileSync("gh", ["pr", "list", "--state", "open", "--json", "number"], { cwd: repoRoot, encoding: "utf8" }) || "[]",
+    execFileSync("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName"], { cwd: repoRoot, encoding: "utf8" }) || "[]",
   );
-  if (open.length === 0) return null;
-  assert.equal(open.length, 1, `expected at most one open PR for the default scenario, found: ${open.map((p) => p.number).join(", ")}`);
-  return open[0].number;
+  const increments = open.filter((p) => typeof p.headRefName === "string" && INCREMENT_BRANCH.test(p.headRefName));
+  if (increments.length === 0) return null;
+  assert.equal(increments.length, 1, `expected at most one open increment PR for the default scenario, found: ${increments.map((p) => `${p.number} (${p.headRefName})`).join(", ")}`);
+  return increments[0].number;
 }
 
 const prNumber = resolvePrNumber();

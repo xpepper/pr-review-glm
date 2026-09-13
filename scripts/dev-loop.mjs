@@ -9,7 +9,7 @@ import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { buildPhaseEnv, PHASE_LIMITS, buildZcodeArgs, persistPhaseOutput, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
   gateBranchHead, gateDocsUpdated, gateMainGreen,
-  gateSmokes, gateTests, isFullOid, mergeabilityGate, reportGates, runPreflightGates,
+  gateSmokes, gateTests, isFullOid, mergeabilityGate, reportGates, runPreflightGates, selectIncrementPr, verifyIncrementPrOwnedByViewer,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
@@ -199,26 +199,42 @@ async function runMain(options, { zcode, phaseEnv }) {
       })();
     },
     workerGates: async () => {
-      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid,mergeable"], { cwd: repoRoot });
+      const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid,mergeable,author"], { cwd: repoRoot });
       let open = [];
       try { open = JSON.parse(prs.stdout || "[]"); } catch { /* gate below reports */ }
       const results = [];
       let prNumber = null;
       let headRefOid = null;
-      if (prs.code === 0 && open.length === 1) {
-        prNumber = open[0].number;
-        headRefOid = open[0].headRefOid ?? null;
+      // Exactly one open PR FOR THIS INCREMENT (branch i<N>-<slug>), not
+      // repo-wide: a stacked loop-side fix PR (2026-09-13: #38 on top of #37)
+      // must not strand assessment — other open PRs are disclosed, not fatal.
+      const selected = prs.code === 0 ? selectIncrementPr(open, workedIncrement) : { ok: false, detail: `gh pr list failed (exit ${prs.code})` };
+      if (selected.ok) {
+        const pr = selected.pr;
+        prNumber = pr.number;
+        headRefOid = pr.headRefOid ?? null;
+        // The PR that feeds this iteration's head pin and merge must be the
+        // viewer's own — a matching branch name is not provenance.
+        const owned = await verifyIncrementPrOwnedByViewer({ run, repoRoot, pr });
+        const ownedGate = owned.ok
+          ? { name: "increment-pr-owned", ok: true, detail: owned.detail }
+          : { name: "increment-pr-owned", ok: false, detail: owned.detail };
+        logGate(ownedGate);
+        if (!ownedGate.ok) return { results: [ownedGate], prNumber, headRefOid };
+        if (selected.others.length) {
+          log(`[dev-loop] note: ignoring ${selected.others.length} other open PR(s): ${selected.others.map((p) => `#${p.number} (${p.headRefName})`).join(", ")}`);
+        }
         // Cheapest check first: a CONFLICTING PR can never merge, so it fails
         // before any local gate or review burns a cycle on it (the I4 landing
         // learned this the expensive way, at `gh pr merge` time).
-        const mergeable = logGate(mergeabilityGate(open[0]));
+        const mergeable = logGate(mergeabilityGate(pr));
         if (!mergeable.ok) return { results: [mergeable], prNumber, headRefOid };
         results.push(mergeable);
         // The worker may leave the checkout anywhere; gates and the reviewer must
         // see the exact PR head, so establish it before anything runs (zero-trust:
         // never assume the worker left it there or that it matches the remote
         // head the pin records).
-        const branchHead = logGate(await gateBranchHead({ run, repoRoot, headRefName: open[0].headRefName, headRefOid }));
+        const branchHead = logGate(await gateBranchHead({ run, repoRoot, headRefName: pr.headRefName, headRefOid }));
         if (!branchHead.ok) return { results: [branchHead], prNumber, headRefOid };
         results.push(branchHead);
         results.push(logGate(await gateTests({ run, repoRoot })));
@@ -229,7 +245,7 @@ async function runMain(options, { zcode, phaseEnv }) {
         results.push(logGate(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] })));
         results.push(logGate(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement })));
       } else {
-        results.push(logGate({ name: "increment-pr", ok: false, detail: `expected exactly one open PR, found ${open.length}` }));
+        results.push(logGate({ name: "increment-pr", ok: false, detail: selected.detail }));
       }
       return { results, prNumber, headRefOid };
     },

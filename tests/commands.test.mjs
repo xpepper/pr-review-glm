@@ -149,7 +149,8 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     assert(text.includes("adjudicator"), "must name the I5 validation/adjudication as implemented");
     assert(text.includes("/z-pr-review select"), "must name the I6 selection as implemented");
     assert(text.includes("/z-pr-review inspect"), "must name the I6 retained-result inspect as implemented");
-    assert(text.includes("I7"), "must name the next increment");
+    assert(text.includes("--comment"), "must name the I7 gated publication as implemented");
+    assert(text.includes("I8"), "must name the next increment");
     assert(!text.includes("Last capture"), "no capture section without a capture");
   });
 

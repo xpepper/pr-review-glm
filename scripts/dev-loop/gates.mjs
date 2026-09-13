@@ -179,15 +179,59 @@ export async function runPreflightGates({ run, repoRoot, zcode, env, log = () =>
   return results;
 }
 
-export async function gateIncrementPr({ run, repoRoot }) {
-  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid"], { cwd: repoRoot });
+// The assessment requirement is the spec's "exactly one open PR for the
+// increment branch", not exactly one open PR repo-wide: legitimate stacked
+// loop-side fix PRs exist (2026-09-13: #38 fix-loop-smoke-retry stacked on #37
+// i7-gated-comment-publication made the global count 2 and stranded the
+// iteration). Selection is by the increment's documented branch prefix
+// (`i<N>-`, AGENTS.md) — the same signature resume trusts — and other open PRs
+// are disclosed, never silently ignored.
+export function selectIncrementPr(open, increment) {
+  const label = String(increment ?? "");
+  const prefix = `${label.toLowerCase()}-`;
+  const matches = open.filter((p) => typeof p?.headRefName === "string" && p.headRefName.toLowerCase().startsWith(prefix));
+  const others = open.filter((p) => !matches.includes(p));
+  if (matches.length !== 1) {
+    const otherNote = others.length ? `; ${others.length} other open PR(s) present: ${others.map((p) => `#${p.number} (${p.headRefName})`).join(", ")}` : "";
+    return { ok: false, detail: `expected exactly one open PR for ${label || "the increment"} (branch ${prefix}<slug>), found ${matches.length}${otherNote}` };
+  }
+  return { ok: true, pr: matches[0], others };
+}
+
+export async function gateIncrementPr({ run, repoRoot, increment }) {
+  const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid,author"], { cwd: repoRoot });
   let open = [];
   try { open = JSON.parse(prs.stdout || "[]"); } catch { /* handled below */ }
-  if (prs.code !== 0 || open.length !== 1) {
-    return bad("increment-pr", `expected exactly one open PR, found ${open.length}${prs.code !== 0 ? ` (gh exit ${prs.code})` : ""}`);
+  if (prs.code !== 0) {
+    return bad("increment-pr", `gh pr list failed (exit ${prs.code})`);
   }
-  const [pr] = open;
-  return { name: "increment-pr", ok: true, detail: `PR #${pr.number} (${pr.headRefName})`, prNumber: pr.number, headRefName: pr.headRefName, headRefOid: pr.headRefOid };
+  const selected = selectIncrementPr(open, increment);
+  if (!selected.ok) return bad("increment-pr", selected.detail);
+  const { pr, others } = selected;
+  const owned = await verifyIncrementPrOwnedByViewer({ run, repoRoot, pr });
+  if (!owned.ok) return bad("increment-pr", owned.detail);
+  const detail = `PR #${pr.number} (${pr.headRefName})${others.length ? ` — ${others.length} other open PR(s) ignored: ${others.map((p) => `#${p.number} (${p.headRefName})`).join(", ")}` : ""}`;
+  return { name: "increment-pr", ok: true, detail, prNumber: pr.number, headRefName: pr.headRefName, headRefOid: pr.headRefOid };
+}
+
+// The selected increment PR feeds the head pin and the loop's auto-merge:
+// a branch NAME is not provenance. Any push-access account (or a fork
+// contributor naming their branch i<N>-…) could otherwise ride the loop's
+// merge authority past the repo's human-review protection. The loop assesses
+// and merges only the authenticated viewer's own PRs — the same
+// viewer-ownership posture as the plugin's publish marker scan.
+export async function verifyIncrementPrOwnedByViewer({ run, repoRoot, pr }) {
+  const who = await run("gh", ["api", "user", "--jq", ".login"], { cwd: repoRoot });
+  const viewer = who.code === 0 ? String(who.stdout ?? "").trim() : "";
+  if (!viewer) {
+    const firstLine = String(who.stderr ?? "").split("\n").find((l) => l.trim()) ?? "";
+    return { ok: false, detail: `could not establish the authenticated viewer (gh api user exit ${who.code}): ${firstLine || "no output"}` };
+  }
+  const author = pr?.author?.login;
+  if (author !== viewer) {
+    return { ok: false, detail: `PR #${pr?.number} (${pr?.headRefName ?? "?"}) was opened by ${author ?? "an unknown author"}, not the authenticated viewer ${viewer} — the loop assesses and merges only its own increment PRs` };
+  }
+  return { ok: true, detail: `viewer ${viewer} owns PR #${pr?.number}` };
 }
 
 // Mergeability is checked at assessment time, not discovered at merge time: a
