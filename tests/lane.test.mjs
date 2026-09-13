@@ -1251,7 +1251,9 @@ describe("renderReview (assembled review, I5)", () => {
     assert.match(text, /^- overview \(light, session default model\): complete — 0 findings$/m);
     assert.match(text, /^- correctness \(heavy, zai\/glm-4\.7\): complete — 1 finding$/m);
     assert.match(text, /^- adjudication \(heavy\): complete — merged to 1 finding$/m);
-    assert.match(text, /- \[P1\] leaks the key \[correctness\] — a\.mjs:4/);
+    assert.match(text, /1\. \[P1\] leaks the key \[correctness\] — a\.mjs:4/);
+    assert.match(text, /Selection: all 1 finding is retained as the default selection/);
+    assert.match(text, /\/z-pr-review select all\|none\|<numbers/);
     assert.match(text, /Dropped 1 candidate finding \(1 malformed\)/);
     const machine = /```z-pr-review-findings\n([\s\S]*?)```/.exec(text);
     assert.ok(machine, "machine block present");
@@ -1269,7 +1271,7 @@ describe("renderReview (assembled review, I5)", () => {
     review.findings = [{ severity: "P2", title: sneaky, detail: "d1\nd2", lane: "correctness" }];
     const text = renderReview(capture, review);
     // Flattened: the model text never starts a line of its own.
-    assert.match(text, /^- \[P2\] title line one /m);
+    assert.match(text, /1\. \[P2\] title line one /m);
     // And even so, block parsing yields the code-generated summary, not the
     // fence text smuggled inside the title.
     const { parseMachineSummary } = await import("../scripts/dev-loop/dogfood.mjs");

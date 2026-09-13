@@ -5,8 +5,10 @@
 // /z-pr-review review-invocation grammar (spec "Review pipeline"):
 //   <PR number> [--quick|--balanced|--full|--deep] [--comment|--no-comment]
 //   [--all] [--include-closed|--include-drafts] [--capture-only]
-// Parsing is total — the whole grammar is accepted here even before every flag
-// has an implementation; extension.mjs decides what can actually run today.
+// plus the I6 selection/retention subcommands `inspect` and
+//   select all|none|<numbers, e.g. 1,3-5>
+// Parsing is total for the grammar shapes; whether a spec names findings that
+// exist is checked later against the retained review (select.mjs).
 const MODE_FLAGS = new Map([
   ["--quick", "quick"],
   ["--balanced", "balanced"],
@@ -18,7 +20,17 @@ export function parseReviewArgs(args) {
   const trimmed = args.trim();
   if (trimmed === "" || trimmed === "status") return { kind: "status" };
   if (trimmed === "help" || trimmed === "--help") return { kind: "help" };
+  if (trimmed === "inspect") return { kind: "inspect" };
   const tokens = trimmed.split(/\s+/);
+  if (tokens[0] === "select") {
+    if (tokens.length === 1) {
+      return reviewUsageError('"select" needs a selection: all, none, or finding numbers like 1,3-5.');
+    }
+    if (tokens.length > 2) {
+      return reviewUsageError(`"select" takes one selection — "${tokens.slice(1).join(" ")}" reads as several.`);
+    }
+    return { kind: "select", spec: tokens[1] };
+  }
   if (!/^[1-9][0-9]*$/.test(tokens[0])) {
     return reviewUsageError(
       `"${trimmed}" is not a review invocation. Give a PR number: /z-pr-review <PR number> [flags]`,
@@ -82,7 +94,7 @@ export function parseReviewArgs(args) {
 function reviewUsageError(detail) {
   return {
     kind: "error",
-    message: `${detail}.\nUsage: /z-pr-review [status|help] | /z-pr-review <PR number> [flags]. Run /z-pr-review help.`,
+    message: `${detail}.\nUsage: /z-pr-review [status|help|inspect] | /z-pr-review select all|none|1,3-5 | /z-pr-review <PR number> [flags]. Run /z-pr-review help.`,
   };
 }
 
@@ -102,13 +114,16 @@ export function renderStatus(lastCapture = null, version = null) {
     "  evidence), merged by one isolated adjudicator call, deduplicated, and filtered by the",
     "  per-mode findings policy — all enforced in code. Publication never runs in v1 without",
     "  a future gate (I7).",
+    "- /z-pr-review select all|none|1,3-5 — settle a selection over the retained review's",
+    "  findings (numbered as reported); --all on the review settles it up front.",
+    "- /z-pr-review inspect — the retained settled result, with no model calls and no",
+    "  GitHub access.",
     "- /z-pr-review-config — inspect and edit personal configuration.",
     "- Custom review roles and modes (schemaVersion 2 config): user-defined lanes",
     "  (prompt + tier, optional model/effort overrides) composed into custom modes;",
     "  edited directly in the config file, shown via /z-pr-review-config show.",
     "",
     "Not implemented yet (ROADMAP order):",
-    "- I6: finding selection",
     "- I7: gated COMMENT publication",
     "- I8: hardening (large diffs, telemetry)",
     "",
@@ -190,13 +205,20 @@ export function renderReview(capture, review) {
     lines.push("Findings: none. (Nothing survived host validation, adjudication, and the mode policy.)");
   } else {
     lines.push(`Findings: ${findings.length} (validated against the diff${adjudication.status === "complete" ? ", adjudicated" : ""})`);
-    for (const finding of findings) {
+    findings.forEach((finding, index) => {
       const location = finding.file ? ` — ${finding.file}${finding.line ? `:${finding.line}` : ""}` : "";
-      lines.push(`- [${finding.severity}] ${singleLine(finding.title)} [${finding.lane}]${location}`);
+      lines.push(`${index + 1}. [${finding.severity}] ${singleLine(finding.title)} [${finding.lane}]${location}`);
       if (finding.detail) {
         lines.push(`  ${singleLine(finding.detail)}`);
       }
-    }
+    });
+    // I6: the numbers are the selection surface — /z-pr-review select names
+    // them; the retained result holds the default selection (all) until then.
+    lines.push(
+      `Selection: all ${findings.length} finding${findings.length === 1 ? " is" : "s are"} retained as the default selection.`,
+      "Settle it with /z-pr-review select all|none|<numbers, e.g. 1,3-5> — /z-pr-review inspect shows the retained",
+      "settled result with no model calls and no GitHub access.",
+    );
   }
   if (dropped > 0) {
     const parts = [
@@ -248,6 +270,10 @@ export function renderHelp() {
     "Usage:",
     "  /z-pr-review status                     Show the capability boundary (default)",
     "  /z-pr-review help                       Show this help",
+    "  /z-pr-review inspect                    Show the retained settled result (no model",
+    "                                           calls, no GitHub access)",
+    "  /z-pr-review select all|none|1,3-5      Settle a selection over the retained review's",
+    "                                           findings (numbered as reported)",
     "  /z-pr-review <N> --capture-only         Capture PR N read-only (metadata + diff via gh)",
     "                                           [--include-drafts] [--include-closed]",
     "  /z-pr-review <N> [mode] [--no-comment]  Review PR N: capture, then a concurrent tiered",
@@ -257,9 +283,12 @@ export function renderHelp() {
     "                                           mode: --quick|--balanced|--full|--deep",
     "                                           (default: config defaultMode, balanced).",
     "                                           [--include-drafts] [--include-closed]",
+    "                                           [--all: settle the selection to every finding",
+    "                                           at review time — the default selection is all",
+    "                                           findings anyway; --all marks it settled]",
     "",
-    "Finding selection (--all) and COMMENT publication (--comment) arrive with increments",
-    "I6 and I7.",
+    "The retained result lives for the session; selection and inspect are pure code over it.",
+    "COMMENT publication (--comment) arrives with increment I7.",
     "Configuration: /z-pr-review-config [show] | key=value ... | unset key ...",
   ].join("\n");
 }

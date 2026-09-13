@@ -115,7 +115,23 @@ try {
   assert.equal(JSON.parse(readFileSync(configPath, "utf8")).defaultMode, "balanced");
   console.log("PASS config unset restores defaults on disk");
 
-  console.log("SMOKE PASS I1: registration + status/help + config round-trip, zero inference");
+  // I6: selection and retention are pure in-session code — both subcommands
+  // answer without a retained review and without any inference.
+  const inspectMessages = await runCommand(session, "z-pr-review", "inspect");
+  assert(inspectMessages.some((m) => m.includes("No retained review in this session")), "inspect without a review must say so");
+  assert(inspectMessages.some((m) => m.includes("no model calls")), "inspect must state its no-inference property");
+  console.log("PASS /z-pr-review inspect answers without a retained review");
+
+  const selectMessages = await runCommand(session, "z-pr-review", "select all");
+  assert(selectMessages.some((m) => m.includes("No retained review in this session")), "select without a review must refuse");
+  assert(selectMessages.some((m) => m.includes("Nothing was selected")), "the refusal must state nothing changed");
+  console.log("PASS /z-pr-review select refuses without a retained review");
+
+  // (A malformed select spec like "select all none" is a parse-time usage
+  // error — thrown, surfacing as a session.error the harness treats as a
+  // hard failure — so its rejection is covered by commands.test.mjs instead.)
+
+  console.log("SMOKE PASS I1: registration + status/help + config round-trip + selection surface, zero inference");
 } finally {
   await cleanup();
 }
