@@ -34,6 +34,29 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-13 (two more probe stops after #35 — the gate now retries on code-owned terms and persists every attempt's transcript — loop-side fix)** —
+  #35's rephrased probe (the diagnostic-proven goal phrasing) still stopped
+  two further launches: both with the wordless `AI SDK Warning` signature —
+  no prose refusal anywhere, meaning the session ATTEMPTED the delegation
+  path and the attempt itself died at the transport level (working theory,
+  unverified: a subagent dispatch adds a 5th cache breakpoint and the
+  endpoint's 4-breakpoint limit trips — the same warning family as the
+  subagent-pushing diagnostic variant B). The rephrased prompt therefore
+  turns a deterministic refusal into a per-attempt coin flip, and a
+  single-attempt gate treats every flip-loss as a launch blocker: six stops
+  in one afternoon. Two loop-side changes (no bump): (1) `gateZcodeHeadless`
+  runs up to 3 attempts, a FRESH env-only token per attempt, passing on the
+  first demonstrated execution (detail reports which attempt) and failing
+  closed only when all three cannot execute — a deterministic code-owned
+  retry, not agent judgment, matching the measured variance without
+  weakening the claim (any single token echo still proves execution in the
+  child env); (2) every attempt's full transcript persists through the #32
+  `persistPhaseOutput` machinery to `.dev-loop/phase-probe-<n>.log`
+  (never fatal, disclosed on error) — all afternoon the report carried only
+  the first line of SDK noise while the session's actual behavior stayed
+  unknowable, which is the observability gap that made the signature
+  diagnosis guesswork.
+
 - **2026-09-13 (I7 preflight blocked 4× on the probe prompt — loop-side fix)** —
   after #34 merged (e743758), every I7 launch stopped at the `zcode-headless`
   preflight probe (~30–40s each, #34's short-circuit working: tests/smokes

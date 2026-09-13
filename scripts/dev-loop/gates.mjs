@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { buildZcodeArgs } from "./phases.mjs";
+import { buildZcodeArgs, persistPhaseOutput } from "./phases.mjs";
 import { parseStatusLine, roadmapIncrementState } from "./status.mjs";
 
 const ok = (name, detail) => ({ name, ok: true, detail });
@@ -90,40 +90,59 @@ export async function gateRepoIdle({ run, repoRoot }) {
 // operationally relevant property for phases (a session that cannot execute
 // anything cannot run tests, git, or gh).
 const PROBE_ENV_VAR = "ZPR_PROBE_TOKEN";
-export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buildZcodeArgs, env }) {
-  const token = `zpr-probe-${randomBytes(16).toString("hex")}`;
-  // Prompt phrasing is load-bearing (2026-09-13 controlled diagnostic, four
-  // probes over the loop's own buildPhaseEnv/buildZcodeArgs): the old wording
-  // ("… using your shell tool …") ANCHORED top-level sessions — shell-less
-  // since 2026-09-12, though they hold agent-delegation tools — on the one
-  // tool they lack, so they refused instead of delegating (failed identically
-  // under the isolated phase env and the operator's normal env; a
-  // subagent-pushing variant failed differently, an AI SDK cacheControl
-  // warning with no echo). This goal-phrased variant ("use a shell", the
-  // mechanism left to the session) passed under the exact isolated phase env:
-  // the session routed the command through a shell-capable subagent — the
-  // same recovery path phase workers use. The claim proven is unchanged: only
-  // executing something in the child env can produce the env-only token.
-  const args = buildArgs({
-    prompt: `Use a shell to run: echo $${PROBE_ENV_VAR} — show me the exact output`,
-    repoRoot,
-  });
-  const result = await run(zcode, args, {
-    cwd: repoRoot,
-    timeoutMs: 3 * 60_000,
-    env: { ...(env ?? process.env), [PROBE_ENV_VAR]: token },
-  });
-  if (result.code === 0 && !result.timedOut && String(result.stdout ?? "").includes(token)) {
-    return ok("zcode-headless", "probe turn completed with the worker arg set (execution in the child env exercised)");
+// 2026-09-13: six launches stopped on a single probe attempt. In the
+// degraded-toolset regime a goal-phrased probe session routes through a
+// shell-capable subagent — but that attempt itself is transport-flaky (the
+// AI SDK cacheControl-breakpoint warning signature: an attempt that dies
+// wordlessly). The gate retries on code-owned terms: a fresh token per
+// attempt, pass on the first demonstrated execution, fail-closed only when
+// every attempt failed.
+const PROBE_ATTEMPTS = 3;
+export async function gateZcodeHeadless({
+  run, zcode, repoRoot, buildArgs = buildZcodeArgs, env,
+  artDir = join(repoRoot, ".dev-loop"), persist = persistPhaseOutput, log = () => {},
+}) {
+  let last = null;
+  for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt += 1) {
+    const token = `zpr-probe-${randomBytes(16).toString("hex")}`;
+    // Prompt phrasing is load-bearing (2026-09-13 controlled diagnostic): the
+    // old wording ("… using your shell tool …") ANCHORED top-level sessions —
+    // shell-less since 2026-09-12, though they hold agent-delegation tools —
+    // on the one tool they lack, so they refused instead of delegating (failed
+    // identically under the isolated phase env and the operator's normal env).
+    // This goal-phrased variant ("use a shell", the mechanism left to the
+    // session) passes under the exact isolated phase env: the session routes
+    // the command through a shell-capable subagent — the same recovery path
+    // phase workers use. The claim proven is unchanged: only executing
+    // something in the child env can produce the env-only token.
+    const args = buildArgs({
+      prompt: `Use a shell to run: echo $${PROBE_ENV_VAR} — show me the exact output`,
+      repoRoot,
+    });
+    const result = await run(zcode, args, {
+      cwd: repoRoot,
+      timeoutMs: 3 * 60_000,
+      env: { ...(env ?? process.env), [PROBE_ENV_VAR]: token },
+    });
+    // Every attempt's full transcript survives via the #32 phase machinery —
+    // the 2026-09-13 stops surfaced only a first line of SDK noise while the
+    // session's actual behavior stayed unknowable. Persistence is never fatal.
+    const persisted = persist({ artDir, name: "probe", index: attempt, result });
+    if (persisted.error) log(`[dev-loop] warning: ${persisted.error}`);
+    else log(`[dev-loop] probe transcript: ${persisted.file}`);
+    if (result.code === 0 && !result.timedOut && String(result.stdout ?? "").includes(token)) {
+      return ok("zcode-headless", `probe turn completed with the worker arg set (execution in the child env exercised, attempt ${attempt}/${PROBE_ATTEMPTS})`);
+    }
+    last = result;
   }
   // The session's own words (stdout) outrank stderr: an AI SDK warning line on
   // stderr masked the session's actual refusal in two 2026-09-13 stops, and
   // the quoted reply is the diagnostic the detail exists for. CLI-level
   // failures (flags/config/auth, nonzero exit) usually have empty stdout, so
   // their stderr first line still surfaces.
-  const firstLine = (String(result.stdout ?? "").trim() ? result.stdout : result.stderr || "")
+  const firstLine = (String(last.stdout ?? "").trim() ? last.stdout : last.stderr || "")
     .split("\n").find((l) => l.trim()) ?? "";
-  return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), zcode login, and the phase TOOLSET: phases need to execute commands (2026-09-12: worker and reviewer ran shell-less while text-only probes kept passing)`);
+  return bad("zcode-headless", `probe failed after ${PROBE_ATTEMPTS} attempts (last: code=${last.code}, timedOut=${last.timedOut}): ${firstLine.slice(0, 200)} — attempt transcripts under ${artDir} — check CLI flags, model config (~/.zcode/cli/config.json), zcode login, and the phase TOOLSET: phases need to execute commands (2026-09-12: worker and reviewer ran shell-less while text-only probes kept passing)`);
 }
 
 export async function gateTests({ run, repoRoot }) {

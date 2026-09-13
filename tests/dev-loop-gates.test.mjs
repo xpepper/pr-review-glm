@@ -2,10 +2,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import {
   gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen,
   gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, mergeabilityGate, reportGates, runPreflightGates,
 } from "../scripts/dev-loop/gates.mjs";
+import { persistPhaseOutput } from "../scripts/dev-loop/phases.mjs";
 
 const repoRoot = "/repo"; // never touched: all commands are faked
 // gateTests/gateSmokes/gateMainGreen enumerate the real tests/ dir (readdirSync)
@@ -92,7 +94,7 @@ describe("gateZcodeHeadless", () => {
     };
     // No injected buildArgs: the gate must use the real buildZcodeArgs so the
     // probe exercises the same flags a worker phase would send.
-    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
     assert.equal(gate.ok, true);
     assert.match(gate.detail, /execution in the child env exercised/);
     const probe = spawned[0];
@@ -115,14 +117,14 @@ describe("gateZcodeHeadless", () => {
   it("fails closed when a code-0 probe replies without the token (unexpanded variable, a guess, or prose)", async () => {
     for (const stdout of ["$ZPR_PROBE_TOKEN\n", "zpr-probe-abc123\n", "I would run echo $ZPR_PROBE_TOKEN, but I have no shell tool in this session.\n"]) {
       const run = async () => ({ code: 0, stdout, stderr: "" });
-      const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+      const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
       assert.equal(gate.ok, false);
       assert.match(gate.detail, /phase TOOLSET/);
     }
   });
   it("fails closed with the session's own words when a code-0 probe cannot exercise the shell tool", async () => {
     const run = async () => ({ code: 0, stdout: "I don't have a shell tool available in this session, so I cannot run the command.\n", stderr: "" });
-    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
     assert.equal(gate.ok, false);
     assert.match(gate.detail, /I don't have a shell tool available/);
     assert.match(gate.detail, /phase TOOLSET/);
@@ -133,23 +135,81 @@ describe("gateZcodeHeadless", () => {
       stdout: "I can't run that: this session has no shell/Bash tool available to me.\n",
       stderr: 'AI SDK Warning (anthropic.messages / glm-5.3): The feature "cacheControl breakpoint limit" is not supported. Maximum 4 cache breakpoints exceeded (found 5). This breakpoint will be ignored.\n',
     });
-    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
     assert.equal(gate.ok, false);
     assert.match(gate.detail, /no shell\/Bash tool available/);
     assert.doesNotMatch(gate.detail, /AI SDK Warning/);
   });
   it("fails with the CLI's first error line when the probe exits nonzero (flags, config, auth)", async () => {
     const run = async () => ({ code: 1, stdout: "", stderr: "Error: Model config is missing. Create ~/.zcode/cli/config.json ...\n" });
-    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
     assert.equal(gate.ok, false);
     assert.match(gate.detail, /Model config is missing/);
     assert.match(gate.detail, /zcode login/);
   });
   it("fails on a timed-out probe", async () => {
     const run = async () => ({ code: null, stdout: "", stderr: "", timedOut: true });
-    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot });
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
     assert.equal(gate.ok, false);
     assert.match(gate.detail, /timedOut=true/);
+  });
+  it("retries the probe: a refusal followed by a token echo passes on attempt 2 with a FRESH token per attempt", async () => {
+    const attempts = [];
+    const run = async (command, args, opts) => {
+      attempts.push(opts.env.ZPR_PROBE_TOKEN);
+      if (attempts.length === 1) return { code: 0, stdout: "I don't have a shell tool available in this session.\n", stderr: "" };
+      // Behaves like a real child: only executing in this env produces the token.
+      return { code: 0, stdout: `${opts.env.ZPR_PROBE_TOKEN}\n`, stderr: "" };
+    };
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
+    assert.equal(gate.ok, true);
+    assert.match(gate.detail, /attempt 2\/3/);
+    assert.equal(attempts.length, 2);
+    assert.notEqual(attempts[0], attempts[1], "each attempt carries its own token");
+  });
+  it("fails closed only after every attempt failed, quoting the LAST attempt and the attempt count", async () => {
+    let calls = 0;
+    const run = async () => { calls += 1; return { code: 0, stdout: "I can't run that: this session has no shell tool available.\n", stderr: "" }; };
+    const gate = await gateZcodeHeadless({ run, zcode: "node", repoRoot, persist: () => ({}) });
+    assert.equal(gate.ok, false);
+    assert.equal(calls, 3);
+    assert.match(gate.detail, /after 3 attempts/);
+    assert.match(gate.detail, /no shell tool available/);
+    assert.match(gate.detail, /phase TOOLSET/);
+  });
+  it("persists every attempt's transcript and stays never-fatal when persistence fails", async () => {
+    const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const artDir = mkdtempSync(join(tmpdir(), "zpr-probe-test-"));
+    try {
+      const logs = [];
+      const persistingRun = async (command, args, opts) => ({ code: 0, stdout: "refused\n", stderr: "" });
+      const gate = await gateZcodeHeadless({
+        run: persistingRun, zcode: "node", repoRoot,
+        artDir, persist: (input) => { const out = persistPhaseOutput(input); if (out.file) logs.push(out.file); return out; },
+        log: () => {},
+      });
+      assert.equal(gate.ok, false);
+      assert.equal(logs.length, 3, "one transcript per attempt");
+      assert.match(readFileSync(logs[0], "utf8"), /# phase probe #1 — /);
+      assert.match(readFileSync(logs[0], "utf8"), /--- stdout ---\nrefused/);
+      // Persistence failure (artDir under a regular FILE → mkdir ENOTDIR) must
+      // never fail the gate itself: it still runs all attempts and reports.
+      const blocker = join(tmpdir(), `zpr-probe-blocker-${Date.now()}`);
+      writeFileSync(blocker, "x");
+      const logsBroken = [];
+      let brokenCalls = 0;
+      const gate2 = await gateZcodeHeadless({
+        run: async (command, args, opts) => { brokenCalls += 1; return { code: 0, stdout: `${opts.env.ZPR_PROBE_TOKEN}\n`, stderr: "" }; },
+        zcode: "node", repoRoot, artDir: join(blocker, ".dev-loop"),
+        persist: (input) => { const out = persistPhaseOutput(input); if (out.error) logsBroken.push(out.error); return out; },
+        log: () => {},
+      });
+      assert.equal(gate2.ok, true, "a passing attempt still passes with persistence broken");
+      assert.ok(logsBroken.length >= 1, "the persistence error was disclosed, not thrown");
+    } finally {
+      rmSync(artDir, { recursive: true, force: true });
+    }
   });
 });
 
