@@ -34,6 +34,31 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-13 (I7 preflight blocked 4× on the probe prompt — loop-side fix)** —
+  after #34 merged (e743758), every I7 launch stopped at the `zcode-headless`
+  preflight probe (~30–40s each, #34's short-circuit working: tests/smokes
+  skipped) with two failure signatures: the session's shell-less refusal
+  prose, or a bare `AI SDK Warning (anthropic.messages / glm-5.3) …
+  cacheControl breakpoint limit … (found 5)` line. The operator's
+  mechanism-neutral manual probe passed in the same minute as two loop
+  failures on either side. A controlled diagnostic (a /tmp script reusing the
+  loop's own `buildPhaseEnv`/`buildZcodeArgs`/`runCommand`; four probes, fresh
+  env-only token each) settled it: the EXACT loop prompt failed identically
+  under both the isolated phase env and the operator's normal env — the
+  sessions' own refusals name their "agent tools" but decline to use them
+  because the prompt says "using **your shell tool**" (prompt anchoring, not
+  an env defect); a subagent-pushing variant failed with the SDK-warning
+  signature and no echo (observed, not fully explained); the goal-phrased
+  "Use a shell to run: echo $ZPR_PROBE_TOKEN — show me the exact output"
+  PASSED under the exact isolated phase env, routing through the same
+  shell-capable-subagent recovery path phase workers use. Fix (this PR, no
+  bump): the probe prompt adopts the proven phrasing verbatim — the claim
+  proven is unchanged (only executing something in the child env can produce
+  the env-only token; contains-check unchanged) — and the gate's failure
+  detail now reads the session's stdout words BEFORE stderr, because an SDK
+  warning on stderr masked the session's actual refusal in two of the four
+  stops (CLI-level failures keep surfacing: their stdout is empty).
+
 - **2026-09-13 (first live tag-retarget exercise caught an operator-config
   hazard in the tagging tail — loop-side fix)** — I6 launch 2
   (`--merge auto --dogfood on`) completed the fastest clean iteration yet:

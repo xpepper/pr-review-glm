@@ -92,8 +92,20 @@ export async function gateRepoIdle({ run, repoRoot }) {
 const PROBE_ENV_VAR = "ZPR_PROBE_TOKEN";
 export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buildZcodeArgs, env }) {
   const token = `zpr-probe-${randomBytes(16).toString("hex")}`;
+  // Prompt phrasing is load-bearing (2026-09-13 controlled diagnostic, four
+  // probes over the loop's own buildPhaseEnv/buildZcodeArgs): the old wording
+  // ("… using your shell tool …") ANCHORED top-level sessions — shell-less
+  // since 2026-09-12, though they hold agent-delegation tools — on the one
+  // tool they lack, so they refused instead of delegating (failed identically
+  // under the isolated phase env and the operator's normal env; a
+  // subagent-pushing variant failed differently, an AI SDK cacheControl
+  // warning with no echo). This goal-phrased variant ("use a shell", the
+  // mechanism left to the session) passed under the exact isolated phase env:
+  // the session routed the command through a shell-capable subagent — the
+  // same recovery path phase workers use. The claim proven is unchanged: only
+  // executing something in the child env can produce the env-only token.
   const args = buildArgs({
-    prompt: `Run the shell command \`echo $${PROBE_ENV_VAR}\` using your shell tool, then reply with exactly the command's output and nothing else.`,
+    prompt: `Use a shell to run: echo $${PROBE_ENV_VAR} — show me the exact output`,
     repoRoot,
   });
   const result = await run(zcode, args, {
@@ -104,7 +116,13 @@ export async function gateZcodeHeadless({ run, zcode, repoRoot, buildArgs = buil
   if (result.code === 0 && !result.timedOut && String(result.stdout ?? "").includes(token)) {
     return ok("zcode-headless", "probe turn completed with the worker arg set (execution in the child env exercised)");
   }
-  const firstLine = (result.stderr || result.stdout || "").split("\n").find((l) => l.trim()) ?? "";
+  // The session's own words (stdout) outrank stderr: an AI SDK warning line on
+  // stderr masked the session's actual refusal in two 2026-09-13 stops, and
+  // the quoted reply is the diagnostic the detail exists for. CLI-level
+  // failures (flags/config/auth, nonzero exit) usually have empty stdout, so
+  // their stderr first line still surfaces.
+  const firstLine = (String(result.stdout ?? "").trim() ? result.stdout : result.stderr || "")
+    .split("\n").find((l) => l.trim()) ?? "";
   return bad("zcode-headless", `probe failed (code=${result.code}, timedOut=${result.timedOut}): ${firstLine.slice(0, 200)} — check CLI flags, model config (~/.zcode/cli/config.json), zcode login, and the phase TOOLSET: phases need to execute commands (2026-09-12: worker and reviewer ran shell-less while text-only probes kept passing)`);
 }
 
