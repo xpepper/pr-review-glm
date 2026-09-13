@@ -24,40 +24,29 @@ export function parseSelectionSpec(spec, total) {
   if (!/^[0-9][0-9,\-]*$/.test(text)) {
     return { kind: "error", message: `"${text}" is not a selection. Use all, none, or finding numbers like 1,3-5.` };
   }
-  if (total === 0) {
-    return { kind: "error", message: "The retained review has no findings — nothing to select." };
-  }
   const indexes = [];
   for (const part of text.split(",")) {
     const range = /^(\d+)(?:-(\d+))?$/.exec(part);
     if (range === null) {
       return { kind: "error", message: `"${part}" is not a number or range.` };
     }
-    // Leading zeros ("01") are refused for the same reason the PR-number
-    // grammar refuses them: one canonical spelling per finding number.
-    if (/^0\d/.test(range[1]) || (range[2] !== undefined && /^0\d/.test(range[2]))) {
-      return { kind: "error", message: `"${part}" has leading zeros — write finding numbers without them.` };
-    }
     const start = Number(range[1]);
     const end = range[2] === undefined ? start : Number(range[2]);
-    if (start < 1) {
-      return { kind: "error", message: `Finding 0 does not exist — findings are numbered from 1.` };
-    }
     if (end < start) {
       return { kind: "error", message: `Range ${part} is descending — write the smaller number first.` };
-    }
-    // Bounds are validated BEFORE the range is expanded, so a huge range over a
-    // small review is refused in constant time instead of materializing.
-    if (start > total || end > total) {
-      return {
-        kind: "error",
-        message: `Range ${part} names findings that do not exist — the retained review has ${total} finding${total === 1 ? "" : "s"} (1–${total}).`,
-      };
     }
     for (let index = start; index <= end; index++) indexes.push(index);
   }
   if (new Set(indexes).size !== indexes.length) {
     return { kind: "error", message: "The selection names a finding more than once." };
+  }
+  if (total === 0) {
+    return { kind: "error", message: "The retained review has no findings — nothing to select." };
+  }
+  const outOfRange = indexes.filter((index) => index < 1 || index > total);
+  if (outOfRange.length > 0) {
+    const shown = [...new Set(outOfRange)].join(", ");
+    return { kind: "error", message: `Finding${outOfRange.length === 1 ? "" : "s"} ${shown} do not exist — the retained review has ${total} finding${total === 1 ? "" : "s"} (1–${total}).` };
   }
   return { kind: "subset", indexes: [...new Set(indexes)].sort((a, b) => a - b) };
 }
@@ -98,39 +87,23 @@ export function renderSelectResult(capture, selection) {
   return [
     `Selection for PR #${capture.number} (${capture.repo}): ${describeSelection(selection)}`,
     selection.kind === "none"
-      ? "No findings selected — a later publication (--comment / autoPostReviews) will post nothing for this review."
+      ? "No findings selected — nothing will be published for this review (publication gates arrive with I7)."
       : "The retained result is up to date; /z-pr-review inspect shows it without model calls or GitHub access.",
   ].join("\n");
 }
 
-// Retained finding fields are model-influenced text; rendering flattens
-// newlines AND strips terminal control characters — C0, DEL, and the C1 range
-// (U+0080–U+009F; U+009B is an 8-bit CSI some terminals interpret as ANSI) —
-// so a finding can never forge inspect lines or emit escape sequences into
-// the chat.
-function inspectText(text) {
-  return String(text).replace(/\r?\n/g, " ").replace(/[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f]/g, "");
-}
-
 // Renders the retained settled result. Pure text over the in-session state:
 // no model calls, no gh, no network — the "inspectable without inference"
-// deliverable of I6. `laterCapture` (the session's last capture) is optional
-// disclosure: when a follow-up review captured a PR but failed before its own
-// retention, the retained result predates that capture and says so.
-export function renderInspect(retained, laterCapture = null) {
+// deliverable of I6.
+export function renderInspect(retained) {
   const { capture, review, selection } = retained;
   const lines = [
-    `Retained review — PR #${capture.number} "${inspectText(capture.title)}" (${capture.repo})`,
+    `Retained review — PR #${capture.number} "${capture.title}" (${capture.repo})`,
     `Head: ${capture.headRefName} @ ${capture.headOid.slice(0, 7)} -> Base: ${capture.baseRefName} @ ${capture.baseOid.slice(0, 7)} (binding frozen at capture time)`,
     `Mode: ${review.mode} — status: ${review.status}${review.reason !== undefined ? ` (${review.reason})` : ""}`,
     `Coverage: ${review.lanes.filter((lane) => lane.status === "complete").length}/${review.lanes.length} lane${review.lanes.length === 1 ? "" : "s"} completed`,
     `Selection: ${describeSelection(selection)}`,
   ];
-  if (laterCapture !== null && laterCapture.headOid !== capture.headOid) {
-    lines.push(
-      `Note: a later capture exists in this session (PR #${laterCapture.number} @ ${laterCapture.headOid.slice(0, 7)}) — this retained review predates it; re-run the review to replace it.`,
-    );
-  }
   const selected = new Set(selection.kind === "subset" ? selection.indexes : []);
   const allSelected = selection.kind === "all";
   if (review.findings.length === 0) {
@@ -140,14 +113,13 @@ export function renderInspect(retained, laterCapture = null) {
     review.findings.forEach((finding, index) => {
       const position = index + 1;
       const mark = allSelected || selected.has(position) ? "selected" : "not selected";
-      const location = finding.file ? ` — ${inspectText(finding.file)}${finding.line ? `:${finding.line}` : ""}` : "";
-      lines.push(`${position}. [${finding.severity}] ${inspectText(finding.title)} [${inspectText(finding.lane)}]${location} — ${mark}`);
+      const location = finding.file ? ` — ${finding.file}${finding.line ? `:${finding.line}` : ""}` : "";
+      lines.push(`${position}. [${finding.severity}] ${String(finding.title).split(/\r?\n/).join(" ")} [${finding.lane}]${location} — ${mark}`);
     });
   }
   lines.push(
     "Rendered from the retained in-session result: no model calls, no GitHub access.",
-    "Publication posts the selected findings when authorized (--comment / autoPostReviews);",
-    "/z-pr-review select re-settles the selection.",
+    "Publication of the selected findings arrives with I7; /z-pr-review select re-settles the selection.",
   );
   return lines.join("\n");
 }

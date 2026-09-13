@@ -153,39 +153,13 @@ export async function gateTests({ run, repoRoot }) {
   return ok("tests", `${files.length} test file(s) green`);
 }
 
-// The failing tail of a smoke, stdout AND stderr: smoke assertions quote the
-// plugin's actual output in the assertion message, which node prints to
-// stderr — a stdout-only detail reported two PASS lines and dropped the
-// actual error (2026-09-13: two I7 relaunches stopped at smoke-i2 with no
-// diagnosable text in the report).
-function smokeDetail(result) {
-  const out = String(result.stdout ?? "").trim().split("\n").filter(Boolean).slice(-3).join(" ");
-  const err = String(result.stderr ?? "").trim().split("\n").filter(Boolean).slice(-2).join(" ");
-  return `${result.timedOut ? "timed out: " : ""}${[out, err ? `stderr: ${err}` : ""].filter(Boolean).join(" | ")}`.slice(0, 400);
-}
-
-// A failed smoke gets exactly one code-owned retry: smokes hit live GitHub
-// via gh inside SDK-dispatched plugin sessions, and a transient failure there
-// has stopped whole iterations (the precedented smoke-i2 flake; it must not
-// cost a full relaunch). The retry is disclosed in the detail either way —
-// a smoke still has to PASS to pass the gate; only the stop point moves.
 export async function gateSmokes({ run, repoRoot, exclude = [] }) {
   const files = smokeFiles(repoRoot, exclude);
-  const retried = [];
   for (const file of files) {
-    let result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000 });
-    if (result.code !== 0) {
-      const first = result;
-      result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000 });
-      if (result.code === 0) retried.push(`${file} (first attempt: ${smokeDetail(first)})`);
-    }
-    if (result.code !== 0) return bad("smokes", `${file} failed: ${smokeDetail(result)}`);
+    const result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000 });
+    if (result.code !== 0) return bad("smokes", `${file} failed: ${result.stdout.split("\n").slice(-4).join(" ").slice(0, 300)}`);
   }
-  if (!files.length) return ok("smokes", "no smoke scripts discovered");
-  return ok(
-    "smokes",
-    `${files.length} smoke script(s) green${retried.length ? ` — retried once after failure: ${retried.join("; ")}` : ""}${exclude.length ? ` (excluded: ${exclude.join(", ")})` : ""}`,
-  );
+  return ok("smokes", files.length ? `${files.length} smoke script(s) green${exclude.length ? ` (excluded: ${exclude.join(", ")})` : ""}` : "no smoke scripts discovered");
 }
 
 // Preflight sequence with probe fail-fast: repo-idle and the toolset probe
