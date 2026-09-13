@@ -27,7 +27,7 @@ const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 // loop's gates select by). A stacked loop-side fix PR may also be open
 // (2026-09-13: #38 fix-loop-smoke-retry beside #37) — those don't match the
 // prefix and are ignored; SMOKE_PR_NUMBER forces any PR explicitly.
-const INCREMENT_BRANCH = /^[ilvc]\d+-/i;
+const INCREMENT_BRANCH = /^[ilvcm]\d+-/i;
 function resolvePrNumber() {
   if (process.env.SMOKE_PR_NUMBER) return Number(process.env.SMOKE_PR_NUMBER);
   const open = JSON.parse(
