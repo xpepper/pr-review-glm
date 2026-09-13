@@ -9,8 +9,7 @@
 // comment naming both commits; an idempotency marker makes re-runs skip and
 // lets an uncertain write response be reconciled. No selected findings means
 // no POST at all.
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 
 export const MAX_INLINE_ANCHORS = 50;
 // GitHub's documented review-body cap is 65,536 characters; stop well short so
@@ -30,26 +29,67 @@ export class PublishError extends Error {
 }
 
 // The subprocess boundary (capture.mjs pattern, plus stdin so the POST body —
-// nested JSON with the comments array — never touches argv). Always resolves;
-// failures surface as code/stderr/timedOut so the caller stays fail-closed.
-export async function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
-  try {
-    const { stdout, stderr } = await promisify(execFile)("gh", args, {
-      cwd,
-      timeout: timeoutMs,
-      maxBuffer: 64 * 1024 * 1024,
-      encoding: "utf8",
-      ...(stdin === undefined ? {} : { input: stdin }),
-    });
-    return { code: 0, stdout, stderr, timedOut: false };
-  } catch (error) {
-    return {
-      code: typeof error.code === "number" ? error.code : 1,
-      stdout: error.stdout ?? "",
-      stderr: error.stderr ?? (error.killed ? "" : String(error)),
-      timedOut: error.killed === true,
+// nested JSON with the comments array — never touches argv). Built on `spawn`
+// with an explicit stdin write: async `execFile` silently ignores an `input`
+// option (it exists only on the *Sync variants), so the POST payload must be
+// written to the child's stdin stream. Always resolves; failures surface as
+// code/stderr/timedOut so the caller stays fail-closed.
+export function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
+  const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
+  return new Promise((resolve) => {
+    const child = spawn("gh", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let overflowed = false;
+    let settled = false;
+    let timer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== null) clearTimeout(timer);
+      resolve(result);
     };
-  }
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.length > MAX_OUTPUT_BYTES && !overflowed) {
+        overflowed = true;
+        child.kill("SIGKILL");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    if (timeoutMs !== undefined) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, timeoutMs);
+    }
+    child.on("error", (error) => {
+      finish({ code: 1, stdout, stderr: stderr || String(error), timedOut: timedOut || overflowed });
+    });
+    child.on("close", (code, signal) => {
+      if (overflowed) {
+        finish({ code: 1, stdout, stderr: "gh output exceeded the capture buffer", timedOut: false });
+        return;
+      }
+      finish({
+        code: code ?? (signal !== null ? 1 : 0),
+        stdout,
+        stderr,
+        timedOut,
+      });
+    });
+    if (stdin !== undefined) child.stdin.end(stdin);
+    else child.stdin.end();
+    child.stdin.on("error", () => {
+      // The child died before reading stdin (spawn errors close the pipe);
+      // the close/error handler reports the real failure.
+    });
+  });
 }
 
 // Model text is flattened and control-characters stripped before it reaches
@@ -122,7 +162,9 @@ export function buildPublication({ capture, review, selected, anchorMap, current
   const noted = [];
   for (const finding of selected) {
     if (!stale && inline.length < MAX_INLINE_ANCHORS && anchorable(finding, anchorMap)) {
-      inline.push({ path: finding.file, line: finding.line, body: commentBody(finding) });
+      // `side: "RIGHT"` is required by the reviews API for a `line` anchor and
+      // matches the anchor map, which is built from new-side hunk ranges only.
+      inline.push({ path: finding.file, line: finding.line, side: "RIGHT", body: commentBody(finding) });
     } else {
       noted.push(finding);
     }
@@ -231,8 +273,14 @@ export async function publishReview({
     return { status: "refused", reason: `PR #${capture.number} is a draft; nothing was posted.` };
   }
   const viewer = await ghJsonOrThrow(runGh, cwd, ["api", "user"], "resolving the authenticated gh user");
+  if (typeof viewer?.login !== "string" || viewer.login === "") {
+    throw new PublishError(`could not resolve the authenticated gh user; failing closed — nothing was posted.`);
+  }
   const prAuthor = typeof pr.user?.login === "string" ? pr.user.login : null;
-  if (prAuthor !== null && prAuthor === viewer.login) {
+  if (prAuthor === null) {
+    throw new PublishError(`PR #${capture.number} has no author login; the self-review gate cannot run, so failing closed — nothing was posted.`);
+  }
+  if (prAuthor === viewer.login) {
     return { status: "refused", reason: `PR #${capture.number} is authored by ${viewer.login} (you); self-review publication is refused.` };
   }
   const currentHead = pr.head?.sha;
@@ -272,10 +320,15 @@ export async function publishReview({
     );
   }
 
-  // Final head re-check: gates, files, and body were all composed against
-  // `currentHead`; if the head moved in between, the comment would anchor at a
-  // commit it never validated.
-  const recheck = await ghJsonOrThrow(runGh, cwd, ["api", prPath], "re-checking the PR head immediately before posting");
+  // Final pre-write re-check: gates, files, and body were all composed against
+  // the earlier fetch; if the PR closed, turned draft, or its head moved in
+  // between, posting now would write against a state the gates never cleared.
+  const recheck = await ghJsonOrThrow(runGh, cwd, ["api", prPath], "re-checking the PR immediately before posting");
+  if (recheck.state !== "OPEN" || recheck.draft === true) {
+    throw new PublishError(
+      `PR #${capture.number} became ${recheck.state !== "OPEN" ? recheck.state : "a draft"} during publication; nothing was posted.`,
+    );
+  }
   if (recheck.head?.sha !== currentHead) {
     throw new PublishError(
       `PR #${capture.number}'s head moved during publication (${currentHead.slice(0, 7)} -> ${String(recheck.head?.sha).slice(0, 7)}); nothing was posted. Re-run the review.`,

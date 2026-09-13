@@ -272,7 +272,9 @@ async function runReview(parsed) {
 // I7: publish the retained review's settled selection as one gated COMMENT
 // review. Writes to the same repo#PR are serialized in-process (the spec's
 // per-target write serialization) — a second publication waits for the first
-// to settle instead of racing its gates and marker scan.
+// to settle instead of racing its gates and marker scan. A settled lock
+// deletes itself when it is still the tail entry, so the map holds only
+// in-flight publications, not one retained promise per PR ever seen.
 const publicationLocks = new Map();
 
 async function runPublication(retained, authority) {
@@ -283,7 +285,11 @@ async function runPublication(retained, authority) {
     () => publishReview({ retained, authority }),
     () => publishReview({ retained, authority }),
   );
-  publicationLocks.set(key, run.catch(() => {}));
+  const tail = run.catch(() => {});
+  publicationLocks.set(key, tail);
+  tail.then(() => {
+    if (publicationLocks.get(key) === tail) publicationLocks.delete(key);
+  });
   try {
     const outcome = await run;
     await session.log(renderPublishResult(capture, outcome));

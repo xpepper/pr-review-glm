@@ -139,6 +139,7 @@ describe("anchorMapFromFiles and buildPublication", () => {
     assert.deepEqual(publication.inline[0], {
       path: "a.mjs",
       line: 4,
+      side: "RIGHT",
       body: publication.inline[0].body,
     });
     assert(publication.inline[0].body.includes("[P1] leak"));
@@ -262,6 +263,7 @@ describe("publishReview gates", () => {
     assert.equal(payload.event, "COMMENT");
     assert.equal(payload.commit_id, HEAD);
     assert.equal(payload.comments.length, 1);
+    assert.equal(payload.comments[0].side, "RIGHT");
     assert(payload.body.includes(idempotencyMarker(capture.repo, capture.number, HEAD)));
   });
 
@@ -298,6 +300,40 @@ describe("publishReview gates", () => {
       publishReview({ retained: retained(), runGh }),
       (error) => error instanceof PublishError && error.message.includes("head moved during publication"),
     );
+  });
+
+  it("fails closed when the PR closes or turns draft between gates and the POST", async () => {
+    for (const late of [openPr({ state: "MERGED" }), openPr({ draft: true })]) {
+      let prFetches = 0;
+      const behavior = {
+        get pr() {
+          prFetches += 1;
+          return prFetches <= 1 ? openPr() : late;
+        },
+      };
+      const { runGh, calls } = fakeGh(behavior);
+      await assert.rejects(
+        publishReview({ retained: retained(), runGh }),
+        (error) => error instanceof PublishError && error.message.includes("during publication"),
+      );
+      assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "no POST after the PR changed state");
+    }
+  });
+
+  it("fails closed when the authenticated login or the PR author login is missing", async () => {
+    const noViewer = fakeGh({ viewer: {} });
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh: noViewer.runGh }),
+      (error) => error instanceof PublishError && error.message.includes("authenticated gh user"),
+    );
+    const noAuthor = fakeGh({ pr: openPr({ user: {} }) });
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh: noAuthor.runGh }),
+      (error) => error instanceof PublishError && error.message.includes("no author login"),
+    );
+    for (const fake of [noViewer, noAuthor]) {
+      assert.equal(fake.calls.filter((c) => c.args.includes("POST")).length, 0);
+    }
   });
 
   it("fails closed on a definite 4xx POST refusal without a retry POST", async () => {
@@ -342,6 +378,7 @@ describe("publishReview gates", () => {
     );
     const notArray = async (args) => {
       const joined = args.join(" ");
+      if (joined.includes("api user")) return ghReply({ login: VIEWER });
       if (joined.includes("/files") || joined.includes("/reviews")) return ghReply({ nope: true });
       return ghReply(openPr());
     };
