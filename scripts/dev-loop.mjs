@@ -8,8 +8,8 @@ import { join } from "node:path";
 import { parseStatusLine, roadmapIncrementState } from "./dev-loop/status.mjs";
 import { buildPhaseEnv, PHASE_LIMITS, buildZcodeArgs, persistPhaseOutput, renderPrompt, resolveZcodeCli, runCommand } from "./dev-loop/phases.mjs";
 import {
-  gateBranchHead, gateDocsUpdated, gateMainGreen, gateRepoIdle,
-  gateSmokes, gateTests, gateZcodeHeadless, isFullOid, mergeabilityGate, reportGates,
+  gateBranchHead, gateDocsUpdated, gateMainGreen,
+  gateSmokes, gateTests, isFullOid, mergeabilityGate, reportGates, runPreflightGates,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
@@ -177,14 +177,11 @@ async function runMain(options, { zcode, phaseEnv }) {
 
   const summary = await runLoop({
     readStatus: async () => parseStatusLine(read("HANDOFF.md")),
-    preflight: async () => [
-      logGate(await gateRepoIdle({ run, repoRoot })),
-      // Probes the exact worker arg set AND the isolated phase env: if the
-      // phase HOME breaks model config or auth, this fails in seconds.
-      logGate(await gateZcodeHeadless({ run, zcode, repoRoot, env: phaseEnv })),
-      logGate(await gateTests({ run, repoRoot })),
-      logGate(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] })),
-    ],
+    // Probes the exact worker arg set AND the isolated phase env: if the
+    // phase HOME breaks model config or auth, this fails in seconds. A failed
+    // probe short-circuits tests/smokes (runPreflightGates) — they cannot
+    // diagnose a phase environment that cannot execute commands.
+    preflight: async () => runPreflightGates({ run, repoRoot, zcode, env: phaseEnv, log }),
     // Mid-iteration resume (spec Amendments): recognize the checkpoint a
     // previous run left after its worker completed and skip straight to
     // assessment. On adoption no worker runs, so the increment under work is

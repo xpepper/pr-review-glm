@@ -214,11 +214,29 @@ describe("tagMergedRelease", () => {
     };
     const result = await tagMergedRelease({ run, repoRoot });
     assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
-    assert.deepEqual(calls, [["git", "tag", "v0.3.1"], ["git", "push", "origin", "v0.3.1"]]);
+    assert.deepEqual(calls, [["git", "-c", "tag.gpgsign=false", "tag", "v0.3.1"], ["git", "push", "origin", "v0.3.1"]]);
+  }));
+  it("creates the tag config-immune: -c tag.gpgsign=false pins lightweight semantics (2026-09-13 vim-stall incident)", withManifest("0.3.1", async (repoRoot) => {
+    // Operator config tag.gpgsign=true makes a plain `git tag` annotated:
+    // it opens an editor (invisible under piped stdio) and invokes gpg —
+    // both must be unreachable from the headless merge tail, so every tag
+    // CREATION call carries the -c override. The delete is untouched.
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args]);
+      if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    await tagMergedRelease({ run, repoRoot });
+    const creations = calls.filter(([, ...args]) => args[0] === "-c");
+    assert.ok(creations.every(([, ...args]) => args[1] === "tag.gpgsign=false" && args[2] === "tag"), "every tag creation runs under -c tag.gpgsign=false");
+    await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40) } });
+    const retargets = calls.filter(([, ...args]) => args[2] === "tag" && args[3] === "-f");
+    assert.ok(retargets.every(([, ...args]) => args[1] === "tag.gpgsign=false"), "the -f retarget creation is equally config-immune");
   }));
   it("fails closed on tag creation failure (e.g. tag already exists)", withManifest("0.3.1", async (repoRoot) => {
     const run = async (command, args) =>
-      args[0] === "tag"
+      args[0] === "-c" && args[2] === "tag"
         ? { code: 128, stdout: "", stderr: "already exists" }
         : { code: 0, stdout: "", stderr: "" };
     const result = await tagMergedRelease({ run, repoRoot });
@@ -236,7 +254,7 @@ describe("tagMergedRelease", () => {
     const result = await tagMergedRelease({ run, repoRoot });
     assert.equal(result.ok, false);
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);
-    assert.deepEqual(calls, [["git", "tag", "v0.3.1"], ["git", "push", "origin", "v0.3.1"], ["git", "tag", "-d", "v0.3.1"]]);
+    assert.deepEqual(calls, [["git", "-c", "tag.gpgsign=false", "tag", "v0.3.1"], ["git", "push", "origin", "v0.3.1"], ["git", "tag", "-d", "v0.3.1"]]);
   }));
   it("fails closed on an invalid plugin.json version", withManifest("x", async (repoRoot) => {
     const result = await tagMergedRelease({ run: ok(), repoRoot });
@@ -273,7 +291,7 @@ describe("tagMergedRelease", () => {
     assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
     assert.deepEqual(calls, [
       ["git", "rev-parse", "v0.3.1^{}"],
-      ["git", "tag", "-f", "v0.3.1"],
+      ["git", "-c", "tag.gpgsign=false", "tag", "-f", "v0.3.1"],
       ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`, "origin", "v0.3.1"],
     ], "a local tag at the reserved OID is our own fetch-followed reservation — replace it at HEAD; the push may only move a tag that still sits at our own reservation");
   }));
@@ -289,7 +307,7 @@ describe("tagMergedRelease", () => {
     assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
     assert.deepEqual(calls, [
       ["git", "rev-parse", "v0.3.1^{}"],
-      ["git", "tag", "v0.3.1"],
+      ["git", "-c", "tag.gpgsign=false", "tag", "v0.3.1"],
       ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`, "origin", "v0.3.1"],
     ]);
   }));

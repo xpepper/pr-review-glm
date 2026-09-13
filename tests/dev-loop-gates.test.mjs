@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   gateBranchHead, gateDocsUpdated, gateIncrementPr, gateMainGreen,
-  gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, mergeabilityGate, reportGates,
+  gateRepoIdle, gateSmokes, gateTests, gateZcodeHeadless, mergeabilityGate, reportGates, runPreflightGates,
 } from "../scripts/dev-loop/gates.mjs";
 
 const repoRoot = "/repo"; // never touched: all commands are faked
@@ -254,5 +254,43 @@ describe("reportGates", () => {
     const text = reportGates([{ name: "a", ok: true, detail: "fine" }, { name: "b", ok: false, detail: "broken" }]);
     assert.match(text, /PASS a — fine/);
     assert.match(text, /FAIL b — broken/);
+  });
+});
+
+describe("runPreflightGates", () => {
+  const idleOutputs = {
+    "git rev-parse --abbrev-ref HEAD": { code: 0, stdout: "main\n", stderr: "" },
+    "git rev-parse main origin/main": { code: 0, stdout: "commit-a\ncommit-a\n", stderr: "" },
+    "gh pr list --state open --json number,headRefName": { code: 0, stdout: "[]", stderr: "" },
+  };
+  const makeRun = (probeResult) => {
+    const calls = [];
+    const run = async (command, args, opts = {}) => {
+      calls.push([command, ...args]);
+      if (command === "zcode") return probeResult(opts);
+      const key = `${command} ${args.join(" ")}`;
+      return idleOutputs[key] ?? { code: 0, stdout: "", stderr: "" };
+    };
+    return { calls, run };
+  };
+  it("runs all four gates when the probe passes", async () => {
+    const { calls, run } = makeRun((opts) => ({ code: 0, stdout: opts.env.ZPR_PROBE_TOKEN, stderr: "" }));
+    const logs = [];
+    const results = await runPreflightGates({ run, repoRoot: realRoot, zcode: "zcode", env: {}, log: (l) => logs.push(l) });
+    assert.deepEqual(results.map((g) => g.name), ["repo-idle", "zcode-headless", "tests", "smokes"]);
+    assert.ok(results.every((g) => g.ok));
+    assert.ok(calls.some(([cmd, ...args]) => cmd === "node" && args[0] === "--test"), "tests gate ran");
+    assert.ok(calls.some(([cmd, ...args]) => cmd === "node" && args[0]?.startsWith("tests/smoke-")), "smokes gate ran");
+    assert.equal(logs.length, 4);
+    assert.match(logs[1], /^gate zcode-headless: PASS /);
+  });
+  it("short-circuits on a failed probe: tests and smokes never run", async () => {
+    const { calls, run } = makeRun(() => ({ code: 0, stdout: "I don't have a shell tool available in this session", stderr: "" }));
+    const logs = [];
+    const results = await runPreflightGates({ run, repoRoot: realRoot, zcode: "zcode", env: {}, log: (l) => logs.push(l) });
+    assert.deepEqual(results.map((g) => g.name), ["repo-idle", "zcode-headless"]);
+    assert.equal(results[1].ok, false);
+    assert.ok(!calls.some(([cmd]) => cmd === "node"), "no test/smoke execution after a failed probe");
+    assert.match(logs[1], /^gate zcode-headless: FAIL /);
   });
 });

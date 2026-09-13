@@ -125,6 +125,23 @@ export async function gateSmokes({ run, repoRoot, exclude = [] }) {
   return ok("smokes", files.length ? `${files.length} smoke script(s) green${exclude.length ? ` (excluded: ${exclude.join(", ")})` : ""}` : "no smoke scripts discovered");
 }
 
+// Preflight sequence with probe fail-fast: repo-idle and the toolset probe
+// run first (both cheap); a FAILED probe skips tests and smokes — they cannot
+// diagnose a phase environment that cannot execute commands, and running them
+// only spends ~a minute before the identical stop (2026-09-13 launch 1 wasted
+// exactly that after the probe had already refused; flagged then, folded
+// here). Every other gate failure keeps the historical run-all behavior.
+export async function runPreflightGates({ run, repoRoot, zcode, env, log = () => {} }) {
+  const logGate = (gate) => { log(`gate ${gate.name}: ${gate.ok ? "PASS" : "FAIL"} — ${gate.detail}`); return gate; };
+  const results = [logGate(await gateRepoIdle({ run, repoRoot }))];
+  const probe = logGate(await gateZcodeHeadless({ run, zcode, repoRoot, env }));
+  results.push(probe);
+  if (!probe.ok) return results;
+  results.push(logGate(await gateTests({ run, repoRoot })));
+  results.push(logGate(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] })));
+  return results;
+}
+
 export async function gateIncrementPr({ run, repoRoot }) {
   const prs = await run("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName,url,headRefOid"], { cwd: repoRoot });
   let open = [];
