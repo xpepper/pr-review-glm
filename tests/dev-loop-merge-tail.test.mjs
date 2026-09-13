@@ -64,7 +64,7 @@ describe("mergeTail", () => {
       ["git", "checkout", "main"],
       ["git", "pull", "--ff-only"],
       ["git", "rev-parse", "HEAD"],
-      ["git", "tag", "v0.3.1"],
+      ["git", "-c", "tag.gpgsign=false", "tag", "v0.3.1"],
       ["git", "push", "origin", "v0.3.1"],
     ]);
   }));
@@ -73,7 +73,7 @@ describe("mergeTail", () => {
     const { calls, run } = fakeRun({ states: ["MERGED"], tagOid: RESERVED_AT });
     const result = await mergeTail({ run, repoRoot, merged: ok("merged"), prNumber: 23, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT }, sleep: noSleep });
     assert.equal(result.code, 0);
-    assert.ok(calls.some(([command, ...args]) => command === "git" && args[0] === "tag" && args[1] === "-f" && args[2] === "v0.3.1"),
+    assert.ok(calls.some(([command, ...args]) => command === "git" && args[0] === "-c" && args[2] === "tag" && args[3] === "-f" && args[4] === "v0.3.1"),
       "the fetch-followed local copy of our own reservation is replaced at HEAD, not collided with");
     assert.ok(calls.some(([command, ...args]) => command === "git" && args.includes(`--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`)),
       "the tail must move only our own reservation, never clobber a moved tag");
@@ -155,7 +155,7 @@ describe("mergeTail", () => {
   it("surfaces a tag failure as a merge-path failure without un-merging", withManifest(async (repoRoot) => {
     const { run } = fakeRun({ states: ["MERGED"] });
     const wrapped = async (command, args) =>
-      command === "git" && args[0] === "tag" ? fail("already exists") : run(command, args);
+      command === "git" && args[0] === "-c" && args[2] === "tag" ? fail("already exists") : run(command, args);
     const result = await mergeTail({ run: wrapped, repoRoot, merged: ok("merged"), prNumber: 23, sleep: noSleep });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /release tag failed/);

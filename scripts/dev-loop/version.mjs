@@ -204,14 +204,23 @@ export async function tagMergedRelease({ run, repoRoot, reservation = null }) {
   // remote reservation. A local tag anywhere else is a tag we did not reserve —
   // a human decision, never a silent clobber. Without a reservation an existing
   // local tag keeps failing closed exactly as before.
-  let createArgs = ["tag", tag];
+  // The `-c tag.gpgsign=false` prefix is load-bearing: a plain `git tag`
+  // inherits operator config, and with tag.gpgsign=true (git ≥2.48 semantics)
+  // it becomes an annotated tag that opens an EDITOR and invokes gpg — inside
+  // the headless merge tail, whose piped stdio makes the editor invisible
+  // while the tag call hangs forever (2026-09-13, v0.2.3: a 15-minute vim
+  // stall after a completed merge; no timeout guards a hung interactive
+  // child). The loop's tags are lightweight by design — the
+  // lightweight-vs-annotated question stays flagged for the owner — and the
+  // -c pins that deterministically regardless of operator git config.
+  let createArgs = ["-c", "tag.gpgsign=false", "tag", tag];
   if (reservation) {
     const existing = await run("git", ["rev-parse", `${tag}^{}`], { cwd: repoRoot });
     if (existing.code === 0) {
       if (existing.stdout.trim() !== reservation.reservedAt) {
         return { ok: false, detail: `local tag ${tag} exists at ${existing.stdout.trim().slice(0, 7)}, not the reserved ${reservation.reservedAt.slice(0, 7)} — refusing to overwrite a tag we did not reserve` };
       }
-      createArgs = ["tag", "-f", tag];
+      createArgs = ["-c", "tag.gpgsign=false", "tag", "-f", tag];
     }
   }
   const created = await run("git", createArgs, { cwd: repoRoot });

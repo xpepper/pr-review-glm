@@ -34,6 +34,54 @@ the development workflow itself.
 
 ## Journey log
 
+- **2026-09-13 (first live tag-retarget exercise caught an operator-config
+  hazard in the tagging tail — loop-side fix)** — I6 launch 2
+  (`--merge auto --dogfood on`) completed the fastest clean iteration yet:
+  preflight PASS, worker 26.8m (PR #33 at head 19b956b; 353/353 tests + smokes
+  run through a shell-capable subagent — see below), assessment gates 2.5m
+  incl. a real smoke-i3 against the PR, independent review approve-with-nits
+  (2 P2) in 5.7m, dogfood approve-with-nits (2 P2) in 1.3m, zero fixer rounds,
+  GraphQL squash merge → main 9ee0ac7, version-bump gate + merge-time
+  re-verify + tag reservation all green. The tagging tail then STOPPED the run
+  inside `git tag -f v0.2.3`: the operator's global `tag.gpgsign=true` (git ≥2.48
+  semantics) turns a plain `git tag` into an annotated tag that opens an
+  EDITOR — and the loop spawns git with piped stdio, so the editor (vim) was
+  invisible: the terminal showed only the merge narration while the tail hung
+  15+ minutes (no timeout is passed for the tag call; a hung interactive child
+  never fails on its own). It was also the first time ANY run reached a
+  working `git tag` — every earlier tail died at the reservation collision
+  before this code path executed. Supervisor resolution (the sanctioned
+  release-repair path): the invisible vim was SIGTERM'd, git aborted, the loop
+  stopped cleanly ("release tag failed (merge itself completed)"; its report
+  captured the vim warnings verbatim), then the release was completed by hand:
+  v0.2.3 re-created annotated + signed at the merge commit 9ee0ac7 and pushed
+  with force-with-lease over the reservation (remote peel verified), branch
+  deleted local+remote, post-merge main-green green (353/353, smoke-i1/i2
+  pass, smoke-i3 skips on idle main). This fix PR: (1) `tagMergedRelease`
+  creates its tag via `git -c tag.gpgsign=false tag …` — operator config can
+  never flip the loop's tags into an editor/signing flow; the loop's tags stay
+  lightweight by design (the lightweight-vs-annotated question REMAINS
+  flagged: the supervisor's repair tags are annotated+signed, as v0.2.0–v0.2.3
+  all are); (2) a failed `zcode-headless` probe now short-circuits the
+  remaining preflight gates (launch 1 of 2026-09-13 spent ~1 min of
+  tests+smokes after the probe had already refused — flagged then, folded
+  here; `runPreflightGates` extracted into gates.mjs with tests, per the L2
+  gateBranchHead precedent). Recorded, not decided/fixed: the report's
+  iteration flag `merged: false` reads oddly beside "merge itself completed"
+  (the flag tracks the whole merge path); the I6 review P2s ride to I7 —
+  independent: `parseSelectionSpec` accepts leading-zero specs ("01")
+  inconsistent with the strict PR-number grammar, and a failed follow-up
+  review leaves the prior retainedReview serving inspect/select with no
+  staleness disclosure; dogfood: validate selection range bounds before
+  expanding them, and sanitize terminal control sequences before rendering
+  retained finding fields. Diagnostic record for the phase-toolset
+  degradation (first seen 2026-09-12 ~20:35): the #32 tool-exercising probe
+  PASSED this launch while the I6 worker's OWN session was still shell-less
+  (like I5's) — the worker verified/landed through a shell-capable subagent,
+  which is exactly the code-execution path the probe proves exists ("a
+  code-execution path", not specifically the shell tool). One transient Z.AI
+  504 mid-worker was retried and survived.
+
 - **2026-09-13 (I6 — selection and retention)** — implemented as designed in
   the spec's review-pipeline flow (selection between report and publication,
   retained result in-session): `select.mjs` carries the pure logic —
