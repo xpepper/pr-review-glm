@@ -130,12 +130,45 @@ upstream `lib/` reused with attribution.
   pins the git credential helper to gh's. Re-verify after CLI updates, like
   every other flag.
 
+## Environment facts — plugin marketplace (M1, verified 2026-09-13, Copilot CLI 1.0.83)
+
+- Marketplace repo **xpepper/copilot-plugins** (public, user-commissioned): a GENERIC
+  index for all the user's Copilot plugins — manifest
+  `.github/plugin/marketplace.json` + README only; real plugins stay in their own
+  repositories (external source form); `./plugins/<name>` dirs are reserved for small
+  self-contained packs. Marketplace commits are direct pushes to that no-gates repo,
+  kept to one-line version/entry changes, disclosed in the increment PR.
+- The marketplace NAME is `xpepper-copilot-plugins`: the CLI rejects a marketplace
+  literally named `copilot-plugins` ("is a default marketplace and is already
+  available" — collision with the built-in). Install:
+  `copilot plugin marketplace add xpepper/copilot-plugins` then
+  `copilot plugin install z-pr-review@xpepper-copilot-plugins`.
+- Our entry's source is `{"source":"github","repo":"xpepper/pr-review-glm","path":"."}`
+  plus `"ref": "vX.Y.Z"` — root `path: "."` is ACCEPTED (verified live; the reference
+  marketplace only shows subdirectory paths, and omitting `path` entirely also means
+  root), and `source.ref` tag pinning is HONORED by install/update (verified live:
+  `plugin update` tracked ref `v0.2.3` then `v0.2.4` exactly). Because entries are
+  pinned, each release tag must exist on origin before a fresh install of that
+  version works — push the tag at merge, before announcing the release.
+- Marketplace-installed plugins do **not** need `--experimental` on 1.0.83
+  (registration + dispatch verified without it); `--plugin-dir` dev loading still
+  uses it. Uninstall the marketplace copy (`copilot plugin uninstall z-pr-review`)
+  before any `--plugin-dir` session — double registration is the I1
+  dispatch-ambiguity class.
+- **Release discipline (gate-enforced from M1):** every increment that bumps
+  `plugin.json` also bumps the marketplace entry version AND its `ref` tag in the same
+  increment; `tests/smoke-m1.mjs` (run inside `gateSmokes`) fails the assessment
+  otherwise. The smoke reads the manifest via the GitHub contents API, not
+  raw.githubusercontent — the raw CDN can lag a just-pushed bump by ~5 minutes and
+  fail the gate spuriously.
+
 ## Conventions
 
 - Plain ESM JavaScript (`.mjs`) for the extension and modules; no build step in v1.
 - Tests: `node --test` unit tests + smoke scripts under `tests/` (SDK-dispatch
   smoke scripts share `tests/smoke-harness.mjs` — extend it, don't fork it; script smokes
-  that never touch the Copilot SDK, like `tests/smoke-l1.mjs`, don't use the harness).
+  that never touch the Copilot SDK, like `tests/smoke-l1.mjs` or `tests/smoke-m1.mjs`
+  (marketplace consistency), don't use the harness).
   smoke-i1/i2 are no-inference; `tests/smoke-i3.mjs` dispatches a real review whose lane
   child performs inference **by design** — the harness still asserts the parent session
   stream stays inference-free.
