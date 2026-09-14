@@ -277,12 +277,22 @@ export async function releaseTagReservation({ run, repoRoot, tag, reservedObject
       }
     }
   } else {
-    // No expected object to compare against (the resolve-failure path): the
-    // tag was created by this run moments ago — best-effort delete, and an
-    // already-absent tag deleting to "not found" is not a problem.
-    const del = await run("git", ["tag", "-d", tag], { cwd: repoRoot });
-    if (del.code !== 0 && !/not found|does not exist/i.test(del.stderr ?? "")) {
-      problems.push(`local delete failed: ${(del.stderr || del.stdout || "no output").trim().slice(0, 200)}`);
+    // No reserved object to compare against (the resolve-failure path). When
+    // the peel verification established the object (leaseObject), a RESOLVABLE
+    // local tag is deleted only if it still points there; a local tag that
+    // resolves to anything else — or resolves when nothing was verified —
+    // cannot be proven this run's and is left in place, disclosed (dogfood
+    // round 2: another actor may have created or moved the shared checkout's
+    // tag while this run's own ref was unresolvable). An absent/unresolvable
+    // local tag deletes as a no-op.
+    const local = await run("git", ["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: repoRoot });
+    if (local.code === 0 && (leaseObject === null || local.stdout.trim() !== leaseObject)) {
+      problems.push(`local ${tag} resolves to ${local.stdout.trim().slice(0, 40)} and cannot be proven this run's — left in place`);
+    } else {
+      const del = await run("git", ["tag", "-d", tag], { cwd: repoRoot });
+      if (del.code !== 0 && !/not found|does not exist/i.test(del.stderr ?? "")) {
+        problems.push(`local delete failed: ${(del.stderr || del.stdout || "no output").trim().slice(0, 200)}`);
+      }
     }
   }
   return { released: problems.length === 0, detail: problems.join("; ") };

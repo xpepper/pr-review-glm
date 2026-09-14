@@ -66,8 +66,10 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
 - **Attribution state:** I3–V2 are original code; `docs/ATTRIBUTION.md` lists no
   reused modules. The upstream LICENSE issue (10ego/pi-pr-review#150) stays open as a
   standing record.
-- Tests: `node --test tests/*.test.mjs` (**483** on the V2 branch head, after dogfood
-  fold 1 — the 1 P1 + 2 P2s the dogfood raised on the increment head were all
+- Tests: `node --test tests/*.test.mjs` (**485** on the V2 branch head, after dogfood
+  folds 1–2 (fold 2: the resolve-failure path's unconditional local `git tag -d` now
+  deletes only a resolvable tag matching the peel-verified object — the local twin of
+  fold 1's remote ownership fix; fold 1 — the 1 P1 + 2 P2s the dogfood raised on the increment head were all
   validated real and fixed: capture-path cleanup trusted only from the code-rendered
   capture summary, never the model-influenced findings report, in BOTH the groundtest
   driver and smoke-i3's fallback; a failed ls-remote in the resolve-failure release

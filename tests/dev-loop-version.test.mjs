@@ -478,6 +478,7 @@ describe("releaseTagReservation (V2)", () => {
       calls.push([command, ...args].join(" "));
       if (command === "git" && args[0] === "ls-remote") return res(`${OTHER_OBJECT}\trefs/tags/v0.2.7\n`);
       if (command === "git" && args[0] === "cat-file") return res();
+      if (command === "git" && args[0] === "rev-parse" && args.includes("-q")) return res("", 1);
       if (command === "git" && args[0] === "rev-parse" && args[1] === `${OTHER_OBJECT}^{}`) return res(`${"d".repeat(40)}\n`);
       return res();
     };
@@ -493,6 +494,7 @@ describe("releaseTagReservation (V2)", () => {
     const run = async (command, args) => {
       calls.push([command, ...args].join(" "));
       if (command === "git" && args[0] === "ls-remote") return res("", 128, "fatal: could not read from remote repository");
+      if (command === "git" && args[0] === "rev-parse" && args.includes("-q")) return res("", 1);
       return res();
     };
     const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
@@ -510,6 +512,7 @@ describe("releaseTagReservation (V2)", () => {
       // The object exists on the remote and peels to the reserved commit, but
       // this checkout never created it — another actor's replacement tag.
       if (command === "git" && args[0] === "cat-file") return res("", 128, "fatal: Not a valid object name");
+      if (command === "git" && args[0] === "rev-parse" && args.includes("-q")) return res("", 1);
       if (command === "git" && args[0] === "rev-parse" && args[1] === `${OTHER_OBJECT}^{}`) return res(`${HEAD}\n`);
       return res();
     };
@@ -526,6 +529,7 @@ describe("releaseTagReservation (V2)", () => {
       calls.push([command, ...args].join(" "));
       if (command === "git" && args[0] === "ls-remote") return res(`${OTHER_OBJECT}\trefs/tags/v0.2.7\n`);
       if (command === "git" && args[0] === "rev-parse" && args[1] === `${OTHER_OBJECT}^{}`) return res(`${HEAD}\n`);
+      if (command === "git" && args[0] === "rev-parse" && args.includes("-q")) return res(`${OTHER_OBJECT}\n`);
       return res();
     };
     const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
@@ -541,11 +545,42 @@ describe("releaseTagReservation (V2)", () => {
     const run = async (command, args) => {
       calls.push([command, ...args].join(" "));
       if (command === "git" && args[0] === "ls-remote") return res("");
+      if (command === "git" && args[0] === "rev-parse" && args.includes("-q")) return res("", 1);
       if (command === "git" && args[0] === "tag" && args[1] === "-d") return res("", 1, "error: tag 'v0.2.7' not found.");
       return res();
     };
     const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
     assert.deepEqual(outcome, { released: true, detail: "" });
     assert.ok(!calls.some((c) => c.includes("--delete")), "no remote delete is attempted for an absent tag");
+  });
+
+  it("unknown object, LOCAL tag resolving to a different object than the peel-verified one: left in place and disclosed (dogfood round 2)", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (command === "git" && args[0] === "ls-remote") return res(`${OTHER_OBJECT}\trefs/tags/v0.2.7\n`);
+      if (command === "git" && args[0] === "rev-parse" && args[1] === `${OTHER_OBJECT}^{}`) return res(`${HEAD}\n`);
+      if (command === "git" && args[0] === "rev-parse" && args.includes("-q")) return res(`${"9".repeat(40)}\n`);
+      return res();
+    };
+    const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
+    assert.equal(outcome.released, false);
+    assert.match(outcome.detail, /local v0.2.7 resolves to 999/);
+    assert.match(outcome.detail, /cannot be proven this run's — left in place/);
+    assert.ok(!calls.includes("git tag -d v0.2.7"), "an unprovable local tag is never deleted");
+  });
+
+  it("unknown object, resolvable local tag with NOTHING verified remotely: left in place and disclosed (dogfood round 2)", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (command === "git" && args[0] === "ls-remote") return res("");
+      if (command === "git" && args[0] === "rev-parse" && args.includes("-q")) return res(`${"9".repeat(40)}\n`);
+      return res();
+    };
+    const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
+    assert.equal(outcome.released, false);
+    assert.match(outcome.detail, /cannot be proven this run's — left in place/);
+    assert.ok(!calls.some((c) => c.includes("git tag -d")), "an unprovable local tag is never deleted");
   });
 });
