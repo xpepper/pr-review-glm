@@ -263,12 +263,15 @@ async function runReview(parsed) {
       repoRoot: process.cwd(),
       // I5: adjudication runs inside the total hard cap — its deadline is
       // deadlines.adjudicationMs clipped to whatever of the total budget
-      // remains at assembly time. I8 fold 5: the total clip widens by the
-      // SAME transport read allowance the batch got, or a file-backed batch
-      // that spent its allowance leaves adjudication nothing (a degraded
-      // review from budget accounting, not from adjudication itself).
+      // remains at assembly time. I8 folds 5+6: under file-backed transport
+      // BOTH the adjudication window and the total clip widen by the SAME
+      // read allowance the batch got — the adjudicator reads transport files
+      // too (fold 6: it died at 54s of the 60s cap on this PR's 27-file
+      // manifest), and a batch that spent its allowance otherwise left
+      // adjudication nothing (a degraded review from budget accounting, not
+      // from adjudication itself).
       adjudicationDeadlineAt: Math.min(
-        Date.now() + config.deadlines.adjudicationMs,
+        Date.now() + config.deadlines.adjudicationMs + transportReadAllowanceMs(transport),
         reviewStartedAt + config.deadlines.totalMs + transportReadAllowanceMs(transport),
       ),
       signal: controller.signal,
