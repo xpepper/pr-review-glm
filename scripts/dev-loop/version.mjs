@@ -192,11 +192,14 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
     // The reservation IS on origin (the push above succeeded); resolve it or
     // the version stays stranded — every later run fails the duplicate-tag
     // pre-check on this half-taken reservation (dogfood round-5 P2). The
-    // release is best-effort; the detail names the manual cleanup if it also
-    // fails.
-    await run("git", ["push", "origin", "--delete", `refs/tags/${tag}`], { cwd: repoRoot });
-    await run("git", ["tag", "-d", tag], { cwd: repoRoot });
-    return { ok: false, detail: `cannot resolve the reserved tag object for ${tag}; the reservation was released (merge aborted): ${(reservedObject.stderr || "").slice(0, 200)}` };
+    // release verifies ownership before deleting (the reservation peeled to
+    // the pinned head at creation); the detail names the manual cleanup when
+    // even the verified release fails.
+    const released = await releaseTagReservation({ run, repoRoot, tag, reservedCommit: headRefOid });
+    const outcome = released.released
+      ? "the reservation was released"
+      : `the reservation could NOT be fully released (${released.detail}) — delete it manually if it is still this run's`;
+    return { ok: false, detail: `cannot resolve the reserved tag object for ${tag}; ${outcome} (merge aborted): ${(reservedObject.stderr || "").slice(0, 200)}` };
   }
   return {
     ok: true,
@@ -205,6 +208,67 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
     reservedObject: reservedObject.stdout.trim(),
     detail: `version ${main.version} → ${head.version} confirmed at merge time (PR head ${headRefOid.slice(0, 7)}, annotated release tag ${tag} reserved on origin at ${headRefOid.slice(0, 7)})`,
   };
+}
+
+// Releases a tag reservation this run took — without ever deleting a tag
+// another actor may have moved onto the ref (V2 ground test, the PR #44
+// review's refused-merge P2): the remote delete is LEASED to the reserved tag
+// object (git honors --force-with-lease on --delete pushes — verified live —
+// and the expect value for an annotated tag ref is the TAG OBJECT oid, exactly
+// what the reservation returns). Without a known reservedObject (the
+// resolve-failure path above), the remote tag is verified first by peeling
+// the remote object to the reserved commit (the object was created locally,
+// so the peel resolves from the local object store); a tag that no longer
+// peels there has been moved and is left in place, disclosed. The local tag
+// is deleted only when its ref still resolves to the expected object —
+// absent is fine, moved is disclosed. Returns { released, detail };
+// released=false means manual cleanup is owed.
+export async function releaseTagReservation({ run, repoRoot, tag, reservedObject = null, reservedCommit = null }) {
+  const problems = [];
+  let leaseObject = reservedObject;
+  if (leaseObject === null) {
+    const remote = await run("git", ["ls-remote", "origin", `refs/tags/${tag}`], { cwd: repoRoot });
+    const remoteObject = remote.code === 0 ? /^([0-9a-f]{40})\s+refs\/tags\//.exec(remote.stdout.trim())?.[1] ?? null : null;
+    if (remoteObject !== null) {
+      const peel = await run("git", ["rev-parse", `${remoteObject}^{}`], { cwd: repoRoot });
+      if (peel.code === 0 && peel.stdout.trim() === reservedCommit) {
+        leaseObject = remoteObject;
+      } else {
+        problems.push(`remote ${tag} no longer peels to this run's reserved commit — left in place`);
+      }
+    }
+    // An absent remote tag needs no release — there is nothing to delete.
+  }
+  if (leaseObject !== null) {
+    const released = await run(
+      "git",
+      ["push", "origin", `--force-with-lease=refs/tags/${tag}:${leaseObject}`, "--delete", `refs/tags/${tag}`],
+      { cwd: repoRoot },
+    );
+    if (released.code !== 0) {
+      problems.push(`remote delete rejected or failed: ${(released.stderr || released.stdout || "no output").trim().slice(0, 200)}`);
+    }
+  }
+  if (reservedObject !== null) {
+    const local = await run("git", ["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: repoRoot });
+    if (local.code === 0) {
+      if (local.stdout.trim() === reservedObject) {
+        const del = await run("git", ["tag", "-d", tag], { cwd: repoRoot });
+        if (del.code !== 0) problems.push(`local delete failed: ${(del.stderr || del.stdout || "no output").trim().slice(0, 200)}`);
+      } else {
+        problems.push(`local ${tag} points at ${local.stdout.trim().slice(0, 40)}, not this run's reservation ${reservedObject.slice(0, 40)} — left in place`);
+      }
+    }
+  } else {
+    // No expected object to compare against (the resolve-failure path): the
+    // tag was created by this run moments ago — best-effort delete, and an
+    // already-absent tag deleting to "not found" is not a problem.
+    const del = await run("git", ["tag", "-d", tag], { cwd: repoRoot });
+    if (del.code !== 0 && !/not found|does not exist/i.test(del.stderr ?? "")) {
+      problems.push(`local delete failed: ${(del.stderr || del.stdout || "no output").trim().slice(0, 200)}`);
+    }
+  }
+  return { released: problems.length === 0, detail: problems.join("; ") };
 }
 
 // Tagging tail of the merge path: after squash-merge + checkout main + ff-only

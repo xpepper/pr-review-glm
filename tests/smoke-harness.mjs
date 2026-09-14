@@ -36,14 +36,20 @@ export function resolveSdkPath(cliPath) {
   throw new Error(`Bundled copilot-sdk not found for CLI ${version}; set COPILOT_SDK_PATH`);
 }
 
-export async function startPluginSession({ repoRoot, cliPath = resolveCliPath(), sdkPath = null }) {
+// pluginDir: the directory to load via --plugin-dir (defaults to repoRoot).
+// Pass null to spawn the CLI with NO plugin flags — the session's
+// enableConfigDiscovery loads the marketplace-INSTALLED plugins instead (the
+// real-user loading path, verified M1/I8: marketplace copies need no
+// --experimental argv). Ground tests of a released version use this so the
+// review runs the installed artifact, never a second registration beside it.
+export async function startPluginSession({ repoRoot, cliPath = resolveCliPath(), sdkPath = null, pluginDir = repoRoot }) {
   const { CopilotClient, RuntimeConnection } = await import(
     pathToFileURL(join(sdkPath ?? resolveSdkPath(cliPath), "index.js")).href
   );
   const client = new CopilotClient({
     connection: RuntimeConnection.forStdio({
       path: resolve(cliPath),
-      args: ["--plugin-dir", repoRoot, "--experimental"],
+      args: pluginDir === null ? [] : ["--plugin-dir", pluginDir, "--experimental"],
     }),
   });
   const session = await client.createSession({

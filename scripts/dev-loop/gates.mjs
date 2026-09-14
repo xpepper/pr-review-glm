@@ -167,8 +167,12 @@ function smokeDetail(result) {
 // A failed smoke gets exactly one code-owned retry: smokes hit live GitHub
 // via gh inside SDK-dispatched plugin sessions, and a transient failure there
 // has stopped whole iterations (the precedented smoke-i2 flake; it must not
-// cost a full relaunch). The retry is disclosed in the detail either way —
-// a smoke still has to PASS to pass the gate; only the stop point moves.
+// cost a full relaunch). The retry is disclosed in the detail either way: a
+// recovered smoke reports its first attempt's tail, and a smoke failing BOTH
+// attempts reports both tails — which attempt produced which diagnostic is
+// exactly the transient-vs-real evidence the retry exists to triage (a
+// V2 ground-test finding on this gate's own #41). A smoke still has to PASS
+// to pass the gate; only the stop point moves.
 // `increment`, when set, rides the child env as SMOKE_INCREMENT so the
 // target-selecting smokes (smoke-i3) pick the SAME PR the loop's gates assess
 // (the i8- prefix) instead of "whatever increment-shaped PR is open" — the
@@ -183,9 +187,12 @@ export async function gateSmokes({ run, repoRoot, exclude = [], increment = null
     if (result.code !== 0) {
       const first = result;
       result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000, env: childEnv });
-      if (result.code === 0) retried.push(`${file} (first attempt: ${smokeDetail(first)})`);
+      if (result.code === 0) {
+        retried.push(`${file} (first attempt: ${smokeDetail(first)})`);
+      } else {
+        return bad("smokes", `${file} failed both attempts — first: ${smokeDetail(first)} | retry: ${smokeDetail(result)}`);
+      }
     }
-    if (result.code !== 0) return bad("smokes", `${file} failed: ${smokeDetail(result)}`);
   }
   if (!files.length) return ok("smokes", "no smoke scripts discovered");
   return ok(
