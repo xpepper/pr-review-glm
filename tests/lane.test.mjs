@@ -1748,3 +1748,28 @@ describe("runLane telemetry baseline (fold round 1)", () => {
     assert.equal(outcome.telemetry.usageNanoAiu, 50);
   });
 });
+
+// Fold round 2: the adjudicator path (no coverage enforcement) still verifies
+// every transport file EXISTS before dispatch — a vanished section must not
+// let an unenforced caller merge candidates against a file it could never read.
+describe("runLane adjudicator existence guard (fold round 2)", () => {
+  it("fails closed before dispatch when a transport file vanished, even unenforced", async () => {
+    const transportRoot = mkdtempSync(join(tmpdir(), "z-pr-review-lane-adj-guard-"));
+    try {
+      const diff = ["diff --git a/a.mjs b/a.mjs", "--- a/a.mjs", "+++ b/a.mjs", "@@ -1,1 +1,2 @@", " ctx", "+x"].join("\n");
+      const envelope = { ...ENVELOPE, diff };
+      const transport = await buildFileBackedTransport({ envelope, thresholdBytes: 1, tempRoot: transportRoot });
+      const broken = { ...transport, files: [{ ...transport.files[0], absolutePath: join(transport.dir, "f-9999.diff") }] };
+      const { createRuntime } = fakeRuntime([]);
+      const outcome = await runLane({
+        lane: HEAVY_LANE, envelope, config: laneConfig, repoRoot: process.cwd(),
+        deadlineAt: Date.now() + 60_000, createRuntime, transport: broken,
+        enforceReadCoverage: false, prompt: "adjudicator prompt",
+      });
+      assert.equal(outcome.status, "failed");
+      assert.match(outcome.reason, /file-backed transport is unreadable/);
+    } finally {
+      rmSync(transportRoot, { recursive: true, force: true });
+    }
+  });
+});

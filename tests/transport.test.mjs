@@ -211,3 +211,29 @@ describe("splitDiffSections (headerless sections, fold round 1)", () => {
     }
   });
 });
+
+// Fold round 2: a failed transport write removes the partial directory — a
+// leaked half-written transport is captured diff content on disk.
+describe("buildFileBackedTransport partial-failure cleanup (fold round 2)", () => {
+  it("removes the directory when a section write fails, failing closed", async () => {
+    const root = mkdtempSync(join(tmpdir(), "z-pr-review-transport-partial-"));
+    try {
+      const { readdirSync } = await import("node:fs");
+      const { writeFile: realWrite } = await import("node:fs/promises");
+      let written = 0;
+      const failingWrite = async (path, data, opts) => {
+        written += 1;
+        if (written === 2) throw new Error("ENOSPC: simulated disk full");
+        return realWrite(path, data, opts);
+      };
+      await assert.rejects(
+        buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: root, writeFile: failingWrite }),
+        (error) => error instanceof TransportError && /could not write the file-backed transport/.test(error.message),
+      );
+      assert.equal(written, 2, "the first section wrote, the second failed");
+      assert.deepEqual(readdirSync(root), [], "the partially written transport directory was removed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

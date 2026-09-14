@@ -172,6 +172,12 @@ async function runReview(parsed) {
   const review = { controller, done: Promise.resolve() };
   activeReviews.add(review);
   const reviewStartedAt = Date.now();
+  // Declared ABOVE the try (not at first use): the finally below removes the
+  // transport directory on EVERY exit path, and a `let` declared mid-try is
+  // still in its temporal dead zone when an early exit (skipped capture, a
+  // CaptureError) reaches that finally — the ReferenceError would REPLACE the
+  // review's real outcome (caught live by smoke-i3, 2026-09-14).
+  let transport = null;
   try {
     await store.load();
     const config = store.get();
@@ -204,7 +210,6 @@ async function runReview(parsed) {
     // A transport that cannot be built fails the review closed: falling back
     // to an embedded multi-hundred-KB prompt is the condition this exists to
     // prevent, never a silent degradation.
-    let transport;
     try {
       transport = await buildFileBackedTransport({ envelope: outcome.envelope });
     } catch (error) {
@@ -314,14 +319,22 @@ async function runReview(parsed) {
       // must not reach the POST even if it reached publication.
       await runPublication(target, controller.signal);
     }
+  } catch (error) {
+    if (error instanceof CaptureError) {
+      await session.log(`Capture refused — nothing was written: ${error.message}`, { level: "error" });
+      return;
+    }
+    throw error;
+  } finally {
     // The transport directory (large diffs only) outlives its usefulness the
     // moment the review settles — anchor validation at publication reads the
     // live PR files API, never the transport files, and the retained result
     // references only the capture path (which is I2-era deliberate retention:
-    // inspect names it). Best-effort removal with disclosure; a review that
-    // throws past this point leaves the dir to OS temp cleanup (dogfood
-    // round-1 P2: transport dirs are diff content on disk — never kept).
-    if (transport.mode === "file-backed") {
+    // inspect names it). In the finally (dogfood round-2 P2): a review that
+    // throws or is cancelled mid-flight must not leak it either. Best-effort
+    // removal with disclosure (transport dirs are diff content on disk —
+    // never kept).
+    if (transport?.mode === "file-backed") {
       try {
         await rm(transport.dir, { recursive: true, force: true });
       } catch (error) {
@@ -330,13 +343,6 @@ async function runReview(parsed) {
         );
       }
     }
-  } catch (error) {
-    if (error instanceof CaptureError) {
-      await session.log(`Capture refused — nothing was written: ${error.message}`, { level: "error" });
-      return;
-    }
-    throw error;
-  } finally {
     activeReviews.delete(review);
   }
 }

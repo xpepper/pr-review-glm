@@ -522,7 +522,7 @@ describe("publishReview gates", () => {
     const { runGh, calls } = fakeGh(behavior);
     await assert.rejects(
       publishReview({ retained: retained(), signal: controller.signal, runGh }),
-      (error) => error instanceof PublishError && error.message.includes("cancelled during publication"),
+      (error) => error instanceof PublishError && /cancelled while re-checking the PR immediately before posting/.test(error.message),
     );
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "a cancelled review never POSTs");
   });
@@ -766,7 +766,7 @@ describe("publishReview reconciliation and cancellation (I8)", () => {
     };
     await assert.rejects(
       publishReview({ retained: retained(), runGh: wrapped, signal: controller.signal, sleep: noSleep }),
-      (error) => error instanceof PublishError && /cancelled while resolving the authenticated gh user/.test(error.message),
+      (error) => error instanceof PublishError && /cancelled while fetching PR #33 for publication gates/.test(error.message),
     );
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "nothing was posted");
   });
@@ -828,5 +828,47 @@ describe("publishReview abort-aware reconciliation backoff (fold round 1)", () =
     );
     const scans = calls.filter((c) => !c.args.includes("POST") && c.args.join(" ").includes("/reviews"));
     assert.equal(scans.length, 2, "pre-POST scan + exactly one reconciliation scan; the aborted backoff never reached scan 2");
+  });
+});
+
+// Fold round 2: an abort landing DURING an in-flight gh call is treated as
+// cancelled before its mangled result is interpreted — the caller never waits
+// out the request timeout nor acts on a killed call's output.
+describe("publishReview in-flight abort (fold round 2)", () => {
+  it("a signal aborting mid-call surfaces as the cancelled refusal, not a gh failure", async () => {
+    const controller = new AbortController();
+    const calls = [];
+    const runGh = async (args, opts = {}) => {
+      calls.push({ args, opts });
+      // Abort lands while the first PR fetch is "in flight".
+      controller.abort(new Error("parent session ended"));
+      return ghReply(openPr());
+    };
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh, signal: controller.signal, sleep: async () => {} }),
+      (error) => error instanceof PublishError && /cancelled while fetching PR #33/.test(error.message),
+    );
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "nothing was posted");
+  });
+  it("threads the signal into every gh invocation so the real runner can kill in-flight children", async () => {
+    const seen = [];
+    const runGh = async (args, opts = {}) => {
+      seen.push(opts);
+      const joined = args.join(" ");
+      if (joined.includes("api user")) return ghReply({ login: VIEWER });
+      if (joined.includes("/reviews") || joined.includes("/files")) return ghReply([]);
+      return ghReply(openPr());
+    };
+    const signal = new AbortController().signal;
+    const { runGh: _ignored } = { runGh };
+    await publishReview({ retained: retained({ ...defaultSelection([]) }), runGh, signal, sleep: async () => {} }).catch(() => {});
+    // The empty-selection path skips before any gh call; use a normal run instead:
+    seen.length = 0;
+    await publishReview({ retained: retained(), runGh, signal, sleep: async () => {} }).then(
+      () => {},
+      () => {},
+    );
+    assert.ok(seen.length > 0);
+    assert.ok(seen.every((opts) => opts.signal === signal), "every gh call carries the review's signal");
   });
 });

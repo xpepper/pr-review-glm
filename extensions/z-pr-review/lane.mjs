@@ -266,6 +266,27 @@ export async function runLane({
         };
       }
     }
+  } else if (transport !== null) {
+    // No coverage enforcement (the adjudicator), but the transport must still
+    // EXIST before dispatch (dogfood round-2 P2): a vanished section would
+    // let an unenforced caller merge candidates against a file it could never
+    // read — host re-validation anchors against the captured diff, which
+    // still names that file, so nothing downstream would catch the gap.
+    for (const file of transport.files) {
+      try {
+        realpathSync(file.absolutePath);
+      } catch {
+        return {
+          status: "failed",
+          reason: `file-backed transport is unreadable: ${file.absolutePath}`,
+          findings: [],
+          dropped: [],
+          laneText: "",
+          laneId: lane.id,
+          tier: lane.tier,
+        };
+      }
+    }
   }
   const coverage =
     readTransportFiles !== null

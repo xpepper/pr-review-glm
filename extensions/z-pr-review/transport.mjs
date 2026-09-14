@@ -6,7 +6,7 @@
 // required reads. The captured diff stays the authority — the transport files
 // are slices of it, never a live checkout. Pure code; the session model never
 // runs here (spec: "Architecture A").
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile as defaultWriteFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseDiffAnchors } from "./adjudicate.mjs";
@@ -109,6 +109,9 @@ export async function buildFileBackedTransport({
   thresholdBytes = FILE_BACKED_THRESHOLD_BYTES,
   tempRoot = tmpdir(),
   now = () => new Date(),
+  // Injectable writer (the capture.mjs runGh pattern): tests drive partial
+  // write failures without touching the filesystem's failure modes.
+  writeFile = defaultWriteFile,
 }) {
   const diffBytes = Buffer.byteLength(envelope.diff, "utf8");
   if (diffBytes < thresholdBytes) return { mode: "inline", diffBytes, thresholdBytes };
@@ -143,10 +146,18 @@ export async function buildFileBackedTransport({
   // Sequential writes (dogfood round-1 P2): Promise.all over every section
   // starts one fs op per changed file — unbounded for a pathological
   // multi-thousand-file diff. Writing in order is milliseconds here and
-  // carries no concurrency ceiling at all.
-  for (const file of files) {
-    await writeFile(join(dir, file.file), `${file.lines.join("\n")}\n`, { mode: 0o600 });
-    await chmod(join(dir, file.file), 0o600);
+  // carries no concurrency ceiling at all. A failure mid-loop removes the
+  // partial directory (dogfood round-2 P2: a leaked half-written transport
+  // is captured diff content on disk) before failing closed.
+  try {
+    for (const file of files) {
+      await writeFile(join(dir, file.file), `${file.lines.join("\n")}\n`, { mode: 0o600 });
+      await chmod(join(dir, file.file), 0o600);
+    }
+  } catch (error) {    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    throw error instanceof TransportError
+      ? error
+      : new TransportError(`could not write the file-backed transport under ${dir}: ${String(error?.message ?? error).slice(0, 200)}`);
   }
   // `lines` was construction-only scaffolding; the manifest that travels into
   // prompts and results stays lean.

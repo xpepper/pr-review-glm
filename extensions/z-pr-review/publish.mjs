@@ -41,8 +41,11 @@ export class PublishError extends Error {
 // with an explicit stdin write: async `execFile` silently ignores an `input`
 // option (it exists only on the *Sync variants), so the POST payload must be
 // written to the child's stdin stream. Always resolves; failures surface as
-// code/stderr/timedOut so the caller stays fail-closed.
-export function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
+// code/stderr/timedOut so the caller stays fail-closed. A `signal` (dogfood
+// round-2 P2) SIGTERMs the child mid-flight — the cancelled caller must not
+// wait out the full 30s request timeout while holding the per-PR lock; a
+// killed POST is an uncertain write the marker reconciliation already owns.
+export function defaultRunGh(args, { cwd, timeoutMs, stdin, signal = null }) {
   const MAX_OUTPUT_BYTES = 64 * 1024 * 1024;
   return new Promise((resolve) => {
     const child = spawn("gh", args, { cwd, stdio: ["pipe", "pipe", "pipe"] });
@@ -54,12 +57,23 @@ export function defaultRunGh(args, { cwd, timeoutMs, stdin }) {
     let overflowed = false;
     let settled = false;
     let timer = null;
+    let killTimer = null;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       if (timer !== null) clearTimeout(timer);
+      if (killTimer !== null) clearTimeout(killTimer);
+      if (signal) signal.removeEventListener("abort", onAbort);
       resolve(result);
     };
+    const onAbort = () => {
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
     // Byte counters, not string lengths: `length` counts UTF-16 code units, so
     // multibyte output would silently under-report against a byte budget.
     // Once the budget is tripped nothing more is retained — SIGKILL is async,
@@ -258,7 +272,14 @@ async function ghJson(runGh, cwd, args, doingWhat, { stdin, signal } = {}) {
   if (signal?.aborted) {
     throw new PublishError(`the review was cancelled while ${doingWhat}; nothing more was attempted.`);
   }
-  const result = await runGh(args, { cwd, timeoutMs: DEFAULT_GH_TIMEOUT_MS, ...(stdin === undefined ? {} : { stdin }) });
+  const result = await runGh(args, { cwd, timeoutMs: DEFAULT_GH_TIMEOUT_MS, ...(stdin === undefined ? {} : { stdin }), ...(signal ? { signal } : {}) });
+  // The abort may have landed DURING the call (an in-flight request the
+  // signal killed, or a fake runner in tests): treat it as cancelled before
+  // interpreting the mangled result — the reconciliation/marker machinery
+  // owns any uncertainty a killed POST left behind, on a later run.
+  if (signal?.aborted) {
+    throw new PublishError(`the review was cancelled while ${doingWhat}; nothing more was attempted.`);
+  }
   if (result.code === 0) {
     try {
       return { ok: true, value: JSON.parse(result.stdout) };
@@ -463,6 +484,7 @@ export async function publishReview({
     cwd,
     timeoutMs: DEFAULT_GH_TIMEOUT_MS,
     stdin: payload,
+    ...(signal ? { signal } : {}),
   });
   const base = {
     inlineCount: publication.inline.length,
