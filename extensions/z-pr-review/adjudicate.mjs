@@ -8,6 +8,7 @@
 // re-validated by the same host checks before anything is reported: model text
 // never gains authority (spec: "Publication gates", "Degradation and budgets").
 import { SEVERITIES, runLane } from "./lane.mjs";
+import { buildFileBackedAdjudicatorPrompt } from "./transport.mjs";
 
 const HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
 
@@ -23,7 +24,29 @@ export function parseDiffAnchors(diffText) {
     return files.get(path);
   };
   let current = null;
+  let sawHunk = false;
   for (const line of String(diffText).split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      current = null; // file boundary: ranges must not leak across files
+      sawHunk = false;
+      continue;
+    }
+    const hunk = HUNK_HEADER.exec(line);
+    if (hunk !== null) {
+      sawHunk = true;
+      if (current !== null) {
+        const start = Number(hunk[1]);
+        const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+        // count 0 = a hunk with no new-side lines (pure deletion context).
+        if (count > 0) current.ranges.push([start, start + count - 1]);
+      }
+      continue;
+    }
+    if (sawHunk) continue;
+    // Positional (dogfood round-3 P2): a "++ text" ADDED line inside a hunk
+    // renders as "+++ text" — textually identical to a file header. Only
+    // lines before the file's first hunk header count as ---/+++ headers,
+    // or hunk content would register phantom paths as touched.
     if (line.startsWith("+++ ")) {
       const target = line.slice(4).trim();
       if (target === "/dev/null") continue; // deleted file: old path noted below
@@ -38,16 +61,6 @@ export function parseDiffAnchors(diffText) {
         note(normalizeDiffPath(source));
         touched.add(normalizeDiffPath(source));
         if (current === null) current = note(normalizeDiffPath(source));
-      }
-    } else {
-      const hunk = HUNK_HEADER.exec(line);
-      if (hunk && current !== null) {
-        const start = Number(hunk[1]);
-        const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
-        // count 0 = a hunk with no new-side lines (pure deletion context).
-        if (count > 0) current.ranges.push([start, start + count - 1]);
-      } else if (line.startsWith("diff --git ")) {
-        current = null; // file boundary: ranges must not leak across files
       }
     }
   }
@@ -191,7 +204,7 @@ export function buildAdjudicatorPrompt(envelope, candidates) {
 // adjudicator prompt instead of a lane prompt. Its parsed output is
 // re-validated host-side before use; a malformed or failed call degrades the
 // review rather than poisoning it.
-export async function runAdjudication({ envelope, candidates, config, repoRoot, cliPath, deadlineAt, signal = null, createRuntime }) {
+export async function runAdjudication({ envelope, candidates, config, repoRoot, cliPath, deadlineAt, signal = null, createRuntime, transport = null }) {
   const lane = { id: "adjudicator", tier: "heavy", objective: "merge, deduplicate, and classify candidate findings" };
   const outcome = await runLane({
     lane,
@@ -202,7 +215,15 @@ export async function runAdjudication({ envelope, candidates, config, repoRoot, 
     deadlineAt,
     signal,
     createRuntime,
-    prompt: buildAdjudicatorPrompt(envelope, candidates),
+    // I8: under file-backed transport the adjudicator judges against the same
+    // per-file diff slices (manifest-form prompt, transport dir readable) — but
+    // WITHOUT lane-style read-coverage enforcement: merging candidates needs
+    // targeted reads, and its output is re-validated host-side regardless.
+    prompt: transport !== null
+      ? buildFileBackedAdjudicatorPrompt(envelope, transport, candidates)
+      : buildAdjudicatorPrompt(envelope, candidates),
+    transport,
+    enforceReadCoverage: false,
   });
   if (outcome.status !== "complete") {
     return { status: "failed", reason: outcome.reason, findings: [], dropped: [] };
@@ -216,7 +237,7 @@ export async function runAdjudication({ envelope, candidates, config, repoRoot, 
 // is counted and disclosed; a failed or malformed adjudication degrades to the
 // validated candidates (deduped, policy-filtered) with the failure disclosed —
 // never a silent merge, never a dropped review.
-export async function assembleReview({ batch, mode, envelope, config, repoRoot, cliPath, adjudicationDeadlineAt, signal = null, createRuntime }) {
+export async function assembleReview({ batch, mode, envelope, config, repoRoot, cliPath, adjudicationDeadlineAt, signal = null, createRuntime, transport = null }) {
   const anchors = parseDiffAnchors(envelope.diff);
   const candidates = [];
   for (const lane of batch.lanes) {
@@ -247,6 +268,7 @@ export async function assembleReview({ batch, mode, envelope, config, repoRoot, 
       deadlineAt: adjudicationDeadlineAt,
       signal,
       createRuntime,
+      transport,
     });
   }
 

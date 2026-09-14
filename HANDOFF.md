@@ -1,6 +1,6 @@
 # HANDOFF.md — instructions for the next session
 
-STATUS: next=I8
+STATUS: next=V2
 
 Written for a **fresh session** continuing this project. This file is rewritten at
 the end of every increment; it is the single source of "where we stopped".
@@ -17,75 +17,91 @@ The `STATUS:` line above is machine-owned (dev-loop protocol,
 parses and validates it. Keep it directly under the H1 title. The grammar accepts
 `I`/`L`/`V`/`C` ids since I4 (PR #18) and `M` (marketplace infra) since M1 prep.
 
-## Recorded state (2026-09-13, after M1)
+## Recorded state (2026-09-14, after I8)
 
-- `main` = M1 complete (public marketplace). Working tree clean. No open PRs should
-  remain. **Version is 0.2.5**; tags `v0.2.0`–`v0.2.5` (each peels to its merge
-  commit). M1 landed via the supervised conventional path (the loop's 22:49 launch
-  stopped environmental at the `zcode-headless` preflight: 3/3 shell-less probes);
-  the loop-owned release milestone therefore still awaits its first landing —
-  **I8 is the candidate**.
-- **Marketplace (new, gate-enforced discipline):** install is
-  `copilot plugin marketplace add xpepper/copilot-plugins` +
-  `copilot plugin install z-pr-review@xpepper-copilot-plugins`. Marketplace NAME is
-  `xpepper-copilot-plugins` (the CLI rejects `copilot-plugins` — built-in collision).
-  Entry: external source, root `path: "."`, `ref` pinned to the release tag.
-  Every `plugin.json` bump MUST also bump the marketplace entry version + ref tag in
-  the same increment (one-line direct push to the no-gates marketplace repo,
-  disclosed in the increment PR) — `tests/smoke-m1.mjs` fails the assessment
-  otherwise (it reads the manifest via the fresh contents API, not the ~5-min-laggy
-  raw CDN). Uninstall the marketplace copy before any `--plugin-dir` session AND
-  before manual smoke runs from a normal shell
-  (`copilot plugin uninstall z-pr-review`; verify with `copilot plugin list` — a
-  first uninstall can leave a stale listing; loop phases are exempt: isolated
-  HOME). Full facts in AGENTS.md ("Environment facts — plugin marketplace").
+- `main` = I8 complete (hardening; the pre-1.0 closer). Working tree clean. No open PRs
+  should remain. **Version is 0.2.6**; tags `v0.2.0`–`v0.2.6` (each peels to its merge
+  commit; ANNOTATED by explicit convention since I8 — see AGENTS.md). I8 landed via the
+  supervised conventional path (the user's explicit choice at session start — the third
+  supervised landing after I7/M1), so **the first loop-owned release milestone now
+  belongs to the 1.0.0 era** (V2 or later).
+- **Version decision (user, 2026-09-14): 1.0.0 is DEFERRED.** I8 landed as the additive
+  0.2.6; the user wants to ground-test 0.2.6 (real reviews, feedback, fixes) before
+  calling the tool 1.0.0. V2 is that round; the 1.0.0 bump is the USER's call at its
+  end, not automatic.
+- **I8 delivered (details in the ROADMAP row):** large-diff file-backed transport
+  (`extensions/z-pr-review/transport.mjs`: ≥200 KB diffs become per-file sections on
+  disk + manifest prompts + required-read completeness enforced from permission
+  events, file-granular by necessity — read requests carry paths, not ranges); lane/
+  credit telemetry from `model.call_finished` + `session.usage_checkpoint` (per-lane,
+  informational only, additive machine-block keys `transport` + `lanes[].telemetry`);
+  the three riding I7 P2s fixed (bounded uncertain-write rescan, AbortSignal through
+  paginated gh, smoke-i3 target alignment via `SMOKE_INCREMENT` + `selectIncrementPr`);
+  the loop flags dispositioned (probe-transcript fake-stomp fixed by threading
+  `artDir`/`persist` through `runPreflightGates`; fixer budget 4 + severity ladder;
+  annotated release tags end-to-end; dogfood timeout kept at 20m with the arithmetic
+  documented — NO observed data existed, so the first loop-owned run's
+  `phaseTimings.dogfood` confirms or tunes it).
+- **Known observation (manual verification, disclosed in the I8 PR):** a real lane's
+  two `session.usage_checkpoint` events can carry an IDENTICAL `totalNanoAiu` (the
+  debit cadence is coarser than per-call), so the derived per-lane spend reads 0 —
+  telemetry never invents a delta. Watch whether real reviews show non-zero deltas
+  during V2 ground testing.
+- **Marketplace discipline (unchanged, gate-enforced):** entry bumped to 0.2.6/v0.2.6
+  in-lockstep (xpepper/copilot-plugins, one-line direct push, disclosed in the PR).
+  Uninstall the marketplace copy before any `--plugin-dir` session or manual smoke run
+  from a normal shell (`copilot plugin uninstall z-pr-review`; verify with
+  `copilot plugin list` — a first uninstall can leave a stale listing), and REINSTALL
+  before handing back. Loop phases are exempt (isolated HOME). Full facts in AGENTS.md.
 - **Publication is live (unchanged from I7):** `/z-pr-review N --comment` (or config
   `autoPostReviews`, unless `--no-comment`) publishes the retained settled selection
   as ONE gated COMMENT review; `select`/`inspect` do not publish. Batch
   `partial`/`failed` and `degraded` block the dogfood merge (fail-closed).
-- **Attribution state:** I3–M1 are original code; `docs/ATTRIBUTION.md` lists no
-  reused modules. The upstream LICENSE issue (10ego/pi-pr-review#150) stays open as a
-  standing record.
-- Tests: `node --test tests/*.test.mjs` (**419**). Smokes: `tests/smoke-i1.mjs` and
-  `tests/smoke-i2.mjs` (SDK dispatch, no inference; i1 asserts the status `Version:`
-  line against plugin.json), `tests/smoke-i3.mjs` (SDK dispatch; lane children and
-  adjudicator perform real inference BY DESIGN — parent session stays inference-free;
-  skips cleanly when no PR is open; full 5-lane balanced batch, budget ~13m),
-  `tests/smoke-m1.mjs` (marketplace consistency, no SDK, network: entry present,
-  points at this repo at root, version + ref tag == plugin.json), `tests/smoke-l1.mjs`
-  (script smoke: dev-loop `--dry-run` with `--merge auto --dogfood on`). All must pass
-  before merge. Run smokes from a shell with the real `HOME` (or `COPILOT_SDK_PATH`
-  set) — the harness resolves the bundled SDK from `~/.copilot/pkg`.
+- **Attribution state:** I3–I8 are original code; `docs/ATTRIBUTION.md` lists no
+  reused modules (I8's transport follows OUR spec's design; upstream is described in
+  the research notes only). The upstream LICENSE issue (10ego/pi-pr-review#150) stays
+  open as a standing record.
+- Tests: `node --test tests/*.test.mjs` (**473** on the I8 branch head, after dogfood
+  folds 1–5). Smokes:
+  `tests/smoke-i1.mjs` and `tests/smoke-i2.mjs` (SDK dispatch, no inference; i1 asserts
+  the status `Version:` line against plugin.json, now 0.2.6), `tests/smoke-i3.mjs`
+  (SDK dispatch; real inference inside lane children BY DESIGN; skips cleanly with no
+  open PR; when the loop runs it, `SMOKE_INCREMENT` scopes it to the assessed PR —
+  manual runs keep the generic default), `tests/smoke-m1.mjs` (marketplace consistency,
+  no SDK, network: entry present, root path, version + ref tag == plugin.json),
+  `tests/smoke-l1.mjs` (dev-loop `--dry-run` with `--merge auto --dogfood on`). All
+  must pass before merge. Run smokes from a shell with the real `HOME` (or
+  `COPILOT_SDK_PATH` set) — the harness resolves the bundled SDK from `~/.copilot/pkg`.
 - zcode headless auth remains `ZAI_API_KEY` env (user's terminal only — the
   launchd-sourced value is stale) + keyless `~/.zcode/cli/config.json`; the
-  `zcode-headless` preflight fails fast if that regresses. As of 2026-09-13 ~22:50
-  the environment was DEGRADED (sessions AND subagents shell-less, 3/3 probes) — if
-  it persists, the supervised conventional path is proven (I7, M1).
+  `zcode-headless` preflight fails fast if that regresses. The 2026-09-13 degradation
+  (sessions AND subagents shell-less) may or may not persist — if it does, the
+  supervised conventional path is proven (I7, M1, I8).
 
-## Next increment: I8 — hardening (then 1.0.0)
+## Next increment: V2 — ground-testing feedback round (pre-1.0.0)
 
-Scope (ROADMAP row): large-diff file-backed transport (≥200 KB manifest + required
-read ranges), lane/credit telemetry from runtime events, dogfood-driven fixes.
+Scope (ROADMAP row, intentionally fluid — keep it small):
 
-Riding work flagged for I8 (from I7/M1 folds and reviews — validate against code
-before fixing, disposition honestly):
+- **Ground-test 0.2.6**: run real reviews on real PRs (this repo's increments first;
+  the user may point it at other repos). Collect what breaks, what telemetry shows,
+  and whether file-backed transport ever triggers on real diffs (≥200 KB is rare —
+  if it never fires, that is itself a finding about the threshold).
+- **Dogfood-driven fixes**: fix what ground testing surfaces; riding P2s as they
+  appear. Watch the telemetry deltas (the known 0-delta observation above) and the
+  first loop-owned run's `phaseTimings.dogfood` (confirm or tune the 20m cap — the
+  I8-documented arithmetic says ≈13.5m worst case).
+- **The 1.0.0 decision is the user's**, at the end of V2: if ground testing is
+  satisfying, a small increment bumps 0.2.6 → 1.0.0 (marketplace entry in-lockstep,
+  per the M1 discipline); if not, V3 and iterate. Do not bump 1.0.0 without the
+  user's explicit call.
 
-- Review P2s: single-scan uncertain-write reconciliation; smoke-i3 vs gates target
-  skew (i3 reviews whatever PR is open while gates assess the increment branch);
-  AbortSignal not threaded through paginated `gh` calls.
-- Loop flags: probe-transcript fake-stomp (persist-injection fix owed — unit-test
-  fakes overwrite real probe transcripts under `.dev-loop/`); fixer-budget 2→4
-  policy + severity ladder; lightweight-vs-annotated release tags (decide and
-  document; today they are lightweight, peeling to merge commits).
-- Deferred docs: ROADMAP journey notes for the I7 fixer commits, #38/#39, and M1 are
-  partially covered by the M1 journey entry; fold the remainder into I8's docs pass.
-- Dogfood calibration owed: balanced batch (5 lanes, 12m batch cap) + adjudicator
-  (60s) vs `PHASE_LIMITS.dogfood` (20m) — adjust from observed `.dev-loop` timings.
+Bump discipline: a V2 that changes code bumps `plugin.json` 0.2.6 → 0.2.7 (additive)
+**together with the marketplace entry** (one-line direct push to
+xpepper/copilot-plugins, disclosed in the increment PR) — `tests/smoke-m1.mjs` fails
+the assessment otherwise. The release tag `vX.Y.Z` is pushed at merge, never from a
+branch; fresh installs fail on the missing ref inside that window (disclose it).
 
-Bump `plugin.json` 0.2.5 → 0.2.6 (additive) **together with the marketplace entry**
-(the M1 discipline, smoke-enforced). `1.0.0` when I8 completes.
-
-Dogfood runs from I3 onward: every increment PR (including I8's) is reviewed by
-this tool via the dev-loop before merge. Never merge your own PR — the loop
+Dogfood runs from I3 onward: every increment PR (including V2's, if it lands code) is
+reviewed by this tool via the dev-loop before merge. Never merge your own PR — the loop
 (`node scripts/dev-loop.mjs --merge auto --dogfood on`, launched by the user from a
 shell where `ZAI_API_KEY` is set) or the human owns merging.

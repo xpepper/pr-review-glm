@@ -122,8 +122,39 @@ describe("runLoop merge modes (L2)", () => {
     const summary = await runLoop(d);
     assert.equal(summary.stopped, "failure");
     assert.match(summary.reason, /fixer budget/);
-    assert.equal(calls.fixer, 2);
+    // I8: the budget rose 2 → 4 (the V1/M1 pain: two dogfood P1s exhausted a
+    // 2-round budget and forced supervisor folds).
+    assert.equal(calls.fixer, 4);
     assert.equal(calls.merge, 0);
+  });
+  it("I8 severity ladder: rounds 1–2 carry the blocking findings only; rounds 3–4 widen to every finding", async () => {
+    const scopes = [];
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      runReviewer: async () => ({
+        ...cleanRun,
+        review: review("request-changes", [{ severity: "P1", title: "blocker" }, { severity: "P2", title: "nit" }]),
+      }),
+      runFixer: async (prNumber, findings) => { scopes.push(findings.map((f) => f.severity)); calls.fixer++; return cleanRun; },
+    });
+    const summary = await runLoop(d);
+    assert.equal(summary.stopped, "failure");
+    assert.equal(calls.fixer, 4, "the widened budget runs all four rounds");
+    assert.deepEqual(scopes, [["P1"], ["P1"], ["P1", "P2"], ["P1", "P2"]]);
+  });
+  it("I8 severity ladder: a blocking verdict with no P0/P1 keeps the full findings list (never an empty fixer dispatch)", async () => {
+    const scopes = [];
+    const { deps: d } = deps({
+      mergeMode: "auto",
+      runReviewer: async () => ({
+        ...cleanRun,
+        review: review("request-changes", [{ severity: "P2", title: "only nits" }]),
+      }),
+      runFixer: async (prNumber, findings) => { scopes.push(findings.map((f) => f.severity)); return cleanRun; },
+    });
+    await runLoop(d);
+    assert.ok(scopes.length > 0);
+    assert.ok(scopes.every((scope) => scope.length === 1), "every round carries the P2 — scoping it would dispatch a fixer with nothing to fix");
   });
   it("auto: a crashed reviewer is fatal and never merges", async () => {
     const { deps: d, calls } = deps({ mergeMode: "auto", runReviewer: async () => ({ code: 1, stdout: "", stderr: "", timedOut: false, review: undefined }) });
@@ -347,5 +378,29 @@ describe("runLoop fixer and iteration flow", () => {
     assert.equal(summary.stopped, "completed");
     assert.equal(summary.iterations.length, 2);
     assert.deepEqual(calls.sleeps, [60_000]);
+  });
+});
+
+// Dogfood round-1 fold: P3/nit findings are NOT blockers on the ladder either
+// (reviewBlocking's own definition is P0/P1 — an independent-reviewer P3/nit
+// must not ride rounds 1–2 as if it were).
+describe("runLoop severity ladder (fold round 1)", () => {
+  it("rounds 1–2 keep only P0/P1; P3 and nit findings ride with the P2s from round 3", async () => {
+    const scopes = [];
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      runReviewer: async () => ({
+        ...cleanRun,
+        review: review("request-changes", [
+          { severity: "P1", title: "blocker" },
+          { severity: "P3", title: "minor" },
+          { severity: "nit", title: "style" },
+        ]),
+      }),
+      runFixer: async (prNumber, findings) => { scopes.push(findings.map((f) => f.severity)); calls.fixer++; return cleanRun; },
+    });
+    await runLoop(d);
+    assert.deepEqual(scopes, [["P1"], ["P1"], ["P1", "P3", "nit"], ["P1", "P3", "nit"]]);
+    assert.equal(calls.fixer, 4);
   });
 });

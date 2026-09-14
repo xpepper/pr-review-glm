@@ -6,11 +6,13 @@
 // LLM never orchestrates anything here (spec: "Architecture A"); every
 // handler is plain code and the model runs only inside the lane children.
 import { joinSession } from "@github/copilot-sdk/extension";
+import { rm } from "node:fs/promises";
 import { readPluginVersion } from "./version.mjs";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
-import { runLaneBatch } from "./batch.mjs";
+import { runLaneBatch, transportReadAllowanceMs } from "./batch.mjs";
 import { assembleReview } from "./adjudicate.mjs";
+import { buildFileBackedTransport, describeTransport, TransportError } from "./transport.mjs";
 import { drainUnconfirmedStops } from "./lane.mjs";
 import { publishReview, PublishError, renderPublishResult } from "./publish.mjs";
 import { describeLanes } from "./topologies.mjs";
@@ -170,6 +172,12 @@ async function runReview(parsed) {
   const review = { controller, done: Promise.resolve() };
   activeReviews.add(review);
   const reviewStartedAt = Date.now();
+  // Declared ABOVE the try (not at first use): the finally below removes the
+  // transport directory on EVERY exit path, and a `let` declared mid-try is
+  // still in its temporal dead zone when an early exit (skipped capture, a
+  // CaptureError) reaches that finally — the ReferenceError would REPLACE the
+  // review's real outcome (caught live by smoke-i3, 2026-09-14).
+  let transport = null;
   try {
     await store.load();
     const config = store.get();
@@ -196,6 +204,31 @@ async function runReview(parsed) {
     }
     lastCapture = outcome.summary;
     await session.log(renderCapture(outcome.summary));
+    // I8: at ≥200 KB the diff stops riding in every lane prompt — the frozen
+    // capture is sliced into per-file sections on disk and lanes get a
+    // manifest with required reads (completeness enforced from tool events).
+    // A transport that cannot be built fails the review closed: falling back
+    // to an embedded multi-hundred-KB prompt is the condition this exists to
+    // prevent, never a silent degradation.
+    try {
+      transport = await buildFileBackedTransport({
+        envelope: outcome.envelope,
+        // The review's cancellation and its total budget bound the build too
+        // (dogfood round-3 P2): a pathological multi-thousand-file transport
+        // is all fs work, but a cancelled or expired review never waits it out.
+        signal: controller.signal,
+        deadlineAt: reviewStartedAt + config.deadlines.totalMs,
+      });
+    } catch (error) {
+      if (error instanceof TransportError) {
+        await session.log(`Review refused — ${error.message}`, { level: "error" });
+        return;
+      }
+      throw error;
+    }
+    if (transport.mode === "file-backed") {
+      await session.log(`Large diff (≥ ${transport.thresholdBytes.toLocaleString("en-US")} bytes): ${describeTransport(transport)}.`);
+    }
     // C1: the mode resolves through config — a custom/overridden mode in
     // config.modes composes built-in lanes and custom roles into one lane
     // list that runs through the unchanged budgets, shaping, and gates.
@@ -208,6 +241,7 @@ async function runReview(parsed) {
       config,
       repoRoot: process.cwd(),
       signal: controller.signal,
+      transport: transport.mode === "file-backed" ? transport : null,
       onLaneDone: async (lane, result) => {
         const tail = result.status === "complete"
           ? `complete — ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}`
@@ -227,14 +261,25 @@ async function runReview(parsed) {
       envelope: outcome.envelope,
       config,
       repoRoot: process.cwd(),
+      // I5: adjudication runs inside the total hard cap — its deadline is
+      // deadlines.adjudicationMs clipped to whatever of the total budget
+      // remains at assembly time. I8 folds 5+6: under file-backed transport
+      // BOTH the adjudication window and the total clip widen by the SAME
+      // read allowance the batch got — the adjudicator reads transport files
+      // too (fold 6: it died at 54s of the 60s cap on this PR's 27-file
+      // manifest), and a batch that spent its allowance otherwise left
+      // adjudication nothing (a degraded review from budget accounting, not
+      // from adjudication itself).
       adjudicationDeadlineAt: Math.min(
-        Date.now() + config.deadlines.adjudicationMs,
-        reviewStartedAt + config.deadlines.totalMs,
+        Date.now() + config.deadlines.adjudicationMs + transportReadAllowanceMs(transport),
+        reviewStartedAt + config.deadlines.totalMs + transportReadAllowanceMs(transport),
       ),
       signal: controller.signal,
+      transport: transport.mode === "file-backed" ? transport : null,
     });
     const decorated = {
       ...assembled,
+      transport: transport.mode === "file-backed" ? transport : null,
       lanes: assembled.lanes.map((result) => ({
         ...result,
         modelLabel: modelLabelFor(config, result),
@@ -297,6 +342,23 @@ async function runReview(parsed) {
     }
     throw error;
   } finally {
+    // The transport directory (large diffs only) outlives its usefulness the
+    // moment the review settles — anchor validation at publication reads the
+    // live PR files API, never the transport files, and the retained result
+    // references only the capture path (which is I2-era deliberate retention:
+    // inspect names it). In the finally (dogfood round-2 P2): a review that
+    // throws or is cancelled mid-flight must not leak it either. Best-effort
+    // removal with disclosure (transport dirs are diff content on disk —
+    // never kept).
+    if (transport?.mode === "file-backed") {
+      try {
+        await rm(transport.dir, { recursive: true, force: true });
+      } catch (error) {
+        await session.log(
+          `Note: could not remove the file-backed transport directory ${transport.dir} (${String(error?.message ?? error).slice(0, 120)}); remove it manually.`,
+        );
+      }
+    }
     activeReviews.delete(review);
   }
 }

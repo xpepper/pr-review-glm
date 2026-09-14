@@ -169,14 +169,20 @@ function smokeDetail(result) {
 // has stopped whole iterations (the precedented smoke-i2 flake; it must not
 // cost a full relaunch). The retry is disclosed in the detail either way —
 // a smoke still has to PASS to pass the gate; only the stop point moves.
-export async function gateSmokes({ run, repoRoot, exclude = [] }) {
+// `increment`, when set, rides the child env as SMOKE_INCREMENT so the
+// target-selecting smokes (smoke-i3) pick the SAME PR the loop's gates assess
+// (the i8- prefix) instead of "whatever increment-shaped PR is open" — the
+// I7 review P2 (smoke-i3 vs gates target skew). Unset (manual runs, dry-run)
+// keeps the smoke's own default behavior.
+export async function gateSmokes({ run, repoRoot, exclude = [], increment = null, env = process.env }) {
   const files = smokeFiles(repoRoot, exclude);
+  const childEnv = increment === null ? env : { ...env, SMOKE_INCREMENT: String(increment) };
   const retried = [];
   for (const file of files) {
-    let result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000 });
+    let result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000, env: childEnv });
     if (result.code !== 0) {
       const first = result;
-      result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000 });
+      result = await run("node", [join("tests", file)], { cwd: repoRoot, timeoutMs: 5 * 60_000, env: childEnv });
       if (result.code === 0) retried.push(`${file} (first attempt: ${smokeDetail(first)})`);
     }
     if (result.code !== 0) return bad("smokes", `${file} failed: ${smokeDetail(result)}`);
@@ -184,7 +190,7 @@ export async function gateSmokes({ run, repoRoot, exclude = [] }) {
   if (!files.length) return ok("smokes", "no smoke scripts discovered");
   return ok(
     "smokes",
-    `${files.length} smoke script(s) green${retried.length ? ` — retried once after failure: ${retried.join("; ")}` : ""}${exclude.length ? ` (excluded: ${exclude.join(", ")})` : ""}`,
+    `${files.length} smoke script(s) green${retried.length ? ` — retried once after failure: ${retried.join("; ")}` : ""}${exclude.length ? ` (excluded: ${exclude.join(", ")})` : ""}${increment ? ` (SMOKE_INCREMENT=${increment})` : ""}`,
   );
 }
 
@@ -194,10 +200,19 @@ export async function gateSmokes({ run, repoRoot, exclude = [] }) {
 // only spends ~a minute before the identical stop (2026-09-13 launch 1 wasted
 // exactly that after the probe had already refused; flagged then, folded
 // here). Every other gate failure keeps the historical run-all behavior.
-export async function runPreflightGates({ run, repoRoot, zcode, env, log = () => {} }) {
+// artDir/persist thread through to the probe (I8, the fake-stomp fix): unit
+// tests drive this entry point with fake probe results, and before this
+// threading those fakes persisted as phase-probe-*.log over the REAL
+// transcripts in .dev-loop/ — destroying exactly the environmental evidence
+// the transcripts exist to keep (observed 2026-09-13 20:05 and 2026-09-14
+// 14:43: fixture text, ms-identical headers, mtime inside a suite run).
+export async function runPreflightGates({
+  run, repoRoot, zcode, env, log = () => {},
+  artDir = join(repoRoot, ".dev-loop"), persist = persistPhaseOutput,
+}) {
   const logGate = (gate) => { log(`gate ${gate.name}: ${gate.ok ? "PASS" : "FAIL"} — ${gate.detail}`); return gate; };
   const results = [logGate(await gateRepoIdle({ run, repoRoot }))];
-  const probe = logGate(await gateZcodeHeadless({ run, zcode, repoRoot, env }));
+  const probe = logGate(await gateZcodeHeadless({ run, zcode, repoRoot, env, artDir, persist }));
   results.push(probe);
   if (!probe.ok) return results;
   results.push(logGate(await gateTests({ run, repoRoot })));

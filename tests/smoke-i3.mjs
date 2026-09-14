@@ -20,19 +20,32 @@ import { readdirSync, rmSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { runCommand, startPluginSession, stopClient, waitForCommands } from "./smoke-harness.mjs";
+import { selectIncrementPr } from "../scripts/dev-loop/gates.mjs";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
 // Default target: the increment PR (branch i<N>-<slug>, the same convention the
-// loop's gates select by). A stacked loop-side fix PR may also be open
-// (2026-09-13: #38 fix-loop-smoke-retry beside #37) — those don't match the
-// prefix and are ignored; SMOKE_PR_NUMBER forces any PR explicitly.
+// loop's gates select by). When the loop runs this smoke (gateSmokes sets
+// SMOKE_INCREMENT from the worked increment), the selection is the gates' OWN
+// prefix-scoped rule — importing selectIncrementPr keeps one selection
+// contract, so a stacked loop-side PR (e.g. 2026-09-13: fix-loop-smoke-retry
+// beside an increment) or another increment-shaped PR can never skew this
+// smoke onto a PR the gates did not assess (the I7 review P2, folded I8).
+// Manual runs without the env var keep the generic increment-branch default;
+// SMOKE_PR_NUMBER forces any PR explicitly.
 const INCREMENT_BRANCH = /^[ilvcm]\d+-/i;
 function resolvePrNumber() {
   if (process.env.SMOKE_PR_NUMBER) return Number(process.env.SMOKE_PR_NUMBER);
   const open = JSON.parse(
     execFileSync("gh", ["pr", "list", "--state", "open", "--json", "number,headRefName"], { cwd: repoRoot, encoding: "utf8" }) || "[]",
   );
+  if (process.env.SMOKE_INCREMENT) {
+    const selected = selectIncrementPr(open, process.env.SMOKE_INCREMENT);
+    if (!selected.ok) {
+      throw new Error(`SMOKE_INCREMENT=${process.env.SMOKE_INCREMENT} target selection failed: ${selected.detail}`);
+    }
+    return selected.pr.number;
+  }
   const increments = open.filter((p) => typeof p.headRefName === "string" && INCREMENT_BRANCH.test(p.headRefName));
   if (increments.length === 0) return null;
   assert.equal(increments.length, 1, `expected at most one open increment PR for the default scenario, found: ${increments.map((p) => `${p.number} (${p.headRefName})`).join(", ")}`);

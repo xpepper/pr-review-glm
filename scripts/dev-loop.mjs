@@ -181,7 +181,7 @@ async function runMain(options, { zcode, phaseEnv }) {
     // phase HOME breaks model config or auth, this fails in seconds. A failed
     // probe short-circuits tests/smokes (runPreflightGates) — they cannot
     // diagnose a phase environment that cannot execute commands.
-    preflight: async () => runPreflightGates({ run, repoRoot, zcode, env: phaseEnv, log }),
+    preflight: async () => runPreflightGates({ run, repoRoot, zcode, env: phaseEnv, log, artDir }),
     // Mid-iteration resume (spec Amendments): recognize the checkpoint a
     // previous run left after its worker completed and skip straight to
     // assessment. On adoption no worker runs, so the increment under work is
@@ -242,7 +242,10 @@ async function runMain(options, { zcode, phaseEnv }) {
         // BEFORE the inference-consuming smokes so a bump-less PR fails in
         // seconds instead of after burning model calls (round-2 dogfood P2).
         results.push(logGate(await gateVersionBump({ run, repoRoot })));
-        results.push(logGate(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"] })));
+        // The increment rides the smoke env (SMOKE_INCREMENT) so target-picking
+        // smokes (smoke-i3) assess the SAME PR the gates selected — not
+        // "whatever increment-shaped PR is open" (I7 review P2, folded I8).
+        results.push(logGate(await gateSmokes({ run, repoRoot, exclude: ["smoke-l1.mjs"], increment: workedIncrement })));
         results.push(logGate(await gateDocsUpdated({ readFileSync, repoRoot, increment: workedIncrement })));
       } else {
         results.push(logGate({ name: "increment-pr", ok: false, detail: selected.detail }));
@@ -337,11 +340,21 @@ async function runMain(options, { zcode, phaseEnv }) {
         // The mutation was refused atomically, so the merge did not happen —
         // release the tag reservation verifyBumpAtMerge just took, or the
         // version stays stranded (every later run would abort on the reserved
-        // tag). A failed release is disclosed as a warning on the refusal; the
-        // reservation is ours alone to delete.
+        // tag). Since I8 the reservation is an annotated tag with BOTH a
+        // remote ref and a local tag object: delete both. A failed release is
+        // disclosed as a warning on the refusal; the reservation is ours
+        // alone to delete.
         const released = await run("git", ["push", "origin", "--delete", `refs/tags/${bump.tag}`], { cwd: repoRoot });
-        if (released.code !== 0) {
-          return { ...merged, stderr: `${merged.stderr}\nwarning: could not release the reserved tag ${bump.tag} after the refused merge (delete it manually): ${(released.stderr || released.stdout || "").slice(0, 200)}` };
+        const localCleanup = await run("git", ["tag", "-d", bump.tag], { cwd: repoRoot });
+        if (released.code !== 0 || localCleanup.code !== 0) {
+          const problems = [
+            released.code !== 0 ? `remote: ${(released.stderr || released.stdout || "").slice(0, 200)}` : null,
+            localCleanup.code !== 0 ? `local: ${(localCleanup.stderr || localCleanup.stdout || "").slice(0, 200)}` : null,
+          ].filter(Boolean);
+          return {
+            ...merged,
+            stderr: `${merged.stderr}\nwarning: could not fully release the reserved tag ${bump.tag} after the refused merge (delete it manually): ${problems.join("; ")}`,
+          };
         }
         return merged;
       }
@@ -350,7 +363,10 @@ async function runMain(options, { zcode, phaseEnv }) {
       // checked and fail-closed (the merge itself stays put on tail failure).
       // The reservation retargets the pre-merge tag onto the merge commit.
       log(`merge: squash-merged PR #${prNumber} at ${merged.mergeCommitOid.slice(0, 7)} (branch ${merged.branch}) — running the tagging tail`);
-      const tailed = await mergeTail({ run, repoRoot, merged, prNumber, reservation: { tag: bump.tag, reservedAt: bump.reservedAt } });
+      const tailed = await mergeTail({
+        run, repoRoot, merged, prNumber,
+        reservation: { tag: bump.tag, reservedAt: bump.reservedAt, reservedObject: bump.reservedObject },
+      });
       if (tailed.code !== 0) return tailed;
       log(`merge: ${bump.tag} tagged at the merge commit`);
       // --delete-branch equivalent, run ONLY after GitHub confirmed MERGED and

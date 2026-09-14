@@ -11,8 +11,18 @@ export const PHASE_LIMITS = Object.freeze({
   worker: { maxTurns: 300, timeoutMs: 90 * 60_000 },
   reviewer: { maxTurns: 80, timeoutMs: 20 * 60_000 },
   fixer: { maxTurns: 150, timeoutMs: 45 * 60_000 },
-  // The dogfood review is one heavy lane over the captured diff; 20m is the
-  // starting guess pending the supervised first run (I3 calibration item).
+  // The dogfood review is the plugin's own full review: capture (seconds) +
+  // the balanced batch under its 12m batch window + the 60s adjudication
+  // clip + dispatch overhead ≈ 13.5m worst case inline; a file-backed review
+  // (≥200 KB diff — exercised live on I8's own PR, dogfood rounds 4–6) adds
+  // the transport read allowance (≤ +3m) to the batch AND adjudication
+  // windows, with the total hard cap (15m +3m = 18m) binding the whole run
+  // ≈ 18.5m worst case. 20m still bounds a hung dispatch, with ~1.5m slack.
+  // I8 calibration disposition: NO numeric change — no trustworthy observed
+  // dogfood phaseTimings existed (every candidate run stopped at the
+  // zcode-headless preflight); the first loop-owned run's
+  // phaseTimings.dogfood either confirms this bound or tunes it (HANDOFF
+  // carries the follow-up).
   dogfood: { maxTurns: 80, timeoutMs: 20 * 60_000 },
 });
 

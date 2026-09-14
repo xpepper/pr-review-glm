@@ -150,7 +150,9 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     assert(text.includes("/z-pr-review select"), "must name the I6 selection as implemented");
     assert(text.includes("/z-pr-review inspect"), "must name the I6 retained-result inspect as implemented");
     assert(text.includes("--comment"), "must name the I7 gated publication as implemented");
-    assert(text.includes("I8"), "must name the next increment");
+    assert(text.includes("file-backed transport"), "must name the I8 large-diff transport as implemented");
+    assert(text.includes("telemetry"), "must name the I8 lane telemetry as implemented");
+    assert(text.includes("V2"), "must name the next increment");
     assert(!text.includes("Last capture"), "no capture section without a capture");
   });
 

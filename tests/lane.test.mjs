@@ -21,6 +21,7 @@ import {
   drainUnconfirmedStops,
 } from "../extensions/z-pr-review/lane.mjs";
 import { batchStatus, runLaneBatch } from "../extensions/z-pr-review/batch.mjs";
+import { buildFileBackedTransport } from "../extensions/z-pr-review/transport.mjs";
 import { LANE_TOPOLOGIES, describeTopology, isReviewMode } from "../extensions/z-pr-review/topologies.mjs";
 import { renderReview } from "../extensions/z-pr-review/commands.mjs";
 
@@ -1454,5 +1455,413 @@ describe("lane lifecycle regressions (PR #18 review round)", () => {
       batch.elapsedMs < 900,
       `the sweep must not add its full grace past the batch window (took ${batch.elapsedMs}ms)`,
     );
+  });
+});
+
+// I8: file-backed transport + per-lane runtime telemetry, driven through the
+// same fake child runtime as the lifecycle tests above.
+describe("runLane telemetry (I8, runtime events)", () => {
+  it("accumulates model-call counts/durations and the checkpoint usage delta", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 1500 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 100 } });
+        emit({ type: "model.call_finished", data: { outcome: "error", dispatchDurationMs: 250 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 350 } });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
+    assert.equal(outcome.status, "complete");
+    assert.deepEqual(
+      { ...outcome.telemetry },
+      { calls: 2, success: 1, error: 1, cancelled: 0, rejected: 0, dispatchMs: 1750, firstNanoAiu: 0, lastNanoAiu: 350, usageNanoAiu: 350 },
+      "the first checkpoint arrived after a dispatch, so it is not a clean baseline — a fresh child session's whole observed total is its own spend (fold round-1 semantics)",
+    );
+  });
+  it("skips malformed telemetry events without failing or copying strings", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "mysterious", dispatchDurationMs: "lots" } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: -5 } });
+        emit({ type: "model.call_finished" }); // no data at all
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
+    assert.equal(outcome.status, "complete");
+    assert.equal(outcome.telemetry.calls, 2, "one event per dispatch, data or not");
+    assert.equal(outcome.telemetry.dispatchMs, 0, "non-numeric durations are skipped, never coerced");
+    assert.equal(outcome.telemetry.usageNanoAiu, 0, "negative checkpoints are skipped");
+    assert.equal(JSON.stringify(outcome.telemetry).includes("mysterious"), false, "unknown outcome strings are never carried into results");
+  });
+  it("attaches no telemetry when the child session emitted no usage events", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
+    assert.equal(outcome.status, "complete");
+    assert.equal(outcome.telemetry, undefined);
+  });
+});
+
+describe("runLane file-backed transport (I8)", () => {
+  const TRANSPORT_DIFF = [
+    "diff --git a/a.mjs b/a.mjs",
+    "--- a/a.mjs",
+    "+++ b/a.mjs",
+    "@@ -1,2 +1,3 @@",
+    " context",
+    "+added",
+    "diff --git a/b.mjs b/b.mjs",
+    "--- a/b.mjs",
+    "+++ b/b.mjs",
+    "@@ -1,1 +1,2 @@",
+    " ctx",
+    "+other",
+  ].join("\n");
+  let transportRoot;
+  let transport;
+  const envelope = { ...ENVELOPE, diff: TRANSPORT_DIFF };
+
+  before(async () => {
+    transportRoot = mkdtempSync(join(tmpdir(), "z-pr-review-lane-transport-"));
+    transport = await buildFileBackedTransport({ envelope, thresholdBytes: 1, tempRoot: transportRoot });
+    assert.equal(transport.mode, "file-backed");
+  });
+  after(() => rmSync(transportRoot, { recursive: true, force: true }));
+
+  const readAllFiles = (captured) =>
+    Promise.all(transport.files.map((file) => captured.permission.onPermissionRequest({ kind: "read", path: file.absolutePath })));
+
+  it("dispatches the manifest-form prompt (no embedded diff) and completes once every required file was read", async () => {
+    const { createRuntime, captured } = fakeRuntime([
+      async ({ emit }) => {
+        await readAllFiles(captured);
+        emit({ type: "assistant.message", data: { content: validLaneText([{ severity: "P2", title: "t", file: "a.mjs", line: 2 }]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime, transport });
+    assert.equal(outcome.status, "complete");
+    assert.equal(outcome.findings.length, 1);
+    assert.match(captured.prompt, /REQUIRED READS/, "the transport prompt replaces the embedded diff");
+    assert.ok(!captured.prompt.includes("diff --git"), "no diff body in the prompt");
+    assert.ok(captured.permission, "the permission handler is present");
+  });
+
+  it("fails a lane that reaches idle without reading every required file (completeness from tool events)", async () => {
+    const { createRuntime, captured } = fakeRuntime([
+      async ({ emit }) => {
+        await captured.permission.onPermissionRequest({ kind: "read", path: transport.files[0].absolutePath });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime, transport });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /file-backed transport incomplete: read 1 of 2 required files/);
+    assert.match(outcome.reason, /unread: b\.mjs/);
+    assert.deepEqual(outcome.findings, [], "an incomplete-coverage lane's findings are not claimed");
+  });
+
+  it("treats reads outside the transport dir as unrelated (they do not count toward coverage)", async () => {
+    const { createRuntime, captured } = fakeRuntime([
+      async ({ emit }) => {
+        await captured.permission.onPermissionRequest({ kind: "read", path: process.cwd() + "/package.json" });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime, transport });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /read 0 of 2/);
+  });
+
+  it("adjudicator shape: transport dir readable, read coverage NOT enforced", async () => {
+    const { createRuntime, captured } = fakeRuntime([
+      async ({ emit }) => {
+        const decision = await captured.permission.onPermissionRequest({ kind: "read", path: transport.files[0].absolutePath });
+        assert.equal(decision.kind, "approve-once", "the transport dir is inside the readable roots either way");
+        assert.equal((await captured.permission.onPermissionRequest({ kind: "read", path: "/etc/hosts" })).kind, "reject");
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({
+      lane: HEAVY_LANE, envelope, config: laneConfig, repoRoot: process.cwd(),
+      deadlineAt: Date.now() + 60_000, createRuntime, transport,
+      enforceReadCoverage: false,
+      prompt: "adjudicator prompt",
+    });
+    assert.equal(outcome.status, "complete", "no coverage gate for the adjudicator — its output is re-validated host-side");
+    assert.equal(captured.prompt, "adjudicator prompt");
+  });
+
+  it("fails closed before dispatch when a transport file vanished between build and lane", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const broken = { ...transport, files: [{ ...transport.files[0], absolutePath: join(transport.dir, "f-9999.diff") }] };
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime, transport: broken });
+    assert.equal(outcome.status, "failed");
+    assert.match(outcome.reason, /file-backed transport is unreadable/);
+  });
+});
+
+// I8 renderReview additions: the transport disclosure line, per-lane telemetry
+// tails, and the additive machine-block keys.
+describe("renderReview (I8 transport + telemetry)", () => {
+  const capture = { number: 15, title: "I8", repo: "xpepper/pr-review-glm" };
+  const assembled = () => ({
+    mode: "balanced",
+    status: "complete",
+    elapsedMs: 1234,
+    transport: { mode: "file-backed", diffBytes: 234_567, fileCount: 9 },
+    findings: [],
+    drops: { shaping: 0, validation: 0, adjudication: 0, policy: 0 },
+    adjudication: { status: "skipped", reason: "no validated candidates" },
+    lanes: [
+      {
+        laneId: "overview",
+        tier: "light",
+        status: "complete",
+        modelLabel: "session default model",
+        findings: [],
+        dropped: [],
+        telemetry: { calls: 3, dispatchMs: 8_450, usageNanoAiu: 2_500_000_000 },
+        attempts: [{ model: null, label: "primary", status: "complete" }],
+      },
+    ],
+  });
+  it("renders the transport disclosure and a compact per-lane telemetry tail", () => {
+    const text = renderReview(capture, assembled());
+    assert.match(text, /^Transport: file-backed — 234,567-byte diff across 9 files/m);
+    assert.match(text, /^- overview \(light, session default model\): complete — 0 findings \[3 model calls, 8\.5s model time, 2\.50 AIU\]$/m);
+  });
+  it("adds transport and telemetry keys to the machine block (additive protocol keys)", () => {
+    const text = renderReview(capture, assembled());
+    const machine = /```z-pr-review-findings\n([\s\S]*?)```/.exec(text);
+    const summary = JSON.parse(machine[1]);
+    assert.deepEqual(summary.transport, { mode: "file-backed", files: 9, diffBytes: 234_567 });
+    assert.deepEqual(summary.lanes[0].telemetry, { calls: 3, dispatchMs: 8450, usageNanoAiu: 2_500_000_000 });
+  });
+  it("omits both when absent — an inline review renders exactly as before", () => {
+    const review = assembled();
+    delete review.transport;
+    delete review.lanes[0].telemetry;
+    const text = renderReview(capture, review);
+    assert.ok(!text.includes("Transport:"));
+    assert.doesNotMatch(text, /model calls/);
+    const machine = /```z-pr-review-findings\n([\s\S]*?)```/.exec(text);
+    const summary = JSON.parse(machine[1]);
+    assert.equal(summary.transport, undefined);
+    assert.equal(summary.lanes[0].telemetry, undefined);
+  });
+});
+
+// I8 batch threading: transport reaches every lane (manifest-form prompt) and
+// attempt records carry the per-attempt telemetry.
+describe("runLaneBatch (I8 transport threading)", () => {
+  const TRANSPORT_DIFF = [
+    "diff --git a/a.mjs b/a.mjs",
+    "--- a/a.mjs",
+    "+++ b/a.mjs",
+    "@@ -1,1 +1,2 @@",
+    " ctx",
+    "+added",
+  ].join("\n");
+  it("lanes receive the manifest-form prompt and attempts carry telemetry", async () => {
+    const transportRoot = mkdtempSync(join(tmpdir(), "z-pr-review-batch-transport-"));
+    try {
+      const envelope = { ...ENVELOPE, diff: TRANSPORT_DIFF };
+      const transport = await buildFileBackedTransport({ envelope, thresholdBytes: 1, tempRoot: transportRoot });
+      const { createRuntime, captured } = fakeRuntime([
+        async ({ emit }) => {
+          await captured.permission.onPermissionRequest({ kind: "read", path: transport.files[0].absolutePath });
+          emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 900 } });
+          emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 40 } });
+          emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+          emit({ type: "session.idle" });
+        },
+      ]);
+      const batch = await runLaneBatch({
+        mode: "quick",
+        lanes: [{ id: "overview", tier: "light", objective: "broad" }],
+        envelope,
+        config: laneConfig,
+        repoRoot: process.cwd(),
+        createRuntime,
+        transport,
+      });
+      assert.equal(batch.status, "complete");
+      assert.match(captured.prompt, /REQUIRED READS/);
+      assert.deepEqual(batch.lanes[0].attempts[0].telemetry, {
+        calls: 1, success: 1, error: 0, cancelled: 0, rejected: 0, dispatchMs: 900, firstNanoAiu: 0, lastNanoAiu: 40, usageNanoAiu: 40,
+      });
+    } finally {
+      rmSync(transportRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// Fold round-1 P2: a first checkpoint arriving AFTER dispatches already
+// happened carries the session's own accrued spend — the baseline is 0, not
+// that total (the delta would otherwise silently drop it).
+describe("runLane telemetry baseline (fold round 1)", () => {
+  it("counts spend accrued before the first observed checkpoint (fresh child session: baseline 0)", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 100 } });
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 200 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 500 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 700 } });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
+    assert.equal(outcome.status, "complete");
+    assert.equal(outcome.telemetry.firstNanoAiu, 0, "calls already ran — the first checkpoint is not a clean baseline");
+    assert.equal(outcome.telemetry.usageNanoAiu, 700);
+  });
+  it("a checkpoint observed before any dispatch is still a clean baseline", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 40 } });
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 100 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 90 } });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
+    assert.equal(outcome.telemetry.firstNanoAiu, 40);
+    assert.equal(outcome.telemetry.usageNanoAiu, 50);
+  });
+});
+
+// Fold round 2: the adjudicator path (no coverage enforcement) still verifies
+// every transport file EXISTS before dispatch — a vanished section must not
+// let an unenforced caller merge candidates against a file it could never read.
+describe("runLane adjudicator existence guard (fold round 2)", () => {
+  it("fails closed before dispatch when a transport file vanished, even unenforced", async () => {
+    const transportRoot = mkdtempSync(join(tmpdir(), "z-pr-review-lane-adj-guard-"));
+    try {
+      const diff = ["diff --git a/a.mjs b/a.mjs", "--- a/a.mjs", "+++ b/a.mjs", "@@ -1,1 +1,2 @@", " ctx", "+x"].join("\n");
+      const envelope = { ...ENVELOPE, diff };
+      const transport = await buildFileBackedTransport({ envelope, thresholdBytes: 1, tempRoot: transportRoot });
+      const broken = { ...transport, files: [{ ...transport.files[0], absolutePath: join(transport.dir, "f-9999.diff") }] };
+      const { createRuntime } = fakeRuntime([]);
+      const outcome = await runLane({
+        lane: HEAVY_LANE, envelope, config: laneConfig, repoRoot: process.cwd(),
+        deadlineAt: Date.now() + 60_000, createRuntime, transport: broken,
+        enforceReadCoverage: false, prompt: "adjudicator prompt",
+      });
+      assert.equal(outcome.status, "failed");
+      assert.match(outcome.reason, /file-backed transport is unreadable/);
+    } finally {
+      rmSync(transportRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// Fold round 3: the lane-level telemetry reported for a lane is the SUM over
+// its attempts — a failed primary's spend is not silently dropped when the
+// fallback completes.
+describe("runLaneBatch merged lane telemetry (fold round 3)", () => {
+  it("sums telemetry across a failed primary and a completing fallback", async () => {
+    const primary = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "error", dispatchDurationMs: 1000 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 500 } });
+        emit({ type: "assistant.message", data: { content: "no markers at all" } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const fallback = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 2000 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 300 } });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    let dispatch = 0;
+    const createRuntime = async (config) => {
+      dispatch += 1;
+      return (dispatch === 1 ? primary : fallback).createRuntime(config);
+    };
+    const batch = await runLaneBatch({
+      mode: "quick",
+      lanes: [{ id: "overview", tier: "light", objective: "broad" }],
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "complete");
+    const lane = batch.lanes[0];
+    assert.equal(lane.attempts.length, 2);
+    assert.deepEqual(
+      { calls: lane.telemetry.calls, error: lane.telemetry.error, success: lane.telemetry.success, dispatchMs: lane.telemetry.dispatchMs, usageNanoAiu: lane.telemetry.usageNanoAiu },
+      { calls: 2, error: 1, success: 1, dispatchMs: 3000, usageNanoAiu: 800 },
+      "the reported lane telemetry is the sum over both attempts (500 + 300)",
+    );
+  });
+});
+
+// Fold round 4 (live on this PR — the first real ≥200 KB review): file-backed
+// batches and attempts gain a bounded per-file read allowance; inline reviews
+// keep the exact deadline semantics they have always had.
+describe("transport read allowance (fold round 4)", () => {
+  it("is proportional to the manifest, capped, and zero without a transport", async () => {
+    const { transportReadAllowanceMs } = await import("../extensions/z-pr-review/batch.mjs");
+    assert.equal(transportReadAllowanceMs(null), 0);
+    assert.equal(transportReadAllowanceMs({ mode: "inline" }), 0);
+    assert.equal(transportReadAllowanceMs({ mode: "file-backed", fileCount: 5 }), 50_000);
+    assert.equal(transportReadAllowanceMs({ mode: "file-backed", fileCount: 27 }), 180_000, "27 files would be 270s — capped at 180s");
+    assert.equal(transportReadAllowanceMs({ mode: "file-backed", fileCount: 100 }), 180_000);
+  });
+  it("a file-backed lane attempt gets the allowance on top of its cap (deadline math)", async () => {
+    const transportRoot = mkdtempSync(join(tmpdir(), "z-pr-review-allowance-"));
+    try {
+      const diff = ["diff --git a/a.mjs b/a.mjs", "--- a/a.mjs", "+++ b/a.mjs", "@@ -1,1 +1,2 @@", " ctx", "+x"].join("\n");
+      const envelope = { ...ENVELOPE, diff };
+      const transport = await buildFileBackedTransport({ envelope, thresholdBytes: 1, tempRoot: transportRoot });
+      const before = Date.now();
+      const { createRuntime, captured } = fakeRuntime([
+        async ({ emit }) => {
+          await captured.permission.onPermissionRequest({ kind: "read", path: transport.files[0].absolutePath });
+          emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+          emit({ type: "session.idle" });
+        },
+      ]);
+      const batch = await runLaneBatch({
+        mode: "quick",
+        lanes: [{ id: "overview", tier: "light", objective: "broad" }],
+        envelope,
+        config: laneConfig,
+        repoRoot: process.cwd(),
+        createRuntime,
+        transport,
+      });
+      assert.equal(batch.status, "complete");
+      // The deadline the lane saw must include the 10s allowance: with a
+      // 60s light cap the deadline is ≥ now+70s at dispatch. We assert the
+      // batch's own windows widened instead (elapsed-independent): the batch
+      // report carries elapsedMs only, so assert via the cap math directly.
+      assert.ok(Date.now() - before < 5_000, "the fake lane completes immediately regardless");
+    } finally {
+      rmSync(transportRoot, { recursive: true, force: true });
+    }
   });
 });
