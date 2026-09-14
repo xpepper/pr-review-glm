@@ -10,7 +10,7 @@ import { rm } from "node:fs/promises";
 import { readPluginVersion } from "./version.mjs";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
-import { runLaneBatch } from "./batch.mjs";
+import { runLaneBatch, transportReadAllowanceMs } from "./batch.mjs";
 import { assembleReview } from "./adjudicate.mjs";
 import { buildFileBackedTransport, describeTransport, TransportError } from "./transport.mjs";
 import { drainUnconfirmedStops } from "./lane.mjs";
@@ -261,9 +261,15 @@ async function runReview(parsed) {
       envelope: outcome.envelope,
       config,
       repoRoot: process.cwd(),
+      // I5: adjudication runs inside the total hard cap — its deadline is
+      // deadlines.adjudicationMs clipped to whatever of the total budget
+      // remains at assembly time. I8 fold 5: the total clip widens by the
+      // SAME transport read allowance the batch got, or a file-backed batch
+      // that spent its allowance leaves adjudication nothing (a degraded
+      // review from budget accounting, not from adjudication itself).
       adjudicationDeadlineAt: Math.min(
         Date.now() + config.deadlines.adjudicationMs,
-        reviewStartedAt + config.deadlines.totalMs,
+        reviewStartedAt + config.deadlines.totalMs + transportReadAllowanceMs(transport),
       ),
       signal: controller.signal,
       transport: transport.mode === "file-backed" ? transport : null,

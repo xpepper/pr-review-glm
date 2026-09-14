@@ -368,3 +368,33 @@ describe("tagMergedRelease", () => {
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);
   }));
 });
+
+// Fold round 5: a reservation whose tag object cannot be resolved after the
+// push is RELEASED, not stranded.
+describe("verifyBumpAtMerge reservation resolution failure (fold round 5)", () => {
+  const res = (stdout = "", code = 0, stderr = "") => ({ code, stdout, stderr });
+  const manifest = (version) => JSON.stringify({ name: "z-pr-review", version });
+  const OID = "c".repeat(40);
+  it("releases the remote and local tag when the tag object cannot be resolved after the push", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (command === "gh" && args[1] === "view") return res(JSON.stringify({ headRefOid: OID }));
+      if (command === "git" && args[0] === "show" && args[1] === "origin/main:plugin.json") return res(manifest("0.1.0"));
+      if (command === "git" && args[0] === "show") return res(manifest("0.2.0"));
+      if (command === "git" && args[0] === "rev-parse") {
+        // -q --verify (local pre-check): not found. refs/tags/<tag> after the
+        // push: FAILS to resolve (the resolution-failure scenario).
+        if (args.includes("-q")) return res("", 1);
+        return res("", 128, "bad object");
+      }
+      return res();
+    };
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /cannot resolve the reserved tag object/);
+    assert.match(result.detail, /reservation was released/);
+    assert.ok(calls.includes("git push origin --delete refs/tags/v0.2.0"), "the remote reservation is released");
+    assert.ok(calls.includes("git tag -d v0.2.0"), "the local tag object is removed");
+  });
+});

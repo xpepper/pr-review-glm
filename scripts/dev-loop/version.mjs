@@ -189,7 +189,14 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
   }
   const reservedObject = await run("git", ["rev-parse", `refs/tags/${tag}`], { cwd: repoRoot });
   if (reservedObject.code !== 0 || !/^[0-9a-f]{40}$/.test(reservedObject.stdout.trim())) {
-    return { ok: false, detail: `cannot resolve the reserved tag object for ${tag} (merge aborted): ${(reservedObject.stderr || "").slice(0, 200)}` };
+    // The reservation IS on origin (the push above succeeded); resolve it or
+    // the version stays stranded — every later run fails the duplicate-tag
+    // pre-check on this half-taken reservation (dogfood round-5 P2). The
+    // release is best-effort; the detail names the manual cleanup if it also
+    // fails.
+    await run("git", ["push", "origin", "--delete", `refs/tags/${tag}`], { cwd: repoRoot });
+    await run("git", ["tag", "-d", tag], { cwd: repoRoot });
+    return { ok: false, detail: `cannot resolve the reserved tag object for ${tag}; the reservation was released (merge aborted): ${(reservedObject.stderr || "").slice(0, 200)}` };
   }
   return {
     ok: true,

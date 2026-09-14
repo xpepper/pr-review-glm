@@ -139,6 +139,13 @@ export async function buildFileBackedTransport({
   signal = null,
   deadlineAt = null,
 }) {
+  // Entry checks (dogfood round-5 P2): a cancelled or expired review refuses
+  // BEFORE the parsing pass, not only between writes — a pathological
+  // multi-thousand-file manifest is CPU work too.
+  if (signal?.aborted) throw new TransportError("the review was cancelled before building the file-backed transport");
+  if (deadlineAt !== null && deadlineAt - Date.now() <= 0) {
+    throw new TransportError("the review's total budget expired before building the file-backed transport");
+  }
   const diffBytes = Buffer.byteLength(envelope.diff, "utf8");
   if (diffBytes < thresholdBytes) return { mode: "inline", diffBytes, thresholdBytes };
   const anchors = parseDiffAnchors(envelope.diff);

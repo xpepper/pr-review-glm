@@ -268,13 +268,15 @@ describe("splitDiffSections (fold round 3)", () => {
       const { writeFile: realWrite } = await import("node:fs/promises");
       const controller = new AbortController();
       controller.abort(new Error("cancelled"));
+      // Pre-aborted/expired signals trip the ENTRY checks (fold round 5) —
+      // "before building"; the between-writes checks remain for mid-loop trips.
       await assert.rejects(
         buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: root, signal: controller.signal }),
-        (error) => error instanceof TransportError && /cancelled while building/.test(error.message),
+        (error) => error instanceof TransportError && /cancelled before building/.test(error.message),
       );
       await assert.rejects(
         buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: root, deadlineAt: Date.now() - 1 }),
-        (error) => error instanceof TransportError && /total budget expired while building/.test(error.message),
+        (error) => error instanceof TransportError && /total budget expired before building/.test(error.message),
       );
       assert.deepEqual(readdirSync(root), [], "no partial directories survive either refusal");
       // The happy path is unaffected by a live signal.
@@ -284,5 +286,24 @@ describe("splitDiffSections (fold round 3)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// Fold round 5: entry checks — a cancelled or expired review refuses BEFORE
+// the parsing pass.
+describe("buildFileBackedTransport entry checks (fold round 5)", () => {
+  it("refuses a cancelled review before parsing", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    await assert.rejects(
+      buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: "/tmp/unused", signal: controller.signal }),
+      (error) => error instanceof TransportError && /cancelled before building/.test(error.message),
+    );
+  });
+  it("refuses an expired budget before parsing", async () => {
+    await assert.rejects(
+      buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: "/tmp/unused", deadlineAt: Date.now() - 1 }),
+      (error) => error instanceof TransportError && /total budget expired before building/.test(error.message),
+    );
   });
 });
