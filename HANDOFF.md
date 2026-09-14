@@ -66,7 +66,14 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
 - **Attribution state:** I3–V2 are original code; `docs/ATTRIBUTION.md` lists no
   reused modules. The upstream LICENSE issue (10ego/pi-pr-review#150) stays open as a
   standing record.
-- Tests: `node --test tests/*.test.mjs` (**481** on the V2 branch head). Smokes:
+- Tests: `node --test tests/*.test.mjs` (**483** on the V2 branch head, after dogfood
+  fold 1 — the 1 P1 + 2 P2s the dogfood raised on the increment head were all
+  validated real and fixed: capture-path cleanup trusted only from the code-rendered
+  capture summary, never the model-influenced findings report, in BOTH the groundtest
+  driver and smoke-i3's fallback; a failed ls-remote in the resolve-failure release
+  fails the release instead of reading as an absent tag; the peel-match release
+  additionally requires the remote object to exist in the local store — another
+  actor's replacement tag is left alone). Smokes:
   `tests/smoke-i1.mjs` and `tests/smoke-i2.mjs` (SDK dispatch, no inference; i1 asserts
   the status `Version:` line against plugin.json, now 0.2.7), `tests/smoke-i3.mjs`
   (SDK dispatch; real inference inside lane children BY DESIGN; skips cleanly with no

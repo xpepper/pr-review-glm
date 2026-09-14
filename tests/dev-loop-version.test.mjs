@@ -477,13 +477,47 @@ describe("releaseTagReservation (V2)", () => {
     const run = async (command, args) => {
       calls.push([command, ...args].join(" "));
       if (command === "git" && args[0] === "ls-remote") return res(`${OTHER_OBJECT}\trefs/tags/v0.2.7\n`);
+      if (command === "git" && args[0] === "cat-file") return res();
       if (command === "git" && args[0] === "rev-parse" && args[1] === `${OTHER_OBJECT}^{}`) return res(`${"d".repeat(40)}\n`);
       return res();
     };
     const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
     assert.equal(outcome.released, false);
-    assert.match(outcome.detail, /no longer peels to this run's reserved commit — left in place/);
+    assert.match(outcome.detail, /cannot be proven this run's reservation/);
+    assert.match(outcome.detail, /left in place/);
     assert.ok(!calls.some((c) => c.includes("--delete")), "the moved remote tag is never deleted");
+  });
+
+  it("unknown object, FAILED ls-remote: never read as an absent tag — the release fails with the lookup error (dogfood round-1 P2)", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (command === "git" && args[0] === "ls-remote") return res("", 128, "fatal: could not read from remote repository");
+      return res();
+    };
+    const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
+    assert.equal(outcome.released, false);
+    assert.match(outcome.detail, /cannot inspect remote v0.2.7 \(ls-remote failed\)/);
+    assert.match(outcome.detail, /could not read from remote/);
+    assert.ok(!calls.some((c) => c.includes("--delete")), "no remote delete is attempted on an unreadable remote");
+  });
+
+  it("unknown object, remote tag peeling correctly but UNKNOWN LOCALLY: a replacement tag is left alone (dogfood round-1 P2)", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push([command, ...args].join(" "));
+      if (command === "git" && args[0] === "ls-remote") return res(`${OTHER_OBJECT}\trefs/tags/v0.2.7\n`);
+      // The object exists on the remote and peels to the reserved commit, but
+      // this checkout never created it — another actor's replacement tag.
+      if (command === "git" && args[0] === "cat-file") return res("", 128, "fatal: Not a valid object name");
+      if (command === "git" && args[0] === "rev-parse" && args[1] === `${OTHER_OBJECT}^{}`) return res(`${HEAD}\n`);
+      return res();
+    };
+    const outcome = await releaseTagReservation({ run, repoRoot: "/tmp/any", tag: "v0.2.7", reservedCommit: HEAD });
+    assert.equal(outcome.released, false);
+    assert.match(outcome.detail, /cannot be proven this run's reservation/);
+    assert.match(outcome.detail, /object unknown locally/);
+    assert.ok(!calls.some((c) => c.includes("--delete")), "another actor's replacement tag is never deleted");
   });
 
   it("unknown object (resolve-failure path): a remote tag still peeling to the reserved commit is deleted under its own lease", async () => {

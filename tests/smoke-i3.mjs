@@ -118,8 +118,14 @@ try {
     assert.ok(Array.isArray(summary.findings), "findings must be an array");
     const completeLanes = summary.lanes.filter((lane) => lane.status === "complete").length;
     console.log(`PASS tiered lane batch reviewed PR #${prNumber}: ${completeLanes}/5 lanes complete, ${summary.findings.length} finding(s), ${summary.dropped} dropped`);
-    const captureLine = report.match(/Capture file: (\S+) \(0600\)/) ?? messages.join(" | ").match(/Capture file: (\S+) \(0600\)/);
-    if (captureLine) capturePath = captureLine[1];
+    // The capture path is trusted ONLY from the code-rendered capture summary
+    // (pure code over gh output), never from the findings report — finding
+    // details are model-influenced text and could otherwise steer this
+    // cleanup's rmSync at any path (the groundtest driver's dogfood round-1
+    // P1; this smoke had the same shape via its fallback).
+    const captureSummary = messages.find((message) => message.startsWith(`Captured PR #${prNumber} —`));
+    const captureLine = captureSummary?.match(/Capture file: (\S+) \(0600\)/);
+    if (captureLine && /\/z-pr-review-[^/]+\//.test(captureLine[1])) capturePath = captureLine[1];
 
     console.log(`SMOKE PASS I3: PR #${prNumber} reviewed by the tiered lane batch, findings in-chat, parent session inference-free`);
   }

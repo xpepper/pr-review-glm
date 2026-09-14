@@ -100,8 +100,14 @@ try {
   const summary = JSON.parse(machine[1]);
   console.log(`\n=== PARSED SUMMARY ===`);
   console.log(JSON.stringify(summary, null, 2));
-  const captureLine = report.match(/Capture file: (\S+) \(0600\)/) ?? messages.join(" | ").match(/Capture file: (\S+) \(0600\)/);
-  if (captureLine) capturePath = captureLine[1];
+  // The capture path is trusted ONLY from the code-rendered capture summary
+  // (pure code over gh output) and only inside an mkdtemp dir carrying our
+  // plugin prefix. The findings report is model-influenced text — a crafted
+  // finding detail could otherwise steer this cleanup's rmSync at any path
+  // (dogfood round-1 P1 on this very driver); it is never consulted here.
+  const captureSummary = messages.find((message) => message.startsWith(`Captured PR #${prNumber} —`));
+  const captureLine = captureSummary?.match(/Capture file: (\S+) \(0600\)/);
+  if (captureLine && /\/z-pr-review-[^/]+\//.test(captureLine[1])) capturePath = captureLine[1];
 
   const durationMs = Date.now() - startedAt;
   console.log(`\nGROUND TEST DONE: PR #${prNumber}, review status ${summary.status}, ${summary.findings.length} finding(s), ${(durationMs / 1000).toFixed(1)}s wall clock (incl. session start)`);

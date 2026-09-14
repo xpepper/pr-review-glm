@@ -228,16 +228,33 @@ export async function releaseTagReservation({ run, repoRoot, tag, reservedObject
   let leaseObject = reservedObject;
   if (leaseObject === null) {
     const remote = await run("git", ["ls-remote", "origin", `refs/tags/${tag}`], { cwd: repoRoot });
-    const remoteObject = remote.code === 0 ? /^([0-9a-f]{40})\s+refs\/tags\//.exec(remote.stdout.trim())?.[1] ?? null : null;
-    if (remoteObject !== null) {
-      const peel = await run("git", ["rev-parse", `${remoteObject}^{}`], { cwd: repoRoot });
-      if (peel.code === 0 && peel.stdout.trim() === reservedCommit) {
-        leaseObject = remoteObject;
-      } else {
-        problems.push(`remote ${tag} no longer peels to this run's reserved commit — left in place`);
+    if (remote.code !== 0) {
+      // A failed lookup is NOT an absent tag (dogfood round-1 P2): treating it
+      // as absent would report a successful release, suppress the cleanup
+      // warning, and strand the remote reservation — fail the release so the
+      // disclosure carries instead.
+      problems.push(`cannot inspect remote ${tag} (ls-remote failed): ${(remote.stderr || remote.stdout || "no output").trim().slice(0, 200)}`);
+    } else {
+      const remoteObject = /^([0-9a-f]{40})\s+refs\/tags\//.exec(remote.stdout.trim())?.[1] ?? null;
+      if (remoteObject !== null) {
+        // Peel equality alone does not establish ownership (dogfood round-1
+        // P2): another actor's replacement tag can point at the same commit.
+        // An object THIS run created is in the local object store; a
+        // remote-only replacement is not — require local presence before
+        // deleting. (Concurrent runs share this checkout's store, but
+        // verifyBumpAtMerge's local-tag pre-check already serializes them.)
+        const knownLocally = await run("git", ["cat-file", "-e", remoteObject], { cwd: repoRoot });
+        const peel = await run("git", ["rev-parse", `${remoteObject}^{}`], { cwd: repoRoot });
+        if (knownLocally.code === 0 && peel.code === 0 && peel.stdout.trim() === reservedCommit) {
+          leaseObject = remoteObject;
+        } else {
+          problems.push(
+            `remote ${tag} cannot be proven this run's reservation (peels to ${peel.code === 0 ? peel.stdout.trim().slice(0, 40) : "nothing resolvable"}, object ${knownLocally.code === 0 ? "known" : "unknown"} locally) — left in place`,
+          );
+        }
       }
+      // An absent remote tag needs no release — there is nothing to delete.
     }
-    // An absent remote tag needs no release — there is nothing to delete.
   }
   if (leaseObject !== null) {
     const released = await run(
