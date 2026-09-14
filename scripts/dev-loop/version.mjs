@@ -223,6 +223,17 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
 // is deleted only when its ref still resolves to the expected object —
 // absent is fine, moved is disclosed. Returns { released, detail };
 // released=false means manual cleanup is owed.
+//
+// ACCEPTED RESIDUAL (dogfood folds 1–3, the family escalated to a decision):
+// LOCAL tag operations have no compare-and-swap — every verify→delete here
+// carries a sub-second TOCTOU window against another actor on this SAME
+// checkout, and no fold can close it (a lock protocol would be new machinery
+// for an already-rare resolve-failure path). The boundary is deliberate: the
+// REMOTE — the artifact releases depend on — is protected ATOMICALLY by the
+// lease and by the create-only reservation push (the real serialization point
+// between concurrent runs); the local namespace is best-effort with
+// ownership verified as far as git allows. Findings in this family are
+// dispositioned against this note, not folded.
 export async function releaseTagReservation({ run, repoRoot, tag, reservedObject = null, reservedCommit = null }) {
   const problems = [];
   let leaseObject = reservedObject;

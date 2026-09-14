@@ -67,7 +67,9 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
   reused modules. The upstream LICENSE issue (10ego/pi-pr-review#150) stays open as a
   standing record.
 - Tests: `node --test tests/*.test.mjs` (**485** on the V2 branch head, after dogfood
-  folds 1–2 (fold 2: the resolve-failure path's unconditional local `git tag -d` now
+  folds 1–3 (fold 3 dispositioned the local-tag TOCTOU family as a DOCUMENTED DESIGN
+  RESIDUAL after three repeating rounds — see releaseTagReservation's doc comment;
+  fold 2: the resolve-failure path's unconditional local `git tag -d` now
   deletes only a resolvable tag matching the peel-verified object — the local twin of
   fold 1's remote ownership fix; fold 1 — the 1 P1 + 2 P2s the dogfood raised on the increment head were all
   validated real and fixed: capture-path cleanup trusted only from the code-rendered
