@@ -52,6 +52,18 @@ function mergeAttemptTelemetry(attempts) {
   return merged;
 }
 
+// I8 (dogfood round 4, live on this very PR — the first real ≥200 KB review):
+// file-backed lanes spend minutes on required file reads before any finding
+// can exist, and the inline-tuned caps (fallback 180s especially) starved
+// them — a 26-of-27-files lane died re-reading on a fallback budget. The
+// allowance is proportional to the manifest (10s per required file, capped
+// at +3m) and applies ONLY when a transport is in play: inline reviews keep
+// the exact deadline semantics they have always had.
+export function transportReadAllowanceMs(transport) {
+  if (transport === null || transport === undefined || transport.mode !== "file-backed") return 0;
+  return Math.min(transport.fileCount * 10_000, 180_000);
+}
+
 async function runLaneUnderBudget({
   lane,
   envelope,
@@ -65,6 +77,7 @@ async function runLaneUnderBudget({
   transport = null,
 }) {
   const hardEndAt = Math.min(batchEndAt, totalEndAt);
+  const allowanceMs = transportReadAllowanceMs(transport);
   const attempts = [];
   for (const attempt of attemptPlan(lane, config)) {
     const remaining = hardEndAt - Date.now();
@@ -83,7 +96,7 @@ async function runLaneUnderBudget({
       config,
       repoRoot,
       cliPath,
-      deadlineAt: Math.min(Date.now() + attempt.capMs, hardEndAt),
+      deadlineAt: Math.min(Date.now() + attempt.capMs + allowanceMs, hardEndAt),
       modelOverride: attempt.model,
       signal,
       createRuntime,
@@ -195,8 +208,13 @@ export async function runLaneBatch({
     throw new Error(`review mode "${mode}" has an empty topology`);
   }
   const startedAt = Date.now();
-  const batchEndAt = startedAt + config.deadlines.batchMs;
-  const totalEndAt = startedAt + config.deadlines.totalMs;
+  // File-backed batches widen their windows by the same per-file allowance the
+  // attempts get (dogfood round 4): without it, the batch window (12m) — not
+  // the attempt caps — becomes the binding constraint that kills slow-reading
+  // lanes mid-manifest. Inline reviews are exactly as before.
+  const allowanceMs = transportReadAllowanceMs(transport);
+  const batchEndAt = startedAt + config.deadlines.batchMs + allowanceMs;
+  const totalEndAt = startedAt + config.deadlines.totalMs + allowanceMs;
   const laneResults = await Promise.all(
     lanes.map(async (lane) => {
       const result = await runLaneUnderBudget({

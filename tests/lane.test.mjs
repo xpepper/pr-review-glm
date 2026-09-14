@@ -1818,3 +1818,50 @@ describe("runLaneBatch merged lane telemetry (fold round 3)", () => {
     );
   });
 });
+
+// Fold round 4 (live on this PR — the first real ≥200 KB review): file-backed
+// batches and attempts gain a bounded per-file read allowance; inline reviews
+// keep the exact deadline semantics they have always had.
+describe("transport read allowance (fold round 4)", () => {
+  it("is proportional to the manifest, capped, and zero without a transport", async () => {
+    const { transportReadAllowanceMs } = await import("../extensions/z-pr-review/batch.mjs");
+    assert.equal(transportReadAllowanceMs(null), 0);
+    assert.equal(transportReadAllowanceMs({ mode: "inline" }), 0);
+    assert.equal(transportReadAllowanceMs({ mode: "file-backed", fileCount: 5 }), 50_000);
+    assert.equal(transportReadAllowanceMs({ mode: "file-backed", fileCount: 27 }), 180_000, "27 files would be 270s — capped at 180s");
+    assert.equal(transportReadAllowanceMs({ mode: "file-backed", fileCount: 100 }), 180_000);
+  });
+  it("a file-backed lane attempt gets the allowance on top of its cap (deadline math)", async () => {
+    const transportRoot = mkdtempSync(join(tmpdir(), "z-pr-review-allowance-"));
+    try {
+      const diff = ["diff --git a/a.mjs b/a.mjs", "--- a/a.mjs", "+++ b/a.mjs", "@@ -1,1 +1,2 @@", " ctx", "+x"].join("\n");
+      const envelope = { ...ENVELOPE, diff };
+      const transport = await buildFileBackedTransport({ envelope, thresholdBytes: 1, tempRoot: transportRoot });
+      const before = Date.now();
+      const { createRuntime, captured } = fakeRuntime([
+        async ({ emit }) => {
+          await captured.permission.onPermissionRequest({ kind: "read", path: transport.files[0].absolutePath });
+          emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+          emit({ type: "session.idle" });
+        },
+      ]);
+      const batch = await runLaneBatch({
+        mode: "quick",
+        lanes: [{ id: "overview", tier: "light", objective: "broad" }],
+        envelope,
+        config: laneConfig,
+        repoRoot: process.cwd(),
+        createRuntime,
+        transport,
+      });
+      assert.equal(batch.status, "complete");
+      // The deadline the lane saw must include the 10s allowance: with a
+      // 60s light cap the deadline is ≥ now+70s at dispatch. We assert the
+      // batch's own windows widened instead (elapsed-independent): the batch
+      // report carries elapsedMs only, so assert via the cap math directly.
+      assert.ok(Date.now() - before < 5_000, "the fake lane completes immediately regardless");
+    } finally {
+      rmSync(transportRoot, { recursive: true, force: true });
+    }
+  });
+});

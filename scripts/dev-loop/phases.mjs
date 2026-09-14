@@ -13,10 +13,11 @@ export const PHASE_LIMITS = Object.freeze({
   fixer: { maxTurns: 150, timeoutMs: 45 * 60_000 },
   // The dogfood review is the plugin's own full review: capture (seconds) +
   // the balanced batch under its 12m batch window + the 60s adjudication
-  // clip + dispatch overhead ≈ 13.5m worst case. 20m keeps ~6.5m of slack
-  // for lane-child startup and gh latency while still bounding a hung
-  // dispatch. I8 calibration disposition: NO change — every run that would
-  // have carried observed phaseTimings stopped at the zcode-headless
+  // clip + dispatch overhead ≈ 13.5m worst case inline; a file-backed review
+  // (≥200 KB diff, dogfood round 4 on I8's own PR) adds the transport read
+  // allowance (≤ +3m) ≈ 16.5m worst case. 20m still bounds a hung dispatch
+  // with real slack. I8 calibration disposition: NO change — every run that
+  // would have carried observed phaseTimings stopped at the zcode-headless
   // preflight (I7 run 5, M1), so there is no trustworthy dogfood timing data
   // to tune against; the first loop-owned run's phaseTimings.dogfood either
   // confirms this bound or tunes it (HANDOFF carries the follow-up).

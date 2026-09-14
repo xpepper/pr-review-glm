@@ -61,8 +61,8 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
   reused modules (I8's transport follows OUR spec's design; upstream is described in
   the research notes only). The upstream LICENSE issue (10ego/pi-pr-review#150) stays
   open as a standing record.
-- Tests: `node --test tests/*.test.mjs` (**468** on the I8 branch head, after dogfood
-  folds 1–3). Smokes:
+- Tests: `node --test tests/*.test.mjs` (**470** on the I8 branch head, after dogfood
+  folds 1–4). Smokes:
   `tests/smoke-i1.mjs` and `tests/smoke-i2.mjs` (SDK dispatch, no inference; i1 asserts
   the status `Version:` line against plugin.json, now 0.2.6), `tests/smoke-i3.mjs`
   (SDK dispatch; real inference inside lane children BY DESIGN; skips cleanly with no
