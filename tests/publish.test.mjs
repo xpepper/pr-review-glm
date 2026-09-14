@@ -771,7 +771,7 @@ describe("publishReview reconciliation and cancellation (I8)", () => {
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "nothing was posted");
   });
 
-  it("an abort during the reconciliation scan stops paging instead of continuing scans (the per-PR lock is released)", async () => {
+  it("an abort during the POST still reconciles the uncertain write (reads are never cancelled), then stops at the backoff", async () => {
     const controller = new AbortController();
     const { runGh, calls } = sequencingGh({
       post: { code: 1, stdout: "", stderr: "gh: server error (HTTP 500)", timedOut: false },
@@ -783,11 +783,28 @@ describe("publishReview reconciliation and cancellation (I8)", () => {
     };
     await assert.rejects(
       publishReview({ retained: retained(), runGh: wrapped, signal: controller.signal, sleep: noSleep }),
-      (error) => error instanceof PublishError && /cancelled while reconciling/.test(error.message),
+      (error) => error instanceof PublishError && /cancelled while waiting to reconcile/.test(error.message),
     );
     const scans = calls.filter((c) => !c.args.includes("POST") && c.args.join(" ").includes("/reviews"));
-    assert.equal(scans.length, 1, "only the pre-POST scan ran; the aborted reconciliation scan never paged");
+    assert.equal(scans.length, 2, "the pre-POST scan plus ONE signal-free reconciliation scan ran (cancellation blocks writes and waits, never reads); the aborted backoff stopped further scans");
   });
+  it("an abort during an uncertain POST that actually LANDED reconciles to published (the truth is reported, not deferred)", async () => {
+    const controller = new AbortController();
+    const marker = idempotencyMarker(capture.repo, capture.number, HEAD, BASE);
+    const { runGh } = sequencingGh({
+      post: { code: 1, stdout: "", stderr: "gh: server error (HTTP 504)", timedOut: false },
+      lists: [[], markerReview2(marker)],
+    });
+    const wrapped = async (args, opts) => {
+      if (args.includes("POST")) controller.abort(new Error("parent session ended"));
+      return runGh(args, opts);
+    };
+    const outcome = await publishReview({ retained: retained(), runGh: wrapped, signal: controller.signal, sleep: noSleep });
+    assert.equal(outcome.status, "published");
+    assert.equal(outcome.reconciled, true);
+    assert.equal(outcome.reconcileScans, 1);
+  });
+  const markerReview2 = (marker) => [{ user: { login: VIEWER }, html_url: "https://github.com/x#review-killed", body: marker }];
 });
 
 // Fold round-1 P2: the reconciliation backoff is abort-aware — a cancelled
@@ -850,25 +867,31 @@ describe("publishReview in-flight abort (fold round 2)", () => {
     );
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "nothing was posted");
   });
-  it("threads the signal into every gh invocation so the real runner can kill in-flight children", async () => {
+  it("threads the signal into every write-path gh invocation; reconciliation reads stay signal-free (fold round 3)", async () => {
     const seen = [];
     const runGh = async (args, opts = {}) => {
-      seen.push(opts);
+      seen.push({ args, opts });
       const joined = args.join(" ");
       if (joined.includes("api user")) return ghReply({ login: VIEWER });
-      if (joined.includes("/reviews") || joined.includes("/files")) return ghReply([]);
+      if (args.includes("POST")) return { code: 1, stdout: "", stderr: "gh: server error (HTTP 500)", timedOut: false };
+      if (joined.includes("/reviews")) return ghReply([]);
+      if (joined.includes("/files")) return ghReply(filesJson);
       return ghReply(openPr());
     };
     const signal = new AbortController().signal;
-    const { runGh: _ignored } = { runGh };
-    await publishReview({ retained: retained({ ...defaultSelection([]) }), runGh, signal, sleep: async () => {} }).catch(() => {});
-    // The empty-selection path skips before any gh call; use a normal run instead:
-    seen.length = 0;
     await publishReview({ retained: retained(), runGh, signal, sleep: async () => {} }).then(
       () => {},
       () => {},
     );
-    assert.ok(seen.length > 0);
-    assert.ok(seen.every((opts) => opts.signal === signal), "every gh call carries the review's signal");
+    const postIndex = seen.findIndex((c) => c.args.includes("POST"));
+    assert.ok(postIndex > 0, "the POST ran");
+    for (const call of seen.slice(0, postIndex + 1)) {
+      assert.equal(call.opts.signal, signal, "every call up to and including the POST carries the review's signal");
+    }
+    const reconciliation = seen.slice(postIndex + 1).filter((c) => c.args.join(" ").includes("/reviews"));
+    assert.ok(reconciliation.length >= 1, "reconciliation scans ran");
+    for (const call of reconciliation) {
+      assert.notEqual(call.opts.signal, signal, "reconciliation reads are deliberately signal-free — cancellation blocks writes, never reads");
+    }
   });
 });

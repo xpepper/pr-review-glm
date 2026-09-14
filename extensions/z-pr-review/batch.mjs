@@ -32,6 +32,26 @@ function attemptPlan(lane, config) {
   return plan;
 }
 
+// I8: the lane-level telemetry REPORTED for a lane is the sum over its
+// attempts (dogfood round-3 P2: a failed primary that spent 5 AIU followed by
+// a successful fallback that spent 3 reported only 3). Attempt records keep
+// their own telemetry untouched.
+function mergeAttemptTelemetry(attempts) {
+  let merged = null;
+  for (const attempt of attempts) {
+    const t = attempt.telemetry;
+    if (t === undefined || t === null) continue;
+    if (merged === null) {
+      merged = { ...t };
+      continue;
+    }
+    for (const key of ["calls", "success", "error", "cancelled", "rejected", "dispatchMs", "usageNanoAiu"]) {
+      if (Number.isFinite(t[key])) merged[key] = (merged[key] ?? 0) + t[key];
+    }
+  }
+  return merged;
+}
+
 async function runLaneUnderBudget({
   lane,
   envelope,
@@ -115,12 +135,17 @@ async function runLaneUnderBudget({
       // usage events (informational only — never an input to any decision).
       ...(outcome.telemetry ? { telemetry: outcome.telemetry } : {}),
     });
-    if (outcome.status === "complete") return { ...outcome, attempts };
+    if (outcome.status === "complete") {
+      const telemetry = mergeAttemptTelemetry(attempts);
+      return { ...outcome, ...(telemetry ? { telemetry } : {}), attempts };
+    }
     if (reason !== outcome.reason) {
-      return { ...outcome, reason, findings: [], dropped: [], attempts };
+      const telemetry = mergeAttemptTelemetry(attempts);
+      return { ...outcome, reason, findings: [], dropped: [], ...(telemetry ? { telemetry } : {}), attempts };
     }
   }
   const last = attempts.at(-1);
+  const merged = mergeAttemptTelemetry(attempts);
   return {
     status: "failed",
     reason: last?.reason ?? "no attempt dispatched",
@@ -130,6 +155,7 @@ async function runLaneUnderBudget({
     laneId: lane.id,
     tier: lane.tier,
     attempts,
+    ...(merged ? { telemetry: merged } : {}),
   };
 }
 

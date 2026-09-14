@@ -36,9 +36,14 @@ export class TransportError extends Error {
 // them would refuse to review any large PR that touches a binary file. The
 // boundary path is the fallback, never the preference (a quoted/escaped
 // `diff --git` path can carry git's C-style quoting; the ---/+++ forms are
-// the canonical ones). Leading text before the first boundary (never
-// produced by `gh pr diff`, but refused silently-dropped) rides on the first
-// section; a diff with no boundary at all is one section.
+// the canonical ones).
+// Header recognition is POSITIONAL (dogfood round-3 P2): a `+++ `-prefixed
+// line INSIDE a hunk is added file content ("++ text" renders as "+++ text"),
+// indistinguishable from a header by text alone — only lines before the
+// section's first `@@` hunk header count as ---/+++ headers. Leading text
+// before the first boundary (never produced by `gh pr diff`, but refused
+// silently-dropped) attaches to the FIRST section rather than forming a
+// pathless section of its own; a diff with no boundary at all is one section.
 export function splitDiffSections(diffText) {
   const lines = String(diffText).split(/\r?\n/);
   const sections = [];
@@ -46,37 +51,51 @@ export function splitDiffSections(diffText) {
   let primary = null;
   let boundaryPath = null;
   let hadHeader = false;
+  let sawHunk = false;
+  let preamble = null;
   const push = () => {
     if (current !== null) sections.push({ lines: current, path: primary ?? boundaryPath, hadHeader });
   };
   for (const line of lines) {
     if (line.startsWith("diff --git ")) {
       push();
-      current = [];
+      current = preamble ?? [];
+      if (preamble !== null) {
+        // Preamble rides ON the first real section — it is not a section.
+        preamble = null;
+      }
       primary = null;
       boundaryPath = boundaryPathOf(line);
       hadHeader = false;
+      sawHunk = false;
     } else if (current === null) {
-      // Preamble before any boundary: keep it with the first real section.
-      current = [];
-      primary = null;
-      boundaryPath = null;
-      hadHeader = false;
+      // Preamble before any boundary: hold it for the first real section; if
+      // the whole diff has no boundary, it becomes the single section.
+      preamble = preamble ?? [];
+      preamble.push(line);
+      continue;
+    } else if (!sawHunk && /^@@ /.test(line)) {
+      sawHunk = true;
     }
-    const newSide = /^\+\+\+ (.+)$/.exec(line);
-    if (newSide && newSide[1].trim() !== "/dev/null") {
-      primary = normalizeSectionPath(newSide[1]);
-      hadHeader = true;
-    } else if (primary === null) {
-      const oldSide = /^--- (.+)$/.exec(line);
-      if (oldSide && oldSide[1].trim() !== "/dev/null") {
-        primary = normalizeSectionPath(oldSide[1]);
+    if (!sawHunk) {
+      const newSide = /^\+\+\+ (.+)$/.exec(line);
+      if (newSide && newSide[1].trim() !== "/dev/null") {
+        primary = normalizeSectionPath(newSide[1]);
         hadHeader = true;
+      } else if (primary === null) {
+        const oldSide = /^--- (.+)$/.exec(line);
+        if (oldSide && oldSide[1].trim() !== "/dev/null") {
+          primary = normalizeSectionPath(oldSide[1]);
+          hadHeader = true;
+        }
       }
     }
     current.push(line);
   }
   push();
+  if (sections.length === 0 && preamble !== null) {
+    sections.push({ lines: preamble, path: null, hadHeader: false });
+  }
   if (sections.length === 1 && sections[0].path === null) {
     throw new TransportError("the diff has no recognizable file paths; cannot build a file-backed transport");
   }
@@ -112,6 +131,13 @@ export async function buildFileBackedTransport({
   // Injectable writer (the capture.mjs runGh pattern): tests drive partial
   // write failures without touching the filesystem's failure modes.
   writeFile = defaultWriteFile,
+  // Cancellation/deadline (dogfood round-3 P2): building a pathological
+  // transport is all fs work, but a cancelled review or an expired total
+  // budget must not wait out thousands of section writes. Checked between
+  // writes — coarse by design (each write is tiny); a trip cleans up the
+  // partial directory and fails closed.
+  signal = null,
+  deadlineAt = null,
 }) {
   const diffBytes = Buffer.byteLength(envelope.diff, "utf8");
   if (diffBytes < thresholdBytes) return { mode: "inline", diffBytes, thresholdBytes };
@@ -151,6 +177,10 @@ export async function buildFileBackedTransport({
   // is captured diff content on disk) before failing closed.
   try {
     for (const file of files) {
+      if (signal?.aborted) throw new TransportError("the review was cancelled while building the file-backed transport");
+      if (deadlineAt !== null && deadlineAt - Date.now() <= 0) {
+        throw new TransportError("the review's total budget expired while building the file-backed transport");
+      }
       await writeFile(join(dir, file.file), `${file.lines.join("\n")}\n`, { mode: 0o600 });
       await chmod(join(dir, file.file), 0o600);
     }

@@ -1773,3 +1773,48 @@ describe("runLane adjudicator existence guard (fold round 2)", () => {
     }
   });
 });
+
+// Fold round 3: the lane-level telemetry reported for a lane is the SUM over
+// its attempts — a failed primary's spend is not silently dropped when the
+// fallback completes.
+describe("runLaneBatch merged lane telemetry (fold round 3)", () => {
+  it("sums telemetry across a failed primary and a completing fallback", async () => {
+    const primary = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "error", dispatchDurationMs: 1000 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 500 } });
+        emit({ type: "assistant.message", data: { content: "no markers at all" } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const fallback = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 2000 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 300 } });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    let dispatch = 0;
+    const createRuntime = async (config) => {
+      dispatch += 1;
+      return (dispatch === 1 ? primary : fallback).createRuntime(config);
+    };
+    const batch = await runLaneBatch({
+      mode: "quick",
+      lanes: [{ id: "overview", tier: "light", objective: "broad" }],
+      envelope: ENVELOPE,
+      config: laneConfig,
+      repoRoot: process.cwd(),
+      createRuntime,
+    });
+    assert.equal(batch.status, "complete");
+    const lane = batch.lanes[0];
+    assert.equal(lane.attempts.length, 2);
+    assert.deepEqual(
+      { calls: lane.telemetry.calls, error: lane.telemetry.error, success: lane.telemetry.success, dispatchMs: lane.telemetry.dispatchMs, usageNanoAiu: lane.telemetry.usageNanoAiu },
+      { calls: 2, error: 1, success: 1, dispatchMs: 3000, usageNanoAiu: 800 },
+      "the reported lane telemetry is the sum over both attempts (500 + 300)",
+    );
+  });
+});

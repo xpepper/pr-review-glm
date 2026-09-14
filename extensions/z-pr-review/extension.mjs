@@ -211,7 +211,14 @@ async function runReview(parsed) {
     // to an embedded multi-hundred-KB prompt is the condition this exists to
     // prevent, never a silent degradation.
     try {
-      transport = await buildFileBackedTransport({ envelope: outcome.envelope });
+      transport = await buildFileBackedTransport({
+        envelope: outcome.envelope,
+        // The review's cancellation and its total budget bound the build too
+        // (dogfood round-3 P2): a pathological multi-thousand-file transport
+        // is all fs work, but a cancelled or expired review never waits it out.
+        signal: controller.signal,
+        deadlineAt: reviewStartedAt + config.deadlines.totalMs,
+      });
     } catch (error) {
       if (error instanceof TransportError) {
         await session.log(`Review refused — ${error.message}`, { level: "error" });

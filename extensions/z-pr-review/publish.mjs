@@ -528,14 +528,13 @@ export async function publishReview({
       await sleep(RECONCILE_DELAY_MS);
       return;
     }
+    if (signal.aborted) {
+      throw new PublishError("the review was cancelled while waiting to reconcile an uncertain review POST; nothing more was attempted.");
+    }
     const { promise, reject } = Promise.withResolvers();
     const onAbort = () =>
       reject(new PublishError("the review was cancelled while waiting to reconcile an uncertain review POST; nothing more was attempted."));
-    if (signal.aborted) {
-      onAbort();
-    } else {
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
+    signal.addEventListener("abort", onAbort, { once: true });
     try {
       await Promise.race([sleep(RECONCILE_DELAY_MS), promise]);
     } finally {
@@ -547,7 +546,15 @@ export async function publishReview({
       pageSize: REVIEWS_PAGE_SIZE,
       maxPages: MAX_REVIEW_PAGES,
       doingWhat: `reconciling an uncertain review POST (scan ${scan} of ${RECONCILE_SCANS})`,
-      signal,
+      // Deliberately signal-free (dogfood round-3 P2): reconciliation is
+      // READ-ONLY — cancellation blocks writes, never reads. An uncertain
+      // POST that the abort may itself have killed (defaultRunGh SIGTERMs
+      // mid-flight) still gets reconciled NOW, so the outcome tells the
+      // truth (published-reconciled) instead of deferring to a rerun. The
+      // backoff between scans stays abort-aware: a cancelled review never
+      // sits out further delays, and the marker scan on any later run is
+      // the backstop either way.
+      signal: null,
     });
     const landed = afterReviews.find(carriesMarker);
     if (landed !== undefined) {

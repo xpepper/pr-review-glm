@@ -237,3 +237,52 @@ describe("buildFileBackedTransport partial-failure cleanup (fold round 2)", () =
     }
   });
 });
+
+// Fold round 3: preamble handling, positional headers, and build-time
+// cancellation/deadline.
+describe("splitDiffSections (fold round 3)", () => {
+  it("leading preamble attaches to the first real section instead of forming a pathless section", () => {
+    const diff = ["some preamble line", "another one", "diff --git a/a.mjs b/a.mjs", "--- a/a.mjs", "+++ b/a.mjs", "@@ -1,1 +1,2 @@", " ctx", "+x"].join("\n");
+    const sections = splitDiffSections(diff);
+    assert.equal(sections.length, 1, "no standalone pathless preamble section");
+    assert.equal(sections[0].path, "a.mjs");
+    assert.ok(sections[0].lines.includes("some preamble line"), "the preamble text is retained, not dropped");
+  });
+  it("a '++ text' added line inside a hunk is content, never a file header", () => {
+    const diff = [
+      "diff --git a/notes.txt b/notes.txt",
+      "--- a/notes.txt",
+      "+++ b/notes.txt",
+      "@@ -1,2 +1,3 @@",
+      " ctx",
+      "+++ b/phantom.mjs",
+      "+real add",
+    ].join("\n");
+    const sections = splitDiffSections(diff);
+    assert.deepEqual(sections.map((s) => s.path), ["notes.txt"], "the hunk-content +++ line did not hijack the path");
+  });
+  it("build respects cancellation and the total deadline between writes, cleaning up", async () => {
+    const root = mkdtempSync(join(tmpdir(), "z-pr-review-transport-cancel-"));
+    try {
+      const { readdirSync } = await import("node:fs");
+      const { writeFile: realWrite } = await import("node:fs/promises");
+      const controller = new AbortController();
+      controller.abort(new Error("cancelled"));
+      await assert.rejects(
+        buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: root, signal: controller.signal }),
+        (error) => error instanceof TransportError && /cancelled while building/.test(error.message),
+      );
+      await assert.rejects(
+        buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: root, deadlineAt: Date.now() - 1 }),
+        (error) => error instanceof TransportError && /total budget expired while building/.test(error.message),
+      );
+      assert.deepEqual(readdirSync(root), [], "no partial directories survive either refusal");
+      // The happy path is unaffected by a live signal.
+      const live = new AbortController();
+      const transport = await buildFileBackedTransport({ envelope: ENVELOPE, thresholdBytes: 1, tempRoot: root, signal: live.signal, deadlineAt: Date.now() + 60_000, writeFile: realWrite });
+      assert.equal(transport.mode, "file-backed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

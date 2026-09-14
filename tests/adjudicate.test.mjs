@@ -434,3 +434,24 @@ describe("runAdjudication (I8 file-backed transport)", () => {
     }
   });
 });
+
+// Fold round 3 (positional headers, shared with the transport parser): a
+// "++ text" added line inside a hunk is content — it must not register a
+// phantom path as touched.
+describe("parseDiffAnchors (positional headers, fold round 3)", () => {
+  it("hunk-content +++/--- lines do not create phantom files", () => {
+    const diff = [
+      "diff --git a/notes.txt b/notes.txt",
+      "--- a/notes.txt",
+      "+++ b/notes.txt",
+      "@@ -1,2 +1,3 @@",
+      " ctx",
+      "+++ b/phantom.mjs",
+      "--- a/other-phantom.mjs",
+      "+real add",
+    ].join("\n");
+    const anchors = parseDiffAnchors(diff);
+    assert.deepEqual([...anchors.touched], ["notes.txt"]);
+    assert.deepEqual(anchors.files.get("notes.txt").ranges, [[1, 3]]);
+  });
+});
