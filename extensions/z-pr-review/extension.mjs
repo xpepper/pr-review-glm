@@ -229,6 +229,12 @@ async function runReview(parsed) {
     if (transport.mode === "file-backed") {
       await session.log(`Large diff (≥ ${transport.thresholdBytes.toLocaleString("en-US")} bytes): ${describeTransport(transport)}.`);
     }
+    // The review-level hard end (V2): from the REVIEW's start, widened once by
+    // the transport allowance. The batch and the adjudication clip both use
+    // it, so time spent building the transport can never restart the batch's
+    // total clock past the window the review's own accounting uses (the V2
+    // ground-test finding on batch.mjs's restarted `startedAt`).
+    const reviewDeadlineAt = reviewStartedAt + config.deadlines.totalMs + transportReadAllowanceMs(transport);
     // C1: the mode resolves through config — a custom/overridden mode in
     // config.modes composes built-in lanes and custom roles into one lane
     // list that runs through the unchanged budgets, shaping, and gates.
@@ -242,6 +248,7 @@ async function runReview(parsed) {
       repoRoot: process.cwd(),
       signal: controller.signal,
       transport: transport.mode === "file-backed" ? transport : null,
+      reviewDeadlineAt,
       onLaneDone: async (lane, result) => {
         const tail = result.status === "complete"
           ? `complete — ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}`
@@ -269,10 +276,11 @@ async function runReview(parsed) {
       // too (fold 6: it died at 54s of the 60s cap on this PR's 27-file
       // manifest), and a batch that spent its allowance otherwise left
       // adjudication nothing (a degraded review from budget accounting, not
-      // from adjudication itself).
+      // from adjudication itself). V2: the total clip IS reviewDeadlineAt —
+      // one deadline object, computed once above.
       adjudicationDeadlineAt: Math.min(
         Date.now() + config.deadlines.adjudicationMs + transportReadAllowanceMs(transport),
-        reviewStartedAt + config.deadlines.totalMs + transportReadAllowanceMs(transport),
+        reviewDeadlineAt,
       ),
       signal: controller.signal,
       transport: transport.mode === "file-backed" ? transport : null,

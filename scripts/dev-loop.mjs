@@ -12,7 +12,7 @@ import {
   gateSmokes, gateTests, isFullOid, mergeabilityGate, reportGates, runPreflightGates, selectIncrementPr, verifyIncrementPrOwnedByViewer,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
-import { gateVersionBump, verifyBumpAtMerge } from "./dev-loop/version.mjs";
+import { gateVersionBump, releaseTagReservation, verifyBumpAtMerge } from "./dev-loop/version.mjs";
 import { deleteMergedBranch, mergeTail, squashMergeAtHead } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
@@ -341,19 +341,17 @@ async function runMain(options, { zcode, phaseEnv }) {
         // release the tag reservation verifyBumpAtMerge just took, or the
         // version stays stranded (every later run would abort on the reserved
         // tag). Since I8 the reservation is an annotated tag with BOTH a
-        // remote ref and a local tag object: delete both. A failed release is
-        // disclosed as a warning on the refusal; the reservation is ours
-        // alone to delete.
-        const released = await run("git", ["push", "origin", "--delete", `refs/tags/${bump.tag}`], { cwd: repoRoot });
-        const localCleanup = await run("git", ["tag", "-d", bump.tag], { cwd: repoRoot });
-        if (released.code !== 0 || localCleanup.code !== 0) {
-          const problems = [
-            released.code !== 0 ? `remote: ${(released.stderr || released.stdout || "").slice(0, 200)}` : null,
-            localCleanup.code !== 0 ? `local: ${(localCleanup.stderr || localCleanup.stdout || "").slice(0, 200)}` : null,
-          ].filter(Boolean);
+        // remote ref and a local tag object; since V2 the release is
+        // OWNERSHIP-VERIFIED (leased remote delete pinned to the reserved tag
+        // object, local delete only of our own object) — the refusal window
+        // spans the whole merge attempt, and another actor may have moved the
+        // tag in it; a moved tag is left in place and disclosed, never
+        // deleted. A failed release is disclosed as a warning on the refusal.
+        const released = await releaseTagReservation({ run, repoRoot, tag: bump.tag, reservedObject: bump.reservedObject });
+        if (!released.released) {
           return {
             ...merged,
-            stderr: `${merged.stderr}\nwarning: could not fully release the reserved tag ${bump.tag} after the refused merge (delete it manually): ${problems.join("; ")}`,
+            stderr: `${merged.stderr}\nwarning: could not fully release the reserved tag ${bump.tag} after the refused merge (inspect it, and delete it manually only if it is still this run's): ${released.detail}`,
           };
         }
         return merged;

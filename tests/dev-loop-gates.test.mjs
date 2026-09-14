@@ -117,11 +117,29 @@ describe("gateSmokes", () => {
     }
   });
 
-  it("fails with stderr in the detail when the retry fails too", async () => {
+  it("fails with stderr in the detail when the retry fails too, disclosing BOTH attempts (V2 ground test)", async () => {
     const run = async () => ({ code: 1, stdout: "PASS lines only", stderr: "AssertionError: capture must report PR #3, got: timeout", timedOut: false });
     const gate = await gateSmokes({ run, repoRoot: realRoot, exclude: [] });
     assert.equal(gate.ok, false);
-    assert.match(gate.detail, /stderr: AssertionError: capture must report/);
+    assert.match(gate.detail, /failed both attempts/);
+    assert.match(gate.detail, /first: PASS lines only \| stderr: AssertionError: capture must report/);
+    assert.match(gate.detail, /retry: PASS lines only \| stderr: AssertionError: capture must report/);
+  });
+
+  it("keeps the two attempts' diagnostics distinguishable when they fail differently (transient vs real)", async () => {
+    const calls = [];
+    const run = async (command, args) => {
+      calls.push(args.join(" "));
+      const isTarget = args[0]?.includes("smoke-i1.mjs");
+      const first = isTarget && calls.filter((c) => c.includes("smoke-i1.mjs")).length === 1;
+      return first
+        ? { code: 1, stdout: "", stderr: "gh: HTTP 502 bad gateway", timedOut: false }
+        : { code: 1, stdout: "", stderr: "AssertionError: command is not registered", timedOut: false };
+    };
+    const gate = await gateSmokes({ run, repoRoot: realRoot, exclude: ["smoke-l1.mjs"] });
+    assert.equal(gate.ok, false);
+    assert.match(gate.detail, /first: stderr: gh: HTTP 502 bad gateway/);
+    assert.match(gate.detail, /retry: stderr: AssertionError: command is not registered/);
   });
 });
 

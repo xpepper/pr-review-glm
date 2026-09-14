@@ -691,6 +691,30 @@ describe("runLaneBatch (budgets, fallback, concurrency, cancellation)", () => {
     assert.equal(exhausted.status, "failed");
     assert.match(exhausted.reason, /before dispatch/);
   });
+  it("V2: a review-level deadline caps the batch — an expired review deadline fails the lane before dispatch even with generous batch/total budgets", async () => {
+    // The V2 ground-test finding: runLaneBatch restarted its own total clock
+    // at dispatch, so time spent building a file-backed transport escaped the
+    // review-level window and lanes could outlive the deadline the
+    // adjudication clip uses. reviewDeadlineAt is the caller's review-level
+    // hard end (review start + totalMs + transport allowance): the batch's
+    // windows are clipped to it, never restarted past it.
+    const config = structuredClone(laneConfig);
+    config.deadlines.batchMs = 60_000;
+    config.deadlines.totalMs = 120_000;
+    const batch = await runLaneBatch({
+      mode: "test",
+      lanes: [HEAVY_LANE],
+      envelope: ENVELOPE,
+      config,
+      repoRoot: process.cwd(),
+      createRuntime: async () => {
+        throw new Error("must not dispatch");
+      },
+      reviewDeadlineAt: Date.now() - 1,
+    });
+    assert.equal(batch.status, "failed");
+    assert.match(batch.reason, /before dispatch/);
+  });
   it("fails the attempt when child-runtime creation outruns the absolute budget", async () => {
     const outcome = runLane({
       lane: HEAVY_LANE,

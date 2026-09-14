@@ -189,8 +189,15 @@ export function batchStatus(laneResults) {
 // Runs the mode's lanes concurrently (concurrency = topology size, upstream
 // semantics). The batch window (batchMs) opens at first dispatch and the
 // total cap (totalMs) bounds the whole run including cleanup; both clip every
-// attempt deadline. `signal` cancels every not-yet-finished lane; progress is
-// reported per lane through onLaneDone as each settles. `transport` (I8), when
+// attempt deadline. `reviewDeadlineAt` (V2), when set, is the REVIEW-level
+// hard end the caller computed from the review's own start (review start +
+// totalMs + any transport allowance): the batch never outlives it, so time
+// spent before dispatch — file-backed transport construction — can never
+// widen the batch's total window past the deadline the adjudication clip and
+// the caller's own accounting use (a V2 ground-test finding: the restarted
+// clock let lanes run after the review-level window had closed).
+// `signal` cancels every not-yet-finished lane; progress is
+// reported per lane through onLaneDone as each lane settles. `transport` (I8), when
 // non-null, switches every lane to the file-backed large-diff transport.
 export async function runLaneBatch({
   mode,
@@ -203,6 +210,7 @@ export async function runLaneBatch({
   onLaneDone = null,
   signal = null,
   transport = null,
+  reviewDeadlineAt = null,
 }) {
   if (lanes.length === 0) {
     throw new Error(`review mode "${mode}" has an empty topology`);
@@ -211,10 +219,17 @@ export async function runLaneBatch({
   // File-backed batches widen their windows by the same per-file allowance the
   // attempts get (dogfood round 4): without it, the batch window (12m) — not
   // the attempt caps — becomes the binding constraint that kills slow-reading
-  // lanes mid-manifest. Inline reviews are exactly as before.
+  // lanes mid-manifest. Inline reviews are exactly as before. The review-level
+  // deadline caps the widened window (V2): Math.min, never an extension.
   const allowanceMs = transportReadAllowanceMs(transport);
-  const batchEndAt = startedAt + config.deadlines.batchMs + allowanceMs;
-  const totalEndAt = startedAt + config.deadlines.totalMs + allowanceMs;
+  const batchEndAt = Math.min(
+    startedAt + config.deadlines.batchMs + allowanceMs,
+    reviewDeadlineAt ?? Number.MAX_SAFE_INTEGER,
+  );
+  const totalEndAt = Math.min(
+    startedAt + config.deadlines.totalMs + allowanceMs,
+    reviewDeadlineAt ?? Number.MAX_SAFE_INTEGER,
+  );
   const laneResults = await Promise.all(
     lanes.map(async (lane) => {
       const result = await runLaneUnderBudget({
