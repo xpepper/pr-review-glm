@@ -169,6 +169,20 @@ upstream `lib/` reused with attribution.
   otherwise. The smoke reads the manifest via the GitHub contents API, not
   raw.githubusercontent — the raw CDN can lag a just-pushed bump by ~5 minutes and
   fail the gate spuriously.
+- **Release tags are ANNOTATED (convention decided at I8, 2026-09-14):** every tag
+  v0.2.0–v0.2.5 on origin already was (each `vX.Y.Z^{}` dereferences to its merge
+  commit), and the loop's own path now matches: `verifyBumpAtMerge` reserves the tag
+  as a locally created annotated tag pushed create-only (the reservation carries the
+  tag OBJECT oid for the retarget lease), `tagMergedRelease` creates/retargets with
+  `-a -m "z-pr-review release vX.Y.Z"` under `-c tag.gpgsign=false` (gpg/editor must
+  stay unreachable from the headless merge tail — the 2026-09-13 vim-stall), and a
+  refused merge releases both the remote ref and the local tag.
+- **Probe transcripts under `.dev-loop/` are forensic evidence** (environmental
+  stops are diagnosed from them). Since I8 they can no longer be overwritten by unit
+  tests: `runPreflightGates` threads `artDir`/`persist` into the probe gate and the
+  tests inject a temp dir. If you see ms-identical probe headers with
+  `tests/dev-loop-gates.test.mjs` fixture text, suspect a pre-I8 stomp, not a real
+  probe run — correlate by mtime against suite runs before counting events.
 
 ## Conventions
 
