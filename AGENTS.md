@@ -152,9 +152,17 @@ upstream `lib/` reused with attribution.
   version works — push the tag at merge, before announcing the release.
 - Marketplace-installed plugins do **not** need `--experimental` on 1.0.83
   (registration + dispatch verified without it); `--plugin-dir` dev loading still
-  uses it. Uninstall the marketplace copy (`copilot plugin uninstall z-pr-review`)
-  before any `--plugin-dir` session — double registration is the I1
-  dispatch-ambiguity class.
+  uses it.
+- **Dev-session double registration (standing caveat):** before ANY `--plugin-dir`
+  session — including manual smoke runs (`node tests/smoke-*.mjs`) from a normal
+  shell, whose SDK sessions resolve the real `~/.copilot` and its installed plugins —
+  run `copilot plugin uninstall z-pr-review` first: with the marketplace copy
+  installed, the same command names register twice and dispatch is ambiguous (the
+  I1 dispatch-ambiguity class). Verify with `copilot plugin list`; note an
+  uninstall can report success yet leave the listing stale — a second uninstall
+  clears it (observed 2026-09-14). The dev-loop's own phases are exempt: they run
+  under the isolated phase HOME (`buildPhaseEnv`), where installed plugins never
+  exist.
 - **Release discipline (gate-enforced from M1):** every increment that bumps
   `plugin.json` also bumps the marketplace entry version AND its `ref` tag in the same
   increment; `tests/smoke-m1.mjs` (run inside `gateSmokes`) fails the assessment

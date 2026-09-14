@@ -47,7 +47,9 @@ z-pr-review` follows the entry's pinned tag when a new release lands.
 
 Local development from a checkout instead (needs `--experimental`; start a fresh session
 after edits — and `copilot plugin uninstall z-pr-review` first if the marketplace copy is
-installed, or command dispatch is ambiguous):
+installed, or the same commands register twice and dispatch is ambiguous; this applies to
+running the `tests/smoke-*.mjs` scripts from a normal shell too. Verify with
+`copilot plugin list`):
 
 ```sh
 copilot --plugin-dir /path/to/pr-review-glm --experimental

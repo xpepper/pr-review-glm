@@ -34,9 +34,11 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
   the same increment (one-line direct push to the no-gates marketplace repo,
   disclosed in the increment PR) — `tests/smoke-m1.mjs` fails the assessment
   otherwise (it reads the manifest via the fresh contents API, not the ~5-min-laggy
-  raw CDN). Uninstall the marketplace copy before any `--plugin-dir` session
-  (`copilot plugin uninstall z-pr-review`). Full facts in AGENTS.md ("Environment
-  facts — plugin marketplace").
+  raw CDN). Uninstall the marketplace copy before any `--plugin-dir` session AND
+  before manual smoke runs from a normal shell
+  (`copilot plugin uninstall z-pr-review`; verify with `copilot plugin list` — a
+  first uninstall can leave a stale listing; loop phases are exempt: isolated
+  HOME). Full facts in AGENTS.md ("Environment facts — plugin marketplace").
 - **Publication is live (unchanged from I7):** `/z-pr-review N --comment` (or config
   `autoPostReviews`, unless `--no-comment`) publishes the retained settled selection
   as ONE gated COMMENT review; `select`/`inspect` do not publish. Batch
