@@ -4,11 +4,17 @@
 // (version + source.ref together) via the GitHub contents API — one entry-scoped
 // commit, siblings never stomped, one fresh-refetch retry on rejection (the
 // API equivalent of pull --rebase), and a fail-loudly tag-existence check:
-// the entry must never point at a ref that does not exist. All git/gh/network
-// interaction is faked; applyEntryBump and highestReleaseVersion are pure.
+// the entry must never point at a ref that does not exist. The dogfood P2
+// fold (PR #49) hardens the same step: "already published" and "verified" both
+// require OUR source identity (repo + repo root), the retry re-runs the
+// idempotence check on the fresh manifest and never downgrades a newer
+// release, and the tail's publishTaggedVersion wrapper asserts the checkout's
+// version equals the tag's before any marketplace interaction. All git/gh/
+// network interaction is faked; applyEntryBump and highestReleaseVersion are
+// pure.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { applyEntryBump, bumpMarketplaceEntry, highestReleaseVersion } from "../scripts/dev-loop/marketplace.mjs";
+import { applyEntryBump, bumpMarketplaceEntry, highestReleaseVersion, publishTaggedVersion } from "../scripts/dev-loop/marketplace.mjs";
 import { parseVersion } from "../scripts/dev-loop/version.mjs";
 
 // Mirrors the live manifest's shape (canonical JSON.stringify(…, null, 2) with
@@ -85,6 +91,13 @@ describe("applyEntryBump", () => {
     const result = applyEntryBump(`${JSON.stringify(manifest, null, 2)}\n`, { to: "0.2.8" });
     assert.match(result.error, /someone\/else/);
   });
+  it("fails closed when the entry installs from a redirected path instead of the repo root (dogfood P2 fold: not our source identity)", () => {
+    const manifest = JSON.parse(manifestText("0.2.7"));
+    manifest.plugins[0].source.path = "plugins/z-pr-review";
+    const result = applyEntryBump(`${JSON.stringify(manifest, null, 2)}\n`, { to: "0.2.8" });
+    assert.match(result.error, /plugins\/z-pr-review/);
+    assert.match(result.error, /refusing to touch/);
+  });
   it("fails closed on a non-strict target version (nothing is written unvalidated)", () => {
     for (const bad of ["0.2.8-rc1", "v0.2.8", "latest", "01.2.3"]) {
       assert.match(applyEntryBump(manifestText("0.2.7"), { to: bad }).error, /not strict X\.Y\.Z/);
@@ -101,44 +114,45 @@ describe("applyEntryBump", () => {
   });
 });
 
-// bumpMarketplaceEntry: the loop's post-merge step. The fake gh api answers the
+// Shared fakes for the networked publication steps (bumpMarketplaceEntry and
+// its merge-tail wrapper publishTaggedVersion): the fake gh api answers the
 // contents API (GET returns {sha, content: base64}; PUT takes message/content/
 // sha) and git ls-remote answers the tag-existence check.
-describe("bumpMarketplaceEntry", () => {
-  const res = (stdout = "", code = 0, stderr = "") => ({ code, stdout, stderr });
-  const TAG_OID = "1".repeat(40);
-  const contents = (text, sha) => res(JSON.stringify({ name: "marketplace.json", sha, content: Buffer.from(text, "utf8").toString("base64"), encoding: "base64" }));
-  const decodedPutContent = (args) => {
-    const field = args.find((a) => typeof a === "string" && a.startsWith("content="));
-    assert.ok(field, "the PUT must carry a content= field");
-    return Buffer.from(field.slice("content=".length), "base64").toString("utf8");
+const res = (stdout = "", code = 0, stderr = "") => ({ code, stdout, stderr });
+const TAG_OID = "1".repeat(40);
+const contents = (text, sha) => res(JSON.stringify({ name: "marketplace.json", sha, content: Buffer.from(text, "utf8").toString("base64"), encoding: "base64" }));
+const decodedPutContent = (args) => {
+  const field = args.find((a) => typeof a === "string" && a.startsWith("content="));
+  assert.ok(field, "the PUT must carry a content= field");
+  return Buffer.from(field.slice("content=".length), "base64").toString("utf8");
+};
+const fake = ({ live = manifestText("0.2.7"), sha = "S1", putResults = [res()], tagResult = res(`${TAG_OID}\trefs/tags/v0.2.8\n`), verifyLive = null } = {}) => {
+  const calls = [];
+  let put = 0;
+  let get = 0;
+  const run = async (command, args) => {
+    calls.push([command, ...args]);
+    if (command === "git" && args[0] === "ls-remote") return tagResult;
+    if (command === "gh" && args[0] === "api" && args[1] === "-X" && args[2] === "PUT") {
+      const result = putResults[Math.min(put, putResults.length - 1)];
+      put += 1;
+      return result;
+    }
+    if (command === "gh" && args[0] === "api") {
+      get += 1;
+      // First GET returns the pre-bump manifest; later GETs (retry re-fetch,
+      // post-bump verification) return verifyLive when provided.
+      if (get === 1) return contents(live, sha);
+      return contents(verifyLive ?? live, get === 2 ? "S2" : "S3");
+    }
+    return res();
   };
-  const fake = ({ live = manifestText("0.2.7"), sha = "S1", putResults = [res()], tagResult = res(`${TAG_OID}\trefs/tags/v0.2.8\n`), verifyLive = null } = {}) => {
-    const calls = [];
-    let put = 0;
-    let get = 0;
-    const run = async (command, args) => {
-      calls.push([command, ...args]);
-      if (command === "git" && args[0] === "ls-remote") return tagResult;
-      if (command === "gh" && args[0] === "api" && args[1] === "-X" && args[2] === "PUT") {
-        const result = putResults[Math.min(put, putResults.length - 1)];
-        put += 1;
-        return result;
-      }
-      if (command === "gh" && args[0] === "api") {
-        get += 1;
-        // First GET returns the pre-bump manifest; later GETs (retry re-fetch,
-        // post-bump verification) return verifyLive when provided.
-        if (get === 1) return contents(live, sha);
-        return contents(verifyLive ?? live, get === 2 ? "S2" : "S3");
-      }
-      return res();
-    };
-    return { calls, run };
-  };
-  const ghCalls = (calls) => calls.filter(([command]) => command === "gh");
-  const putCalls = (calls) => calls.filter(([command, arg0, arg1]) => command === "gh" && arg0 === "api" && arg1 === "-X");
+  return { calls, run };
+};
+const ghCalls = (calls) => calls.filter(([command]) => command === "gh");
+const putCalls = (calls) => calls.filter(([command, arg0, arg1]) => command === "gh" && arg0 === "api" && arg1 === "-X");
 
+describe("bumpMarketplaceEntry", () => {
   it("confirms the release tag exists on origin, bumps entry version+ref together via the contents API, then verifies", async () => {
     const after = manifestText("0.2.8");
     const { calls, run } = fake({ verifyLive: after });
@@ -182,6 +196,27 @@ describe("bumpMarketplaceEntry", () => {
     assert.equal(putCalls(calls).length, 0, "a retried post-merge step must not re-commit");
   });
 
+  it("does NOT claim 'already published' when the entry's source identity diverged — version+ref agreement alone is not success, and nothing is written (dogfood P2 fold)", async () => {
+    // The exact shape of the finding: a concurrent edit that preserved the
+    // target version+ref but repointed repo or path. The old check reported
+    // "already at 0.2.8" while installs would resolve elsewhere.
+    const diverged = (mutate) => {
+      const manifest = JSON.parse(manifestText("0.2.8"));
+      mutate(manifest.plugins.find((p) => p.name === "z-pr-review"));
+      return `${JSON.stringify(manifest, null, 2)}\n`;
+    };
+    for (const [label, mutate] of [
+      ["repo", (entry) => { entry.source.repo = "someone/else"; }],
+      ["path", (entry) => { entry.source.path = "plugins/z-pr-review"; }],
+    ]) {
+      const { calls, run } = fake({ live: diverged(mutate) });
+      const result = await bumpMarketplaceEntry({ run, repoRoot: "/tmp/any", version: "0.2.8" });
+      assert.equal(result.ok, false, `${label}: a diverged entry must never read as published`);
+      assert.match(result.detail, /refusing to touch/, label);
+      assert.equal(putCalls(calls).length, 0, `${label}: no commit may be made while the entry points elsewhere`);
+    }
+  });
+
   it("re-fetches and retries once on PUT rejection, re-applying onto the FRESH manifest (pull --rebase equivalent, never stomp, never force)", async () => {
     // Between the first GET and the rejected PUT, the sibling's entry moved
     // (0.4.0 → 0.4.1) — the retry must carry that change through.
@@ -212,6 +247,36 @@ describe("bumpMarketplaceEntry", () => {
     const retryBody = decodedPutContent(putCalls(calls)[1].slice(1));
     assert.equal(JSON.parse(retryBody).plugins.find((p) => p.name === "gem-pr-review").version, "0.4.1", "the sibling's concurrent change is preserved, not stomped");
     assert.match(result.detail, /retry|re-fetch|conflict/i);
+  });
+
+  it("on the retry, short-circuits SUCCESS when the FRESH manifest already carries the target — no second PUT (dogfood P2 fold)", async () => {
+    // The rejected PUT's response was lost but the commit landed (or another
+    // publisher completed the same target): the fresh re-read shows the entry
+    // already at 0.2.8, so re-applying the bump would be a pointless second
+    // commit racing a state that is already correct.
+    const { calls, run } = fake({
+      live: manifestText("0.2.7"),
+      putResults: [res("", 1, "500 Internal Server Error (response lost after commit)")],
+      verifyLive: manifestText("0.2.8"),
+    });
+    const result = await bumpMarketplaceEntry({ run, repoRoot: "/tmp/any", version: "0.2.8" });
+    assert.ok(result.ok, result.detail ?? "");
+    assert.match(result.detail, /already carries 0\.2\.8\/v0\.2\.8/);
+    assert.equal(putCalls(calls).length, 1, "exactly the first (rejected) PUT — a live target needs no second write");
+  });
+
+  it("on the retry, fails loudly when the FRESH entry is at a strictly NEWER version — never downgrades a newer release, no retry PUT (dogfood P2 fold)", async () => {
+    const { calls, run } = fake({
+      live: manifestText("0.2.7"),
+      putResults: [res("", 1, "409 Conflict: is at once")],
+      verifyLive: manifestText("0.2.9"),
+    });
+    const result = await bumpMarketplaceEntry({ run, repoRoot: "/tmp/any", version: "0.2.8" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /NEWER/);
+    assert.match(result.detail, /0\.2\.9/);
+    assert.match(result.detail, /0\.2\.8/);
+    assert.equal(putCalls(calls).length, 1, "only the first (rejected) PUT — the downgrade retry must never fire");
   });
 
   it("fails closed when the PUT is rejected twice (one retry only — disclosed, never forced)", async () => {
@@ -251,6 +316,42 @@ describe("bumpMarketplaceEntry", () => {
     assert.equal(result.ok, false);
     assert.match(result.detail, /no z-pr-review entry/);
     assert.equal(putCalls(calls).length, 0, "no commit is attempted");
+  });
+});
+
+// publishTaggedVersion: the merge tail's publication wrapper (dogfood P2 fold,
+// PR #49). The tail created/reserved release tag vX.Y.Z moments before the
+// caller re-reads the MUTABLE checkout's plugin.json, so the reparsed version
+// is asserted to equal the tag's before any marketplace interaction — a
+// mid-tail checkout change fails loudly naming both instead of publishing an
+// entry that diverges from the tag the merge actually released.
+describe("publishTaggedVersion", () => {
+  it("passes through to bumpMarketplaceEntry when the checkout's version equals the tag's", async () => {
+    const { calls, run } = fake({ verifyLive: manifestText("0.2.8") });
+    const result = await publishTaggedVersion({ run, repoRoot: "/tmp/any", tag: "v0.2.8", version: "0.2.8" });
+    assert.ok(result.ok, result.detail ?? "");
+    assert.match(result.detail, /entry bumped to 0\.2\.8/);
+    assert.equal(putCalls(calls).length, 1, "the agreed version is published exactly once");
+  });
+
+  it("fails loudly naming BOTH versions on a version/tag mismatch — zero marketplace calls (not even the tag lookup)", async () => {
+    const { calls, run } = fake({});
+    const result = await publishTaggedVersion({ run, repoRoot: "/tmp/any", tag: "v0.2.8", version: "0.2.9" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /v0\.2\.8/);
+    assert.match(result.detail, /0\.2\.9/);
+    assert.match(result.detail, /diverges from the release tag/);
+    assert.equal(ghCalls(calls).length, 0, "a version/tag mismatch must fail before any marketplace read or write");
+    assert.equal(calls.length, 0, "no git call either — the assertion fires first");
+  });
+
+  it("fails closed when the tag is not a strict vX.Y.Z tag (the assertion itself cannot be made)", async () => {
+    const { calls, run } = fake({});
+    const result = await publishTaggedVersion({ run, repoRoot: "/tmp/any", tag: "main", version: "0.2.8" });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /main/);
+    assert.match(result.detail, /not a strict vX\.Y\.Z tag/);
+    assert.equal(ghCalls(calls).length, 0);
   });
 });
 

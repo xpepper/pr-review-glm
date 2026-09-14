@@ -44,11 +44,19 @@ const DEFAULT_MANIFEST_URL =
 // to be newest-first, so the max is taken over the whole page numerically.
 const DEFAULT_TAGS_URL = `https://api.github.com/repos/${PLUGIN_REPO}/tags?per_page=100`;
 
-// The token is only ever sent to GitHub's API host — an overridden URL is
-// often exactly how a leak gets set up (dogfood P2, 2026-09-13).
+// The token is only ever sent to GitHub's API host over HTTPS — an overridden
+// URL is often exactly how a leak gets set up (dogfood P2, 2026-09-13), and a
+// host check alone would still authorize an http://api.github.com override
+// carrying the GH_TOKEN bearer over plaintext (dogfood P2 fold, PR #49). Fail
+// closed: ANY non-https URL is refused outright — no Authorization header is
+// built, and the fetch itself never runs (this throws before it).
 function apiHeaders(url) {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") {
+    throw new Error(`refusing to fetch ${url}: the GitHub API must be reached over HTTPS — a non-https URL would carry the GH_TOKEN bearer over plaintext`);
+  }
   const headers = { Accept: "application/vnd.github.raw" };
-  if (process.env.GH_TOKEN && new URL(url).host === "api.github.com") {
+  if (process.env.GH_TOKEN && parsed.host === "api.github.com") {
     headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
   }
   return headers;

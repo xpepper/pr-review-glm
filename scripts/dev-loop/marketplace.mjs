@@ -21,7 +21,18 @@ import { compareVersions, isStrictVersion } from "./version.mjs";
 export const MARKETPLACE_REPO = "xpepper/copilot-plugins";
 export const PLUGIN_NAME = "z-pr-review";
 export const PLUGIN_REPO = "xpepper/pr-review-glm";
+export const PLUGIN_ROOT = ".";
 export const MANIFEST_PATH = ".github/plugin/marketplace.json";
+
+// The entry's expected source identity — OUR repository at the repo root, the
+// same coordinates checkMarketplaceConsistency enforces pre-merge. Carried as
+// one predicate over the module's coordinates (not literals at each check
+// site) because "published" and "already published" both mean installs resolve
+// from THIS repo: version+ref agreement alone would let a concurrent edit that
+// repointed the entry (repo or path) claim success while installs resolve
+// elsewhere (dogfood P2 fold, PR #49).
+const isOurSource = (entry) =>
+  entry?.source?.repo === PLUGIN_REPO && entry?.source?.path === PLUGIN_ROOT;
 
 // Pre-merge consistency rules (either-or since R45 — see header). Every problem
 // line names the marketplace repo so a failing gate points at the place to
@@ -54,9 +65,9 @@ export function checkMarketplaceConsistency({ manifest, pluginVersion, lastRelea
       `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must point at ${PLUGIN_REPO}, found ${String(entry.source?.repo)}`,
     );
   }
-  if (entry.source?.path !== ".") {
+  if (entry.source?.path !== PLUGIN_ROOT) {
     problems.push(
-      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must use the repo root (path "."), found ${JSON.stringify(entry.source?.path)}`,
+      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must use the repo root (path ${JSON.stringify(PLUGIN_ROOT)}), found ${JSON.stringify(entry.source?.path)}`,
     );
   }
   // Either-or acceptance (R45): the entry matches plugin.json (an operator
@@ -106,7 +117,8 @@ export function highestReleaseVersion(tagNames) {
 // `source.ref` changed (together — a version whose ref lags points installs
 // at a missing ref, the exact bug of issue #45). Invariants:
 //   - sibling entries survive byte-for-byte (never stomp siblings);
-//   - a same-named entry pointing at another repository is never touched;
+//   - a same-named entry that is not ours (another repository, or a
+//     redirected path away from the repo root) is never touched;
 //   - the file is rewritten ONLY if it round-trips through the canonical
 //     2-space JSON.stringify shape — otherwise the "one-line entry change"
 //     discipline would silently become a whole-file reformat, so the bump
@@ -125,8 +137,8 @@ export function applyEntryBump(manifestText, { to }) {
   if (!entry) {
     return { error: `marketplace ${MARKETPLACE_REPO} has no ${PLUGIN_NAME} entry — refusing to create one automatically; add it by hand` };
   }
-  if (entry.source?.repo !== PLUGIN_REPO) {
-    return { error: `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} points at ${String(entry.source?.repo)}, not ${PLUGIN_REPO} — refusing to touch a same-named entry in another repository` };
+  if (!isOurSource(entry)) {
+    return { error: `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} points at ${String(entry.source?.repo)}/${String(entry.source?.path)}, not ${PLUGIN_REPO}/${PLUGIN_ROOT} — refusing to touch a same-named entry that is not ours` };
   }
   if (`${JSON.stringify(manifest, null, 2)}\n` !== manifestText) {
     return { error: `marketplace ${MARKETPLACE_REPO} manifest formatting is not the canonical 2-space JSON shape — a restringify would rewrite the whole file instead of the one entry; bump the entry by hand` };
@@ -164,12 +176,18 @@ async function readLiveManifest(run, repoRoot, attempt) {
 // check is re-made here, fail-loudly with the tag name, because this step is
 // the release's publication boundary: the entry must never name a missing ref.
 // Sequence: confirm the tag on origin → read the live manifest (contents API,
-// with sha) → if already at the target version+ref, done (idempotent re-run)
-// → apply the entry-scoped bump (version + source.ref together) → PUT the new
-// file with the sha (a stale sha is rejected server-side — the API form of
-// pull --rebase: on rejection, re-read the FRESH manifest, re-apply the bump
-// onto it so concurrent sibling-entry changes are preserved, retry ONCE;
-// never force) → verify by re-reading the live entry. Fail-closed everywhere:
+// with sha) → if already at the target version+ref FROM OUR SOURCE IDENTITY
+// (repo + repo root), done (idempotent re-run) → apply the entry-scoped bump
+// (version + source.ref together) → PUT the new file with the sha (a stale sha
+// is rejected server-side — the API form of pull --rebase: on rejection,
+// re-read the FRESH manifest and FIRST re-run the idempotence check on it —
+// the target may have landed despite the rejection (response lost) or via a
+// concurrent publisher, in which case succeed without another write; a FRESH
+// version strictly NEWER than the target fails loudly, never downgrading a
+// newer release; otherwise re-apply the bump onto the fresh manifest so
+// concurrent sibling-entry changes are preserved, retry ONCE; never force) →
+// verify by re-reading the live entry (version+ref AND our source identity).
+// Fail-closed everywhere:
 // a failure here cannot un-merge, but it leaves the release unpublished — the
 // caller stops the loop with this detail so a human fixes the entry by hand.
 export async function bumpMarketplaceEntry({ run, repoRoot, version }) {
@@ -189,10 +207,14 @@ export async function bumpMarketplaceEntry({ run, repoRoot, version }) {
   }
   const live = await readLiveManifest(run, repoRoot, 1);
   if (live.error) return { ok: false, detail: live.error };
-  // Idempotence: a re-run after a later-step failure must not re-commit.
+  // Idempotence: a re-run after a later-step failure must not re-commit. The
+  // entry must be at the target version+ref AND still be OUR entry (repo +
+  // repo root): version+ref agreement alone would report "already published"
+  // while a concurrent edit repointed installs elsewhere (dogfood P2 fold) —
+  // a diverged identity falls through to applyEntryBump, which refuses it.
   let liveEntry = null;
   try { liveEntry = JSON.parse(live.text)?.plugins?.find((p) => p?.name === PLUGIN_NAME) ?? null; } catch { liveEntry = null; }
-  if (liveEntry?.version === version && liveEntry?.source?.ref === tag) {
+  if (liveEntry?.version === version && liveEntry?.source?.ref === tag && isOurSource(liveEntry)) {
     return { ok: true, detail: `marketplace entry already at ${version}/${tag} — nothing to publish` };
   }
   const message = `z-pr-review ${version} (release tag ${tag})`;
@@ -205,6 +227,25 @@ export async function bumpMarketplaceEntry({ run, repoRoot, version }) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     const current = attempt === 1 ? live : await readLiveManifest(run, repoRoot, attempt);
     if (current.error) return { ok: false, detail: attempt === 1 ? current.error : `${firstPutError}; then ${current.error}` };
+    if (attempt > 1) {
+      // The first PUT was rejected, but a rejection is not proof nothing
+      // landed: the commit may have succeeded with its response lost, or
+      // another publisher may have completed the same target. The fresh
+      // manifest is authoritative — re-run the (extended) idempotence check
+      // on it (dogfood P2 fold): if the target is already live, the outcome
+      // this step exists to reach is reached; succeed without a second PUT.
+      let freshEntry = null;
+      try { freshEntry = JSON.parse(current.text)?.plugins?.find((p) => p?.name === PLUGIN_NAME) ?? null; } catch { freshEntry = null; }
+      if (freshEntry?.version === version && freshEntry?.source?.ref === tag && isOurSource(freshEntry)) {
+        return { ok: true, detail: `the fresh manifest already carries ${version}/${tag} — the rejected PUT (or a concurrent publisher) had landed the target; nothing further to publish${firstPutError ? ` (first rejection: ${firstPutError.slice(0, 120)})` : ""}` };
+      }
+      // Never downgrade: a strictly NEWER version on the fresh manifest means
+      // the target is already stale — re-applying it would roll the public
+      // entry back off a newer release's tag.
+      if (isStrictVersion(freshEntry?.version) && compareVersions(freshEntry.version, version) > 0) {
+        return { ok: false, detail: `the fresh ${PLUGIN_NAME} entry is at ${freshEntry.version}, NEWER than the bump target ${version} — refusing to downgrade a newer release (${firstPutError})` };
+      }
+    }
     const bumped = applyEntryBump(current.text, { to: version });
     if (bumped.error) return { ok: false, detail: bumped.error };
     const put = await run("gh", [
@@ -218,16 +259,42 @@ export async function bumpMarketplaceEntry({ run, repoRoot, version }) {
     if (attempt === 2) return { ok: false, detail: `${firstPutError} — one re-fetch retry already made (the pull --rebase equivalent); fix the entry by hand, never force` };
   }
   // Verify: re-read the live manifest (fresh via the contents API) and
-  // require our entry to read exactly the released version and tag.
+  // require our entry to read exactly the released version and tag FROM OUR
+  // SOURCE IDENTITY — "verified" means installs resolve from this repo, not
+  // just that the version numbers agree (dogfood P2 fold).
   const verify = await readLiveManifest(run, repoRoot, "verify");
   if (verify.error) return { ok: false, detail: `entry bump committed but verification could not re-read the live manifest: ${verify.error}` };
   let verified = null;
   try { verified = JSON.parse(verify.text)?.plugins?.find((p) => p?.name === PLUGIN_NAME) ?? null; } catch { verified = null; }
-  if (verified?.version !== version || verified?.source?.ref !== tag) {
-    return { ok: false, detail: `verification failed: the live ${PLUGIN_NAME} entry reads ${String(verified?.version)}/${String(verified?.source?.ref)}, expected ${version}/${tag} — inspect ${MARKETPLACE_REPO} by hand` };
+  if (verified?.version !== version || verified?.source?.ref !== tag || !isOurSource(verified)) {
+    return { ok: false, detail: `verification failed: the live ${PLUGIN_NAME} entry reads ${String(verified?.version)}/${String(verified?.source?.ref)} from ${String(verified?.source?.repo)}/${JSON.stringify(verified?.source?.path)}, expected ${version}/${tag} from ${PLUGIN_REPO}/${JSON.stringify(PLUGIN_ROOT)} — inspect ${MARKETPLACE_REPO} by hand` };
   }
   return {
     ok: true,
     detail: `marketplace entry bumped to ${version} (ref ${tag}) in ${MARKETPLACE_REPO}${firstPutError ? ` — retried once after rejection (${firstPutError.slice(0, 120)})` : ""}`,
   };
+}
+
+// The merge tail's publication wrapper (dogfood P2 fold, PR #49): the tail
+// created/reserved the release tag vX.Y.Z moments before the caller re-reads
+// the MUTABLE checkout's plugin.json, so the reparsed version is asserted to
+// EQUAL the tag's version before any marketplace interaction. Without the
+// assertion a mid-tail checkout change would publish an entry (version + ref)
+// that diverges from the tag the merge actually released. Returns
+// bumpMarketplaceEntry's result on agreement; a fail-closed { ok: false,
+// detail } naming both versions otherwise — with no marketplace write (the
+// assertion fires before bumpMarketplaceEntry, so not even the tag-existence
+// lookup runs).
+export async function publishTaggedVersion({ run, repoRoot, tag, version }) {
+  const tagged = typeof tag === "string" && tag.startsWith("v") ? tag.slice(1) : null;
+  if (!isStrictVersion(tagged)) {
+    return { ok: false, detail: `release tag ${String(tag)} is not a strict vX.Y.Z tag — cannot assert the published version against it; refusing to publish` };
+  }
+  if (version !== tagged) {
+    return {
+      ok: false,
+      detail: `plugin.json (main) reads version ${String(version)} but the merge tail released tag ${tag} (version ${tagged}) — the checkout changed after tagging; refusing to publish a marketplace entry that diverges from the release tag (reconcile which one is the real release, then publish by hand)`,
+    };
+  }
+  return bumpMarketplaceEntry({ run, repoRoot, version });
 }

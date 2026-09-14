@@ -173,6 +173,28 @@ describe("fetch helpers token handling", () => {
     }
   });
 
+  it("refuses non-https URLs outright: no fetch ever runs, no token can transit plaintext, and the error names why", async () => {
+    process.env.GH_TOKEN = "tok";
+    let fetches = 0;
+    globalThis.fetch = async () => { fetches += 1; return { ok: true, json: async () => [] }; };
+    try {
+      // The exact leak shape of the finding: an http:// override of the
+      // api.github.com host via ZPR_TAGS_URL / ZPR_MARKETPLACE_MANIFEST_URL.
+      const insecure = [
+        "http://api.github.com/repos/xpepper/copilot-plugins/contents/.github/plugin/marketplace.json",
+        "http://api.github.com/repos/xpepper/pr-review-glm/tags?per_page=100",
+      ];
+      for (const url of insecure) {
+        await assert.rejects(fetchMarketplaceManifest(url), /must be reached over HTTPS.*plaintext/s);
+        await assert.rejects(fetchLatestReleaseVersion(url), /must be reached over HTTPS.*plaintext/s);
+      }
+      assert.equal(fetches, 0, "the fetch must never run for a non-https URL — fail closed before any network hop");
+    } finally {
+      delete process.env.GH_TOKEN;
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it("never sends an Authorization header without GH_TOKEN", async () => {
     assert.equal(process.env.GH_TOKEN, undefined, "test requires a clean env");
     const capture = {};

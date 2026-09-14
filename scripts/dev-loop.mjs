@@ -13,7 +13,7 @@ import {
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
 import { gateVersionBump, parseVersion, releaseTagReservation, verifyBumpAtMerge } from "./dev-loop/version.mjs";
-import { bumpMarketplaceEntry } from "./dev-loop/marketplace.mjs";
+import { publishTaggedVersion } from "./dev-loop/marketplace.mjs";
 import { deleteMergedBranch, mergeTail, squashMergeAtHead } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
@@ -382,7 +382,10 @@ async function runMain(options, { zcode, phaseEnv }) {
       // release without ever surfacing the skipped bump.
       // plugin.json was validated on this same checkout moments ago by the
       // tagging tail; the guard keeps a mid-tail checkout surprise fail-closed
-      // instead of an escaped exception.
+      // instead of an escaped exception. The reparsed version must EQUAL the
+      // just-created tag's (publishTaggedVersion asserts it, dogfood P2 fold,
+      // PR #49): a checkout that changed mid-tail fails loudly naming both
+      // instead of publishing an entry that diverges from the release tag.
       let released = null;
       try {
         released = parseVersion(read("plugin.json"), "plugin.json (main)");
@@ -392,7 +395,7 @@ async function runMain(options, { zcode, phaseEnv }) {
       if (released.error) {
         return { code: 1, stdout: "", stderr: `cannot read the released version to publish to the marketplace (merge and release tag ${bump.tag} completed): ${released.error}`, timedOut: false };
       }
-      const published = await bumpMarketplaceEntry({ run, repoRoot, version: released.version });
+      const published = await publishTaggedVersion({ run, repoRoot, tag: bump.tag, version: released.version });
       if (!published.ok) {
         return { code: 1, stdout: "", stderr: `marketplace entry bump failed (merge and release tag v${released.version} completed — fix the entry by hand, do not re-merge): ${published.detail}`, timedOut: false };
       }
