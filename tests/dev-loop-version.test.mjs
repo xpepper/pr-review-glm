@@ -102,6 +102,7 @@ describe("verifyBumpAtMerge", () => {
   // (Local `res` because the file-level `ok` is a run factory, not a result.)
   const res = (stdout = "", code = 0, stderr = "") => ({ code, stdout, stderr });
   const OID = "c".repeat(40);
+  const TAG_OBJECT = "e".repeat(40); // the annotated tag object the reservation pushes (hex, as a real tag object id)
   const fake = ({ main = "0.1.0", head = "0.2.0", overrides = {} } = {}) => {
     const calls = [];
     const run = async (command, args) => {
@@ -112,6 +113,11 @@ describe("verifyBumpAtMerge", () => {
       if (key === "git show HEAD:plugin.json") return res(manifest(head));
       if (command === "gh" && args[1] === "view") return res(JSON.stringify({ headRefOid: OID }));
       if (command === "git" && args[0] === "show") return res(manifest(head));
+      // I8 annotated reservation: no local tag, then create/push/resolve all succeed.
+      if (key === "git rev-parse -q --verify refs/tags/v0.2.0") return res("", 1);
+      if (command === "git" && args[2] === "tag" && args[3] === "-a") return res();
+      if (key === "git push origin refs/tags/v0.2.0") return res();
+      if (key === "git rev-parse refs/tags/v0.2.0") return res(`${TAG_OBJECT}\n`);
       return res();
     };
     return { calls, run };
@@ -119,21 +125,30 @@ describe("verifyBumpAtMerge", () => {
   it("confirms the bump against a freshly fetched main, reading the PR head by its pinned remote OID", async () => {
     const { calls, run } = fake({ main: "0.1.0", head: "0.2.0" });
     const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
-    assert.deepEqual(result, { ok: true, tag: "v0.2.0", reservedAt: OID, detail: `version 0.1.0 → 0.2.0 confirmed at merge time (PR head ${OID.slice(0, 7)}, release tag v0.2.0 reserved on origin at ${OID.slice(0, 7)})` });
+    assert.deepEqual(result, { ok: true, tag: "v0.2.0", reservedAt: OID, reservedObject: TAG_OBJECT, detail: `version 0.1.0 → 0.2.0 confirmed at merge time (PR head ${OID.slice(0, 7)}, annotated release tag v0.2.0 reserved on origin at ${OID.slice(0, 7)})` });
     assert.ok(calls.includes(`git show ${OID}:plugin.json`), "must read the PR head manifest by OID, not the local checkout");
     assert.ok(!calls.includes("git show HEAD:plugin.json"), "the local checkout is never the re-check source");
     assert.ok(calls.includes("git ls-remote --tags origin refs/tags/v0.2.0"),
       "must check the release tag on origin before merging (duplicate-version guard)");
-    assert.ok(calls.includes(`git push origin ${OID}:refs/tags/v0.2.0`),
-      "must atomically reserve the release tag on origin before the merge (concurrent-run guard)");
+    assert.ok(calls.includes("git -c tag.gpgsign=false tag -a v0.2.0 -m z-pr-review release v0.2.0 " + OID),
+      "the reservation is an ANNOTATED tag created at the pinned PR head (I8 convention)");
+    assert.ok(calls.includes("git push origin refs/tags/v0.2.0"),
+      "must atomically reserve the release tag ref on origin before the merge (concurrent-run guard)");
   });
   it("aborts the merge when the atomic tag reservation is rejected — a concurrent run released the same version (round-5 P1)", async () => {
-    const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { [`git push origin ${OID}:refs/tags/v0.2.0`]: res("", 1, " ! [rejected] refs/tags/v0.2.0 -> refs/tags/v0.2.0 (already exists)") } });
+    const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { "git push origin refs/tags/v0.2.0": res("", 1, " ! [rejected] refs/tags/v0.2.0 -> refs/tags/v0.2.0 (already exists)") } });
     const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
     assert.equal(result.ok, false);
     assert.match(result.detail, /reserving release tag v0\.2\.0 on origin failed/);
     assert.match(result.detail, /merge aborted/);
     assert.match(result.detail, /concurrently/);
+  });
+  it("aborts the merge fail-closed when a leftover local reservation tag blocks creation (aborted-run cleanup failed)", async () => {
+    const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { "git rev-parse -q --verify refs/tags/v0.2.0": res(`${TAG_OBJECT}\n`) } });
+    const result = await verifyBumpAtMerge({ run, repoRoot: "/tmp/any", prNumber: 23, expectedHeadRefOid: OID });
+    assert.equal(result.ok, false);
+    assert.match(result.detail, /local tag v0\.2\.0 already exists/);
+    assert.match(result.detail, /git tag -d v0\.2\.0/);
   });
   it("aborts the merge when the release tag already exists on origin (duplicate version)", async () => {
     const { run } = fake({ main: "0.1.0", head: "0.2.0", overrides: { "git ls-remote --tags origin refs/tags/v0.2.0": res("abc123\trefs/tags/v0.2.0\n") } });
@@ -214,13 +229,16 @@ describe("tagMergedRelease", () => {
     };
     const result = await tagMergedRelease({ run, repoRoot });
     assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
-    assert.deepEqual(calls, [["git", "-c", "tag.gpgsign=false", "tag", "v0.3.1"], ["git", "push", "origin", "v0.3.1"]]);
+    assert.deepEqual(calls, [
+      ["git", "-c", "tag.gpgsign=false", "tag", "-a", "v0.3.1", "-m", "z-pr-review release v0.3.1"],
+      ["git", "push", "origin", "v0.3.1"],
+    ]);
   }));
-  it("creates the tag config-immune: -c tag.gpgsign=false pins lightweight semantics (2026-09-13 vim-stall incident)", withManifest("0.3.1", async (repoRoot) => {
-    // Operator config tag.gpgsign=true makes a plain `git tag` annotated:
-    // it opens an editor (invisible under piped stdio) and invokes gpg —
-    // both must be unreachable from the headless merge tail, so every tag
-    // CREATION call carries the -c override. The delete is untouched.
+  it("creates the tag config-immune: -c tag.gpgsign=false pins signing OFF under annotated semantics (2026-09-13 vim-stall incident)", withManifest("0.3.1", async (repoRoot) => {
+    // I8 convention: release tags are ANNOTATED (-a -m, deterministic message).
+    // Operator config tag.gpgsign=true would add a gpg signature to an
+    // annotated tag — invisible prompts under piped stdio hang the headless
+    // merge tail, so every tag CREATION call carries the -c override.
     const calls = [];
     const run = async (command, args) => {
       calls.push([command, ...args]);
@@ -229,10 +247,12 @@ describe("tagMergedRelease", () => {
     };
     await tagMergedRelease({ run, repoRoot });
     const creations = calls.filter(([, ...args]) => args[0] === "-c");
-    assert.ok(creations.every(([, ...args]) => args[1] === "tag.gpgsign=false" && args[2] === "tag"), "every tag creation runs under -c tag.gpgsign=false");
-    await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40) } });
+    assert.ok(creations.every(([, ...args]) =>
+      args[1] === "tag.gpgsign=false" && args[2] === "tag" && args[3] === "-a" && typeof args[5] === "string" && args[5].length > 0),
+      "every tag creation is annotated with a message, under -c tag.gpgsign=false");
+    await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40), reservedObject: "t".repeat(40) } });
     const retargets = calls.filter(([, ...args]) => args[2] === "tag" && args[3] === "-f");
-    assert.ok(retargets.every(([, ...args]) => args[1] === "tag.gpgsign=false"), "the -f retarget creation is equally config-immune");
+    assert.ok(retargets.every(([, ...args]) => args[1] === "tag.gpgsign=false" && args[4] === "-a"), "the -f retarget creation is equally config-immune and annotated");
   }));
   it("fails closed on tag creation failure (e.g. tag already exists)", withManifest("0.3.1", async (repoRoot) => {
     const run = async (command, args) =>
@@ -254,7 +274,11 @@ describe("tagMergedRelease", () => {
     const result = await tagMergedRelease({ run, repoRoot });
     assert.equal(result.ok, false);
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);
-    assert.deepEqual(calls, [["git", "-c", "tag.gpgsign=false", "tag", "v0.3.1"], ["git", "push", "origin", "v0.3.1"], ["git", "tag", "-d", "v0.3.1"]]);
+    assert.deepEqual(calls, [
+      ["git", "-c", "tag.gpgsign=false", "tag", "-a", "v0.3.1", "-m", "z-pr-review release v0.3.1"],
+      ["git", "push", "origin", "v0.3.1"],
+      ["git", "tag", "-d", "v0.3.1"],
+    ]);
   }));
   it("fails closed on an invalid plugin.json version", withManifest("x", async (repoRoot) => {
     const result = await tagMergedRelease({ run: ok(), repoRoot });
@@ -279,36 +303,38 @@ describe("tagMergedRelease", () => {
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);
     assert.match(result.detail, /removing the un-pushed local tag failed/);
   }));
-  it("retargets the pre-merge reservation onto the merge commit with a force-with-lease pinned to the reserved OID (round-5 P1)", withManifest("0.3.1", async (repoRoot) => {
+  it("retargets the pre-merge reservation onto the merge commit with a force-with-lease pinned to the reserved TAG OBJECT (round-5 P1, annotated I8)", withManifest("0.3.1", async (repoRoot) => {
     const calls = [];
     const RESERVED_AT = "c".repeat(40);
+    const RESERVED_OBJECT = "t".repeat(40);
     const run = async (command, args) => {
       calls.push([command, ...args]);
       if (command === "git" && args[0] === "rev-parse") return { code: 0, stdout: `${RESERVED_AT}\n`, stderr: "" };
       return { code: 0, stdout: "", stderr: "" };
     };
-    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT } });
+    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT, reservedObject: RESERVED_OBJECT } });
     assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
     assert.deepEqual(calls, [
       ["git", "rev-parse", "v0.3.1^{}"],
-      ["git", "-c", "tag.gpgsign=false", "tag", "-f", "v0.3.1"],
-      ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`, "origin", "v0.3.1"],
-    ], "a local tag at the reserved OID is our own fetch-followed reservation — replace it at HEAD; the push may only move a tag that still sits at our own reservation");
+      ["git", "-c", "tag.gpgsign=false", "tag", "-f", "-a", "v0.3.1", "-m", "z-pr-review release v0.3.1"],
+      ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_OBJECT}`, "origin", "v0.3.1"],
+    ], "a local tag peeling to the reserved commit is our own reservation — replace it at HEAD annotated; the push may only move a tag whose ref still sits at our reserved TAG OBJECT (annotated refs point at the object, not the commit)");
   }));
-  it("retargets with a plain tag create when no local copy of the reservation was fetch-followed", withManifest("0.3.1", async (repoRoot) => {
+  it("retargets with a plain annotated tag create when no local copy of the reservation exists", withManifest("0.3.1", async (repoRoot) => {
     const calls = [];
     const RESERVED_AT = "c".repeat(40);
+    const RESERVED_OBJECT = "t".repeat(40);
     const run = async (command, args) => {
       calls.push([command, ...args]);
       if (command === "git" && args[0] === "rev-parse") return { code: 128, stdout: "", stderr: "unknown revision" };
       return { code: 0, stdout: "", stderr: "" };
     };
-    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT } });
+    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: RESERVED_AT, reservedObject: RESERVED_OBJECT } });
     assert.deepEqual(result, { ok: true, detail: "tagged merged main v0.3.1" });
     assert.deepEqual(calls, [
       ["git", "rev-parse", "v0.3.1^{}"],
-      ["git", "-c", "tag.gpgsign=false", "tag", "v0.3.1"],
-      ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_AT}`, "origin", "v0.3.1"],
+      ["git", "-c", "tag.gpgsign=false", "tag", "-a", "v0.3.1", "-m", "z-pr-review release v0.3.1"],
+      ["git", "push", `--force-with-lease=refs/tags/v0.3.1:${RESERVED_OBJECT}`, "origin", "v0.3.1"],
     ]);
   }));
   it("fails closed when a local tag exists but does not sit at the reserved OID (I5 release-stop regression)", withManifest("0.3.1", async (repoRoot) => {
@@ -337,7 +363,7 @@ describe("tagMergedRelease", () => {
         : args[0] === "rev-parse"
           ? { code: 0, stdout: `${"c".repeat(40)}\n`, stderr: "" }
           : { code: 0, stdout: "", stderr: "" };
-    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40) } });
+    const result = await tagMergedRelease({ run, repoRoot, reservation: { tag: "v0.3.1", reservedAt: "c".repeat(40), reservedObject: "t".repeat(40) } });
     assert.equal(result.ok, false);
     assert.match(result.detail, /git push origin v0\.3\.1 failed/);
   }));

@@ -11,6 +11,7 @@ import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
 import { runLaneBatch } from "./batch.mjs";
 import { assembleReview } from "./adjudicate.mjs";
+import { buildFileBackedTransport, describeTransport, TransportError } from "./transport.mjs";
 import { drainUnconfirmedStops } from "./lane.mjs";
 import { publishReview, PublishError, renderPublishResult } from "./publish.mjs";
 import { describeLanes } from "./topologies.mjs";
@@ -196,6 +197,25 @@ async function runReview(parsed) {
     }
     lastCapture = outcome.summary;
     await session.log(renderCapture(outcome.summary));
+    // I8: at ≥200 KB the diff stops riding in every lane prompt — the frozen
+    // capture is sliced into per-file sections on disk and lanes get a
+    // manifest with required reads (completeness enforced from tool events).
+    // A transport that cannot be built fails the review closed: falling back
+    // to an embedded multi-hundred-KB prompt is the condition this exists to
+    // prevent, never a silent degradation.
+    let transport;
+    try {
+      transport = await buildFileBackedTransport({ envelope: outcome.envelope });
+    } catch (error) {
+      if (error instanceof TransportError) {
+        await session.log(`Review refused — ${error.message}`, { level: "error" });
+        return;
+      }
+      throw error;
+    }
+    if (transport.mode === "file-backed") {
+      await session.log(`Large diff (≥ ${transport.thresholdBytes.toLocaleString("en-US")} bytes): ${describeTransport(transport)}.`);
+    }
     // C1: the mode resolves through config — a custom/overridden mode in
     // config.modes composes built-in lanes and custom roles into one lane
     // list that runs through the unchanged budgets, shaping, and gates.
@@ -208,6 +228,7 @@ async function runReview(parsed) {
       config,
       repoRoot: process.cwd(),
       signal: controller.signal,
+      transport: transport.mode === "file-backed" ? transport : null,
       onLaneDone: async (lane, result) => {
         const tail = result.status === "complete"
           ? `complete — ${result.findings.length} finding${result.findings.length === 1 ? "" : "s"}`
@@ -232,9 +253,11 @@ async function runReview(parsed) {
         reviewStartedAt + config.deadlines.totalMs,
       ),
       signal: controller.signal,
+      transport: transport.mode === "file-backed" ? transport : null,
     });
     const decorated = {
       ...assembled,
+      transport: transport.mode === "file-backed" ? transport : null,
       lanes: assembled.lanes.map((result) => ({
         ...result,
         modelLabel: modelLabelFor(config, result),

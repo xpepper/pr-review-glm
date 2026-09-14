@@ -24,6 +24,10 @@ const FILES_PAGE_SIZE = 100;
 const MAX_FILE_PAGES = 5; // 500 files; beyond that the anchor map fails closed
 const REVIEWS_PAGE_SIZE = 100;
 const MAX_REVIEW_PAGES = 10; // the marker scan reads every review page
+// I8: how many times (and how far apart) the uncertain-write reconciliation
+// rescans a lagging review listing before concluding the POST did not land.
+const RECONCILE_SCANS = 3;
+const RECONCILE_DELAY_MS = 2_000;
 
 export class PublishError extends Error {
   constructor(reason) {
@@ -246,7 +250,14 @@ export function buildPublication({ capture, review, selected, anchorMap, current
   return { body, inline, notedCount: noted.length };
 }
 
-async function ghJson(runGh, cwd, args, doingWhat, { stdin } = {}) {
+async function ghJson(runGh, cwd, args, doingWhat, { stdin, signal } = {}) {
+  // A cancelled review stops asking gh for anything: every paginated scan in
+  // this file funnels through here, so this check is what keeps an aborted
+  // publication from holding the per-target lock through more pages (the I7
+  // review P2 — the signal existed but never reached the gh boundary).
+  if (signal?.aborted) {
+    throw new PublishError(`the review was cancelled while ${doingWhat}; nothing more was attempted.`);
+  }
   const result = await runGh(args, { cwd, timeoutMs: DEFAULT_GH_TIMEOUT_MS, ...(stdin === undefined ? {} : { stdin }) });
   if (result.code === 0) {
     try {
@@ -275,12 +286,13 @@ async function ghJsonOrThrow(runGh, cwd, args, doingWhat, options = {}) {
 // fail-closed condition (the anchor map or marker scan would be incomplete).
 // A list of EXACTLY maxPages*pageSize entries is legitimate: every allowed
 // page being full is indistinguishable from an over-cap list without one
-// probe entry beyond the cap.
-async function ghListOrThrow(runGh, cwd, path, { pageSize, maxPages, doingWhat }) {
+// probe entry beyond the cap. The signal is re-checked before every page —
+// a cancelled review never pages further.
+async function ghListOrThrow(runGh, cwd, path, { pageSize, maxPages, doingWhat, signal }) {
   const all = [];
   for (let page = 1; page <= maxPages; page += 1) {
     const args = ["api", `${path}?per_page=${pageSize}&page=${page}`];
-    const batch = await ghJsonOrThrow(runGh, cwd, args, doingWhat);
+    const batch = await ghJsonOrThrow(runGh, cwd, args, doingWhat, { signal });
     if (!Array.isArray(batch)) {
       throw new PublishError(`gh returned a non-array while ${doingWhat}; failing closed — nothing was posted.`);
     }
@@ -292,6 +304,7 @@ async function ghListOrThrow(runGh, cwd, path, { pageSize, maxPages, doingWhat }
     cwd,
     ["api", `${path}?per_page=1&page=${maxPages * pageSize + 1}`],
     doingWhat,
+    { signal },
   );
   if (Array.isArray(probe) && probe.length === 0) return all;
   throw new PublishError(`${doingWhat}: more than ${maxPages * pageSize} entries; failing closed — nothing was posted.`);
@@ -321,6 +334,7 @@ export async function publishReview({
   signal = null,
   runGh = defaultRunGh,
   cwd = process.cwd(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   if (signal?.aborted) {
     return { status: "refused", reason: "the review was cancelled before publication; nothing was posted." };
@@ -333,15 +347,16 @@ export async function publishReview({
   const prPath = `repos/${capture.repo}/pulls/${capture.number}`;
 
   // Lifecycle, self-author, and head gates read ONE fresh PR fetch; the
-  // captured binding names the repo/PR, never a live one.
-  const pr = await ghJsonOrThrow(runGh, cwd, ["api", prPath], `fetching PR #${capture.number} for publication gates`);
+  // captured binding names the repo/PR, never a live one. The abort signal
+  // rides every gh call from here on (ghJson checks it at the boundary).
+  const pr = await ghJsonOrThrow(runGh, cwd, ["api", prPath], `fetching PR #${capture.number} for publication gates`, { signal });
   if (!isOpenState(pr)) {
     return { status: "refused", reason: `PR #${capture.number} is ${pr.state ?? "in an unknown state"}; nothing was posted.` };
   }
   if (pr.draft === true) {
     return { status: "refused", reason: `PR #${capture.number} is a draft; nothing was posted.` };
   }
-  const viewer = await ghJsonOrThrow(runGh, cwd, ["api", "user"], "resolving the authenticated gh user");
+  const viewer = await ghJsonOrThrow(runGh, cwd, ["api", "user"], "resolving the authenticated gh user", { signal });
   if (typeof viewer?.login !== "string" || viewer.login === "") {
     throw new PublishError(`could not resolve the authenticated gh user; failing closed — nothing was posted.`);
   }
@@ -383,6 +398,7 @@ export async function publishReview({
     pageSize: REVIEWS_PAGE_SIZE,
     maxPages: MAX_REVIEW_PAGES,
     doingWhat: "scanning existing reviews for the idempotency marker",
+    signal,
   });
   const prior = existingReviews.find(carriesMarker);
   if (prior !== undefined) {
@@ -398,6 +414,7 @@ export async function publishReview({
         pageSize: FILES_PAGE_SIZE,
         maxPages: MAX_FILE_PAGES,
         doingWhat: "fetching the PR's changed files for anchor validation",
+        signal,
       });
   const publication = buildPublication({
     capture,
@@ -416,7 +433,7 @@ export async function publishReview({
   // the earlier fetch; if the PR closed, turned draft, its head moved, or its
   // base advanced (re-diffing the PR under the validated anchors) in between,
   // posting now would write against a state the gates never cleared.
-  const recheck = await ghJsonOrThrow(runGh, cwd, ["api", prPath], "re-checking the PR immediately before posting");
+  const recheck = await ghJsonOrThrow(runGh, cwd, ["api", prPath], "re-checking the PR immediately before posting", { signal });
   if (!isOpenState(recheck) || recheck.draft === true) {
     throw new PublishError(
       `PR #${capture.number} became ${!isOpenState(recheck) ? recheck.state ?? "an unknown state" : "a draft"} during publication; nothing was posted.`,
@@ -476,17 +493,34 @@ export async function publishReview({
 
   // Uncertain write: reconcile by scanning existing reviews for the marker —
   // a posted review carries it; absence is treated as not-posted (fail-closed).
-  const afterReviews = await ghListOrThrow(runGh, cwd, prPath + "/reviews", {
-    pageSize: REVIEWS_PAGE_SIZE,
-    maxPages: MAX_REVIEW_PAGES,
-    doingWhat: "reconciling an uncertain review POST",
-  });
-  const landed = afterReviews.find(carriesMarker);
-  if (landed !== undefined) {
-    return { status: "published", reviewUrl: landed.html_url ?? null, ...base, reconciled: true };
+  // The scan is BOUNDED-RETRIED (I8, the I7 review P2): GitHub's review
+  // listing can lag the POST by seconds, so a single scan could fail closed
+  // over a landed review — and a fail-closed stop is exactly what prompts a
+  // rerun, whose own pre-POST scan hits the same lagging listing and would
+  // duplicate the comment. Retrying the scan a few times lets the marker
+  // surface so the rerun path never forms. Each scan re-checks the abort
+  // signal (a cancelled review stops reconciling immediately).
+  for (let scan = 1; scan <= RECONCILE_SCANS; scan += 1) {
+    const afterReviews = await ghListOrThrow(runGh, cwd, prPath + "/reviews", {
+      pageSize: REVIEWS_PAGE_SIZE,
+      maxPages: MAX_REVIEW_PAGES,
+      doingWhat: `reconciling an uncertain review POST (scan ${scan} of ${RECONCILE_SCANS})`,
+      signal,
+    });
+    const landed = afterReviews.find(carriesMarker);
+    if (landed !== undefined) {
+      return {
+        status: "published",
+        reviewUrl: landed.html_url ?? null,
+        ...base,
+        reconciled: true,
+        reconcileScans: scan,
+      };
+    }
+    if (scan < RECONCILE_SCANS) await sleep(RECONCILE_DELAY_MS);
   }
   throw new PublishError(
-    `the review POST did not land (uncertain response: ${post.code === 0 ? "unparseable response body" : firstLine(post.stderr) || "no output"}) and no review carrying the idempotency marker exists; failing closed — re-run publication if the PR is still open.`,
+    `the review POST did not land (uncertain response: ${post.code === 0 ? "unparseable response body" : firstLine(post.stderr) || "no output"}) and no review carrying the idempotency marker appeared within ${RECONCILE_SCANS} reconciliation scans; failing closed — re-run publication if the PR is still open.`,
   );
 }
 
@@ -521,7 +555,11 @@ export function renderPublishResult(capture, outcome) {
     lines.push(`The ${moved} since capture — the comment is body-only and names both commits and bases.`);
   }
   if (outcome.reconciled === true) {
-    lines.push("The POST's response was uncertain; the published state was reconciled by finding the idempotency marker on an existing review.");
+    lines.push(
+      outcome.reconcileScans > 1
+        ? `The POST's response was uncertain; the published state was reconciled by finding the idempotency marker on an existing review (review-scan ${outcome.reconcileScans} of ${RECONCILE_SCANS} — the listing lagged the POST).`
+        : "The POST's response was uncertain; the published state was reconciled by finding the idempotency marker on an existing review.",
+    );
   }
   lines.push(outcome.reviewUrl ? `Review: ${outcome.reviewUrl}` : "Review: (URL unavailable)");
   return lines.join("\n");

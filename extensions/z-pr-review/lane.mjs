@@ -11,6 +11,7 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
+import { buildFileBackedLanePrompt } from "./transport.mjs";
 
 export const REVIEW_ENVELOPE_BEGIN = "<<<REVIEW_BEGIN>>>";
 export const REVIEW_ENVELOPE_END = "<<<REVIEW_END>>>";
@@ -150,26 +151,38 @@ export function buildLanePrompt(envelope, lane = null) {
 }
 
 // Confinement is enforced here, not by the prompt: reads resolve to real paths
-// inside the reviewed checkout or are rejected; every other request is denied.
-export function lanePermissionPolicy(repoRoot) {
-  const root = realpathSync(repoRoot);
+// inside the reviewed checkout (or, under I8 file-backed transport, inside the
+// transport directory holding the captured diff's per-file sections) or are
+// rejected; every other request is denied. Approved reads can be observed via
+// onReadApproved — the file-backed transport's completeness check is built on
+// exactly that signal (the permission event carries a path, not line ranges,
+// so coverage is tracked per file).
+export function lanePermissionPolicy(repoRoot, { extraRoots = [], onReadApproved = null } = {}) {
+  const roots = [repoRoot, ...extraRoots].map((root) => realpathSync(root));
   const contains = (path) => {
-    const absolute = isAbsolute(path) ? path : resolve(root, path);
+    const absolute = isAbsolute(path) ? path : resolve(roots[0], path);
     let real;
     try {
       real = realpathSync(absolute);
     } catch {
       return { kind: "reject", message: `Lane reads must stay inside the reviewed checkout: ${path}` };
     }
-    const rel = relative(root, real);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
+    const inside = roots.some((root) => {
+      const rel = relative(root, real);
+      return !(rel.startsWith("..") || isAbsolute(rel));
+    });
+    if (!inside) {
       return { kind: "reject", message: `Lane reads must stay inside the reviewed checkout: ${path}` };
     }
     return { kind: "approve-once" };
   };
   return {
     onPermissionRequest: async (request) => {
-      if (request.kind === "read" && typeof request.path === "string") return contains(request.path);
+      if (request.kind === "read" && typeof request.path === "string") {
+        const decision = contains(request.path);
+        if (decision.kind === "approve-once" && onReadApproved) onReadApproved(request.path);
+        return decision;
+      }
       return { kind: "reject", message: "Reviewer lanes are read-only." };
     },
   };
@@ -202,6 +215,17 @@ export async function runLane({
   // I5: the adjudicator reuses the whole lane machinery — budgets, envelope
   // contract, cancellation — with its own prompt over the diff plus candidates.
   prompt = null,
+  // I8: a file-backed transport for large diffs. When present, the lane prompt
+  // is the manifest form (no embedded diff) and the transport dir joins the
+  // readable roots. For reviewer lanes (enforceReadCoverage, the default)
+  // completeness is enforced from permission events: a session that reaches
+  // idle without reading every required file is a FAILED lane, never a
+  // complete review (spec: "completeness enforced from tool events" — file
+  // granularity; read requests carry paths, not ranges). The adjudicator
+  // passes the transport WITHOUT enforcement: merging candidates needs
+  // targeted reads, and its output is re-validated host-side regardless.
+  transport = null,
+  enforceReadCoverage = true,
 }) {
   const tier = config.tiers[lane.tier];
   // C1: a lane (custom role) may override the tier's model/effort; absent
@@ -209,10 +233,57 @@ export async function runLane({
   // session's model either way.
   const tierModel = lane.model !== undefined ? lane.model : tier.model;
   const tierEffort = lane.effort !== undefined ? lane.effort : tier.effort;
-  const lanePrompt = prompt ?? buildLanePrompt(envelope, lane);
+  const lanePrompt =
+    prompt ??
+    (transport !== null
+      ? buildFileBackedLanePrompt(envelope, transport, lane)
+      : buildLanePrompt(envelope, lane));
   if (signal?.aborted) {
     return { status: "failed", reason: "cancelled before dispatch", findings: [], dropped: [], laneText: "", laneId: lane.id, tier: lane.tier };
   }
+  // Per-attempt read tracking for the completeness check. Each attempt gets a
+  // fresh set (a fallback attempt re-reads; stale coverage from a failed
+  // attempt must not validate the retry).
+  const transportFilesByPath = new Map();
+  let readTransportFiles = null;
+  if (transport !== null && enforceReadCoverage) {
+    readTransportFiles = new Set();
+    for (const file of transport.files) {
+      try {
+        transportFilesByPath.set(realpathSync(file.absolutePath), file);
+      } catch {
+        // The transport file disappeared between build and dispatch: the
+        // coverage check below reports it as permanently unread — fail-closed
+        // without a spawn.
+        return {
+          status: "failed",
+          reason: `file-backed transport is unreadable: ${file.absolutePath}`,
+          findings: [],
+          dropped: [],
+          laneText: "",
+          laneId: lane.id,
+          tier: lane.tier,
+        };
+      }
+    }
+  }
+  const coverage =
+    readTransportFiles !== null
+      ? {
+          total: transport.files.length,
+          missing: () => transport.files.filter((file) => !readTransportFiles.has(file.absolutePath)),
+          record: (path) => {
+            let real;
+            try {
+              real = realpathSync(path);
+            } catch {
+              return;
+            }
+            const file = transportFilesByPath.get(real);
+            if (file !== undefined) readTransportFiles.add(file.absolutePath);
+          },
+        }
+      : null;
   const creation = createRuntime({
     cliPath,
     repoRoot,
@@ -223,7 +294,10 @@ export async function runLane({
     reasoningEffort: tierEffort,
     availableTools: ["builtin:view", "builtin:grep", "builtin:glob"],
     enableConfigDiscovery: false,
-    permission: lanePermissionPolicy(repoRoot),
+    permission: lanePermissionPolicy(repoRoot, {
+      extraRoots: transport !== null ? [transport.dir] : [],
+      onReadApproved: coverage ? coverage.record : null,
+    }),
   });
   // A child runtime that never finishes spawning must not eat past the
   // attempt budget uncounted; parent cancellation must not wait out the
@@ -326,6 +400,7 @@ export async function runLane({
     deadlineAt,
     cleanup: () => client.stop(),
     signal,
+    coverage,
   });
   return { ...result, laneId: lane.id, tier: lane.tier };
 }
@@ -420,7 +495,46 @@ async function stopBounded(stop, until) {
   });
 }
 
-async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }) {
+// I8 telemetry: per-lane usage accumulated from the child session's runtime
+// events — model.call_finished (dispatch count/duration/outcome) and
+// session.usage_checkpoint (the session's accumulated nano-AI-units cost; the
+// child session is fresh per attempt, so the last checkpoint minus the first
+// is that attempt's own spend). Informational ONLY: nothing here can gate,
+// fail, or re-order anything, and only finite non-negative numbers enter the
+// outcome — unknown event shapes are skipped, never string-copied.
+function emptyTelemetry() {
+  return { calls: 0, success: 0, error: 0, cancelled: 0, rejected: 0, dispatchMs: 0 };
+}
+
+function noteCallFinished(outcome, data) {
+  const telemetry = (outcome.telemetry ??= emptyTelemetry());
+  telemetry.calls += 1;
+  const kind = data?.outcome;
+  if (kind === "success" || kind === "error" || kind === "cancelled" || kind === "rejected") {
+    telemetry[kind] += 1;
+  }
+  const ms = Number(data?.dispatchDurationMs);
+  if (Number.isFinite(ms) && ms >= 0) telemetry.dispatchMs += ms;
+}
+
+function noteUsageCheckpoint(outcome, data) {
+  const total = Number(data?.totalNanoAiu);
+  if (!Number.isFinite(total) || total < 0) return;
+  const telemetry = (outcome.telemetry ??= emptyTelemetry());
+  if (telemetry.firstNanoAiu === undefined) telemetry.firstNanoAiu = total;
+  telemetry.lastNanoAiu = total;
+}
+
+function finalizeTelemetry(outcome) {
+  const telemetry = outcome.telemetry;
+  if (telemetry === undefined) return;
+  const first = telemetry.firstNanoAiu ?? 0;
+  const last = telemetry.lastNanoAiu ?? 0;
+  // Derived, ready to render: this attempt's own spend.
+  telemetry.usageNanoAiu = Math.max(0, last - first);
+}
+
+async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null, coverage = null }) {
   const outcome = { status: "failed", reason: "", findings: [], dropped: [], laneText: "", cleanup: "none" };
   const { promise, resolve, reject } = Promise.withResolvers();
   promise.catch(() => {});
@@ -451,6 +565,7 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
   const finish = async () => {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
+    finalizeTelemetry(outcome);
     if (!cleanup) return;
     // The stop grace is clipped to the attempt's remaining budget: cleanup may
     // be started (the stop still runs, best-effort) but is never awaited past
@@ -478,6 +593,13 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
       case "assistant.message":
         outcome.laneText = event.data.content ?? "";
         break;
+      case "model.call_finished":
+        // I8 telemetry: never settles the attempt, never gates anything.
+        noteCallFinished(outcome, event.data);
+        break;
+      case "session.usage_checkpoint":
+        noteUsageCheckpoint(outcome, event.data);
+        break;
       case "session.error":
         outcome.reason = event.data.message ?? "session error";
         settle(() => reject(new LaneError(outcome.reason)));
@@ -487,6 +609,22 @@ async function driveLane(session, { prompt, deadlineAt, cleanup, signal = null }
         settle(() => reject(new LaneError(outcome.reason)));
         break;
       case "session.idle": {
+        // I8 completeness (spec: "completeness enforced from tool events"):
+        // a lane that finished without reading every required transport file
+        // did not review the surface it was given — its report is rejected
+        // like any other contract violation (fail-closed, findings not
+        // claimed; the fallback attempt re-reads from a fresh coverage set).
+        if (coverage !== null) {
+          const missing = coverage.missing();
+          if (missing.length > 0) {
+            outcome.reason = `file-backed transport incomplete: read ${coverage.total - missing.length} of ${coverage.total} required files (unread: ${missing
+              .slice(0, 3)
+              .map((file) => file.path)
+              .join(", ")}${missing.length > 3 ? ", …" : ""})`;
+            settle(() => reject(new LaneError(outcome.reason)));
+            break;
+          }
+        }
         const unwrapped = unwrapLaneOutput(outcome.laneText);
         if (unwrapped.status === "malformed") {
           outcome.reason = `output contract violated: ${unwrapped.reason}${laneExcerpt(outcome.laneText)}`;

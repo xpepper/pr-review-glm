@@ -3,6 +3,9 @@
 // prompt, adjudicated-output re-validation, and the full assembly (including
 // degraded paths) against a fake SDK runtime (no real model calls).
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   adjudicatedProblem,
@@ -12,8 +15,10 @@ import {
   candidateProblem,
   dedupFindings,
   parseDiffAnchors,
+  runAdjudication,
 } from "../extensions/z-pr-review/adjudicate.mjs";
 import { REVIEW_ENVELOPE_BEGIN, REVIEW_ENVELOPE_END } from "../extensions/z-pr-review/lane.mjs";
+import { buildFileBackedTransport } from "../extensions/z-pr-review/transport.mjs";
 
 const DIFF = [
   "diff --git a/src/a.mjs b/src/a.mjs",
@@ -378,5 +383,54 @@ describe("assembleReview", () => {
     assert.match(review.adjudication.reason, /budget expired before adjudication/);
     assert.equal(captured.prompt, undefined, "no adjudicator child is dispatched past the budget");
     assert.equal(review.findings.length, 1, "validated candidates still flow, degraded");
+  });
+});
+
+// I8: under file-backed transport the adjudicator judges against the same
+// per-file diff slices (manifest-form prompt, no embedded diff), and its reads
+// are NOT coverage-enforced.
+describe("runAdjudication (I8 file-backed transport)", () => {
+  const TRANSPORT_DIFF = [
+    "diff --git a/src/a.mjs b/src/a.mjs",
+    "--- a/src/a.mjs",
+    "+++ b/src/a.mjs",
+    "@@ -1,1 +1,2 @@",
+    " ctx",
+    "+line2",
+  ].join("\n");
+  it("dispatches the manifest-form adjudicator prompt over the transport, without the embedded diff", async () => {
+    const transportRoot = mkdtempSync(join(tmpdir(), "z-pr-review-adj-transport-"));
+    try {
+      const transport = await buildFileBackedTransport({ envelope: { ...ENVELOPE, diff: TRANSPORT_DIFF }, thresholdBytes: 1, tempRoot: transportRoot });
+      assert.equal(transport.mode, "file-backed");
+      const { createRuntime, captured } = fakeRuntime([
+        async ({ emit }) => {
+          // No transport reads at all — the adjudicator is not coverage-gated.
+          const decision = await captured.permission.onPermissionRequest({ kind: "read", path: transport.files[0].absolutePath });
+          assert.equal(decision.kind, "approve-once", "the transport dir is readable for targeted reads");
+          emit({
+            type: "assistant.message",
+            data: { content: envelopeText([{ severity: "P2", title: "race on close", file: "src/a.mjs", line: 2, sources: ["correctness"] }]) },
+          });
+          emit({ type: "session.idle" });
+        },
+      ]);
+      const outcome = await runAdjudication({
+        envelope: { ...ENVELOPE, diff: TRANSPORT_DIFF },
+        candidates: [{ severity: "P2", title: "race on close", file: "src/a.mjs", line: 2, detail: "+line2 closes twice" }],
+        config,
+        repoRoot: process.cwd(),
+        deadlineAt: Date.now() + 60_000,
+        createRuntime,
+        transport,
+      });
+      assert.equal(outcome.status, "complete");
+      assert.match(captured.prompt, /adjudicator/);
+      assert.match(captured.prompt, /Changed files \(1\)/);
+      assert.match(captured.prompt, /transport files you need/);
+      assert.ok(!captured.prompt.includes("```diff"), "no embedded diff in the adjudicator prompt");
+    } finally {
+      rmSync(transportRoot, { recursive: true, force: true });
+    }
   });
 });

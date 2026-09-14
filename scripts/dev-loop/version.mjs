@@ -98,16 +98,17 @@ export async function gateVersionBump({ run, repoRoot }) {
 // so the release TAG is the serialization point — but a read-only check is not
 // one: a bare ls-remote leaves a check→merge window in which a concurrent loop
 // run can pass the same check and merge the same version (round-5 review P1).
-// Instead the tag is RESERVED here by pushing it to origin pointing at the
-// pinned PR head; git ref creation is atomic server-side, so exactly one run
-// can create refs/tags/vX.Y.Z — every other run (concurrent or later) fails
-// the push and aborts the merge. After the merge is confirmed, the tail
-// retargets the reservation onto the merge commit with a force-with-lease
-// pinned to the reserved OID (only our own reservation may be overwritten — a
-// tag that moved otherwise is a human decision, never a silent clobber). If
-// the merge mutation is refused, the caller releases the reservation so the
-// version is not stranded. Fail-closed aborts the merge; the next run
-// re-assesses against the moved main.
+// Instead the tag is RESERVED here by pushing an ANNOTATED tag (I8 convention)
+// at the pinned PR head to origin; git ref creation is atomic server-side, so
+// exactly one run can create refs/tags/vX.Y.Z — every other run (concurrent or
+// later) fails the push and aborts the merge. After the merge is confirmed, the
+// tail retargets the reservation onto the merge commit with a force-with-lease
+// pinned to the reserved TAG OBJECT (annotated refs point at the tag object —
+// only our own reservation may be overwritten; a tag that moved otherwise is a
+// human decision, never a silent clobber). If the merge mutation is refused,
+// the caller releases the reservation so the version is not stranded.
+// Fail-closed aborts the merge; the next run re-assesses against the moved
+// main.
 export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadRefOid }) {
   // The explicit refspec is load-bearing: a bare `git fetch origin main`
   // updates only FETCH_HEAD, so `git show origin/main:plugin.json` below would
@@ -157,19 +158,46 @@ export async function verifyBumpAtMerge({ run, repoRoot, prNumber, expectedHeadR
   if (tags.stdout.trim() !== "") {
     return { ok: false, detail: `release tag ${tag} already exists on origin — version ${head.version} was already released; merge aborted, bump the PR's version and re-run the loop` };
   }
-  // Atomic reservation (round-5 review P1): push the tag pointing at the
-  // pinned PR head. Git creates the ref server-side only if absent, so two
-  // concurrent loop runs cannot both pass — the loser's push is rejected and
-  // its merge aborts here, before any mutation. The head OID is a valid
-  // target: the object exists on origin (the PR branch lives there), and the
-  // tail later retargets the tag onto the merge commit. The reservation is
-  // returned so the caller can release it if the merge is refused and the
-  // tail can retarget it with force-with-lease on success.
-  const reserved = await run("git", ["push", "origin", `${headRefOid}:refs/tags/${tag}`], { cwd: repoRoot });
+  // Atomic reservation (round-5 review P1), annotated since I8: create the
+  // tag object locally at the pinned PR head and push it — git creates the
+  // ref server-side only if absent, so two concurrent loop runs cannot both
+  // pass; the loser's push is rejected and its merge aborts here, before any
+  // mutation. The head OID is a valid target (the PR branch lives on
+  // origin), and the tail later retargets the tag onto the merge commit.
+  // I8 tag convention (decided; see AGENTS.md): release tags are ANNOTATED —
+  // every tag v0.2.0–v0.2.5 already was (verified on origin), and the
+  // reservation now matches the convention instead of a lightweight ref that
+  // only the never-yet-flown loop path would have produced. The reservation
+  // returns BOTH the commit it peels to (the tail's ownership check) and the
+  // tag object OID on origin (the force-with-lease old value for retarget).
+  const localTag = await run("git", ["rev-parse", "-q", "--verify", `refs/tags/${tag}`], { cwd: repoRoot });
+  if (localTag.code === 0) {
+    return { ok: false, detail: `local tag ${tag} already exists (${localTag.stdout.trim().slice(0, 40)}) — a leftover reservation from an aborted run; delete it (git tag -d ${tag}) and re-run the loop` };
+  }
+  const TAG_MESSAGE = `z-pr-review release ${tag}`;
+  const created = await run("git", ["-c", "tag.gpgsign=false", "tag", "-a", tag, "-m", TAG_MESSAGE, headRefOid], { cwd: repoRoot });
+  if (created.code !== 0) {
+    return { ok: false, detail: `creating the annotated reservation tag ${tag} at ${headRefOid.slice(0, 7)} failed (merge aborted): ${created.stderr.slice(0, 200)}` };
+  }
+  const reserved = await run("git", ["push", "origin", `refs/tags/${tag}`], { cwd: repoRoot });
   if (reserved.code !== 0) {
+    // The remote refused the new ref — most likely a concurrent run released
+    // this version first. Drop the local tag object so the next run starts
+    // clean, and fail the merge closed.
+    await run("git", ["tag", "-d", tag], { cwd: repoRoot });
     return { ok: false, detail: `reserving release tag ${tag} on origin failed (merge aborted) — another run likely released version ${head.version} concurrently, or the push failed: ${(reserved.stderr || reserved.stdout || "").slice(0, 200)}` };
   }
-  return { ok: true, tag, reservedAt: headRefOid, detail: `version ${main.version} → ${head.version} confirmed at merge time (PR head ${headRefOid.slice(0, 7)}, release tag ${tag} reserved on origin at ${headRefOid.slice(0, 7)})` };
+  const reservedObject = await run("git", ["rev-parse", `refs/tags/${tag}`], { cwd: repoRoot });
+  if (reservedObject.code !== 0 || !/^[0-9a-f]{40}$/.test(reservedObject.stdout.trim())) {
+    return { ok: false, detail: `cannot resolve the reserved tag object for ${tag} (merge aborted): ${(reservedObject.stderr || "").slice(0, 200)}` };
+  }
+  return {
+    ok: true,
+    tag,
+    reservedAt: headRefOid,
+    reservedObject: reservedObject.stdout.trim(),
+    detail: `version ${main.version} → ${head.version} confirmed at merge time (PR head ${headRefOid.slice(0, 7)}, annotated release tag ${tag} reserved on origin at ${headRefOid.slice(0, 7)})`,
+  };
 }
 
 // Tagging tail of the merge path: after squash-merge + checkout main + ff-only
@@ -191,44 +219,43 @@ export async function tagMergedRelease({ run, repoRoot, reservation = null }) {
   if (reservation && reservation.tag !== tag) {
     return { ok: false, detail: `reserved release tag ${reservation.tag} does not match main's version ${parsed.version} (${tag}) — refusing to retarget a reservation that is not ours` };
   }
-  // With a reservation, a LOCAL copy of the reserved tag is expected: the tail's
-  // own `git pull` fetch-follows the reservation (verifyBumpAtMerge pushed it to
-  // origin at the PR head) into the local repo, so a plain `git tag` collides
-  // with our own reservation — "tag 'vX.Y.Z' already exists" stopped the I5
-  // release after a completed merge (2026-09-12; the same signature had been
-  // misattributed at C1 to a phase agent pre-tagging — phases cannot tag, the
-  // reservation is the only thing that ever pushed the tag at the branch head).
-  // Only a local tag peeling exactly to the reserved OID may be replaced: -f
-  // retargets it onto HEAD, which tagConfirmedMerge already verified is this
-  // PR's merge commit, and the force-with-lease push below moves only our own
-  // remote reservation. A local tag anywhere else is a tag we did not reserve —
-  // a human decision, never a silent clobber. Without a reservation an existing
-  // local tag keeps failing closed exactly as before.
-  // The `-c tag.gpgsign=false` prefix is load-bearing: a plain `git tag`
-  // inherits operator config, and with tag.gpgsign=true (git ≥2.48 semantics)
-  // it becomes an annotated tag that opens an EDITOR and invokes gpg — inside
-  // the headless merge tail, whose piped stdio makes the editor invisible
-  // while the tag call hangs forever (2026-09-13, v0.2.3: a 15-minute vim
-  // stall after a completed merge; no timeout guards a hung interactive
-  // child). The loop's tags are lightweight by design — the
-  // lightweight-vs-annotated question stays flagged for the owner — and the
-  // -c pins that deterministically regardless of operator git config.
-  let createArgs = ["-c", "tag.gpgsign=false", "tag", tag];
+  // With a reservation, the LOCAL copy of the reserved tag is expected:
+  // verifyBumpAtMerge created it (annotated, at the PR head) and pushed it to
+  // origin. Only a local tag peeling exactly to the reserved commit may be
+  // replaced: `-f -a` retargets it onto HEAD, which tagConfirmedMerge already
+  // verified is this PR's merge commit, and the force-with-lease push below
+  // moves only our own remote reservation (the lease's old value is the
+  // reserved tag OBJECT — annotated refs point at the tag object, not the
+  // commit). A local tag anywhere else is a tag we did not reserve — a human
+  // decision, never a silent clobber. Without a reservation an existing local
+  // tag keeps failing closed exactly as before.
+  // The `-c tag.gpgsign=false` prefix is load-bearing: with tag.gpgsign=true
+  // (git ≥2.48 semantics) an annotated tag would invoke gpg — inside the
+  // headless merge tail, whose piped stdio makes any interactive child hang
+  // invisibly (2026-09-13, v0.2.3: a 15-minute vim stall after a completed
+  // merge; no timeout guards a hung interactive child). I8 convention
+  // (decided): release tags are ANNOTATED (`-a -m`, deterministic message,
+  // signing pinned off) — matching every existing tag v0.2.0–v0.2.5 on
+  // origin; the earlier "lightweight by design" note described a path that
+  // never shipped (all releases to date were supervisor-tagged annotated).
+  const TAG_MESSAGE = `z-pr-review release ${tag}`;
+  let createArgs = ["-c", "tag.gpgsign=false", "tag", "-a", tag, "-m", TAG_MESSAGE];
   if (reservation) {
     const existing = await run("git", ["rev-parse", `${tag}^{}`], { cwd: repoRoot });
     if (existing.code === 0) {
       if (existing.stdout.trim() !== reservation.reservedAt) {
         return { ok: false, detail: `local tag ${tag} exists at ${existing.stdout.trim().slice(0, 7)}, not the reserved ${reservation.reservedAt.slice(0, 7)} — refusing to overwrite a tag we did not reserve` };
       }
-      createArgs = ["-c", "tag.gpgsign=false", "tag", "-f", tag];
+      createArgs = ["-c", "tag.gpgsign=false", "tag", "-f", "-a", tag, "-m", TAG_MESSAGE];
     }
   }
   const created = await run("git", createArgs, { cwd: repoRoot });
   if (created.code !== 0) {
     return { ok: false, detail: `git tag ${tag} failed: ${created.stderr.slice(0, 200)}` };
   }
+  const leaseOld = reservation ? reservation.reservedObject : null;
   const pushArgs = reservation
-    ? ["push", `--force-with-lease=refs/tags/${tag}:${reservation.reservedAt}`, "origin", tag]
+    ? ["push", `--force-with-lease=refs/tags/${tag}:${leaseOld}`, "origin", tag]
     : ["push", "origin", tag];
   const pushed = await run("git", pushArgs, { cwd: repoRoot });
   if (pushed.code !== 0) {

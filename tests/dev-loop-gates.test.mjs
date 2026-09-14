@@ -1,6 +1,8 @@
 // tests/dev-loop-gates.test.mjs
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import {
@@ -78,6 +80,21 @@ describe("gateSmokes", () => {
     assert(calls.some((c) => c.includes("smoke-i1.mjs")));
     const failing = await gateSmokes({ run: async () => ({ code: 2, stdout: "", stderr: "x" }), repoRoot: realRoot, exclude: [] });
     assert.equal(failing.ok, false);
+  });
+
+  it("I8: threads the worked increment as SMOKE_INCREMENT so target-picking smokes assess the gates' PR (I7 review P2)", async () => {
+    const envs = [];
+    const run = async (command, args, opts = {}) => { envs.push(opts.env); return { code: 0, stdout: "", stderr: "" }; };
+    const gate = await gateSmokes({ run, repoRoot: realRoot, exclude: ["smoke-l1.mjs"], increment: "I8", env: { KEEP: "1" } });
+    assert.equal(gate.ok, true);
+    assert.match(gate.detail, /SMOKE_INCREMENT=I8/);
+    assert.ok(envs.length > 0);
+    for (const env of envs) {
+      assert.equal(env.SMOKE_INCREMENT, "I8", "every smoke child carries the increment");
+      assert.equal(env.KEEP, "1", "the caller's env is preserved, not replaced");
+    }
+    const unset = await gateSmokes({ run, repoRoot: realRoot, exclude: ["smoke-l1.mjs"] });
+    assert.ok(!unset.detail.includes("SMOKE_INCREMENT"), "unset keeps the smoke's own default target selection");
   });
 
   it("retries a failed smoke exactly once and passes with the retry disclosed", async () => {
@@ -423,24 +440,48 @@ describe("runPreflightGates", () => {
     };
     return { calls, run };
   };
+  // I8 fake-stomp fix: preflight probe transcripts persist to an INJECTED
+  // artDir, never the repo's real .dev-loop/ — before the threading, these
+  // tests' fake probe results overwrote real phase-probe-*.log transcripts
+  // (observed 2026-09-13 20:05 and 2026-09-14 14:43: fixture text,
+  // ms-identical headers, mtime inside a suite run — the environmental
+  // evidence destroyed by the test asserting it).
+  const probeArtDir = () => mkdtempSync(join(tmpdir(), "zpr-preflight-test-"));
+  const realProbeStat = (index) => {
+    try {
+      return statSync(join(realRoot, ".dev-loop", `phase-probe-${index}.log`)).mtimeMs;
+    } catch {
+      return null;
+    }
+  };
   it("runs all four gates when the probe passes", async () => {
     const { calls, run } = makeRun((opts) => ({ code: 0, stdout: opts.env.ZPR_PROBE_TOKEN, stderr: "" }));
     const logs = [];
-    const results = await runPreflightGates({ run, repoRoot: realRoot, zcode: "zcode", env: {}, log: (l) => logs.push(l) });
+    const artDir = probeArtDir();
+    const before = realProbeStat(1);
+    const results = await runPreflightGates({ run, repoRoot: realRoot, zcode: "zcode", env: {}, log: (l) => logs.push(l), artDir, persist: (input) => persistPhaseOutput(input) });
     assert.deepEqual(results.map((g) => g.name), ["repo-idle", "zcode-headless", "tests", "smokes"]);
     assert.ok(results.every((g) => g.ok));
     assert.ok(calls.some(([cmd, ...args]) => cmd === "node" && args[0] === "--test"), "tests gate ran");
     assert.ok(calls.some(([cmd, ...args]) => cmd === "node" && args[0]?.startsWith("tests/smoke-")), "smokes gate ran");
     assert.equal(logs.length, 4);
     assert.match(logs[1], /^gate zcode-headless: PASS /);
+    assert.ok(existsSync(join(artDir, "phase-probe-1.log")), "the fake probe transcript landed in the injected dir");
+    assert.equal(realProbeStat(1), before, "the repo's real .dev-loop transcript was not touched (mtime unchanged)");
+    rmSync(artDir, { recursive: true, force: true });
   });
   it("short-circuits on a failed probe: tests and smokes never run", async () => {
     const { calls, run } = makeRun(() => ({ code: 0, stdout: "I don't have a shell tool available in this session", stderr: "" }));
     const logs = [];
-    const results = await runPreflightGates({ run, repoRoot: realRoot, zcode: "zcode", env: {}, log: (l) => logs.push(l) });
+    const artDir = probeArtDir();
+    const before = [1, 2, 3].map(realProbeStat);
+    const results = await runPreflightGates({ run, repoRoot: realRoot, zcode: "zcode", env: {}, log: (l) => logs.push(l), artDir, persist: (input) => persistPhaseOutput(input) });
     assert.deepEqual(results.map((g) => g.name), ["repo-idle", "zcode-headless"]);
     assert.equal(results[1].ok, false);
     assert.ok(!calls.some(([cmd]) => cmd === "node"), "no test/smoke execution after a failed probe");
     assert.match(logs[1], /^gate zcode-headless: FAIL /);
+    assert.ok(existsSync(join(artDir, "phase-probe-3.log")), "all three failed attempts persisted to the injected dir");
+    assert.deepEqual([1, 2, 3].map(realProbeStat), before, "the repo's real .dev-loop transcripts were not touched (mtimes unchanged)");
+    rmSync(artDir, { recursive: true, force: true });
   });
 });

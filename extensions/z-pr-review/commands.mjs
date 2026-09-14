@@ -112,7 +112,11 @@ export function renderStatus(lastCapture = null, version = null) {
     "  each from config; owned Copilot SDK child runtimes under attempt/batch/total budgets).",
     "  Candidates are host-validated against the diff (anchors, severity ladder, blocking",
     "  evidence), merged by one isolated adjudicator call, deduplicated, and filtered by the",
-    "  per-mode findings policy — all enforced in code.",
+    "  per-mode findings policy — all enforced in code. Large diffs (≥200 KB) switch to",
+    "  file-backed transport: per-file diff sections on disk, a changed-file manifest with",
+    "  required read ranges in each lane prompt, and read completeness enforced from tool",
+    "  events. Per-lane model-call/credit telemetry is collected from runtime events and",
+    "  reported (informational only).",
     "- /z-pr-review select all|none|1,3-5 — settle a selection over the retained review's",
     "  findings (numbered as reported); --all on the review settles it up front.",
     "- /z-pr-review inspect — the retained settled result, with no model calls and no",
@@ -128,7 +132,8 @@ export function renderStatus(lastCapture = null, version = null) {
     "  edited directly in the config file, shown via /z-pr-review-config show.",
     "",
     "Not implemented yet (ROADMAP order):",
-    "- I8: hardening (large diffs, telemetry)",
+    "- V2: ground-testing feedback round (dogfood-driven fixes) before the 1.0.0 release",
+    "  decision.",
     "",
     "Configuration lives outside the repository and is validated as a unit; see /z-pr-review-config.",
   ];
@@ -162,6 +167,27 @@ function shortOid(oid) {
   return oid.slice(0, 7);
 }
 
+// I8: one compact tail for a lane's runtime telemetry. Every value here is
+// host-computed from child-session events (counts/sums of numbers) — never
+// model text — so it renders without the finding-text sanitization passes.
+function telemetryTail(telemetry) {
+  if (telemetry === null || typeof telemetry !== "object" || typeof telemetry.calls !== "number") {
+    return null;
+  }
+  const parts = [`${telemetry.calls} model call${telemetry.calls === 1 ? "" : "s"}`];
+  if (Number.isFinite(telemetry.dispatchMs) && telemetry.dispatchMs > 0) {
+    parts.push(`${Math.round(telemetry.dispatchMs / 100) / 10}s model time`);
+  }
+  if (Number.isFinite(telemetry.usageNanoAiu) && telemetry.usageNanoAiu > 0) {
+    parts.push(
+      telemetry.usageNanoAiu >= 1_000_000
+        ? `${(telemetry.usageNanoAiu / 1e9).toFixed(2)} AIU`
+        : `${telemetry.usageNanoAiu.toLocaleString("en-US")} nano-AIU`,
+    );
+  }
+  return parts.join(", ");
+}
+
 // Model text is flattened before interpolation so a finding title/detail can
 // never inject lines, fences, or fake machine blocks into the report; inside
 // the machine block, backticks are also neutralized (JSON.stringify does not
@@ -191,10 +217,16 @@ export function renderReview(capture, review) {
     `Reviewed PR #${capture.number} — "${capture.title}" (${capture.repo})`,
     `Mode: ${review.mode} — ${review.lanes.length} lane${review.lanes.length === 1 ? "" : "s"}, ${Math.round(review.elapsedMs / 100) / 10}s`,
   ];
+  if (review.transport?.mode === "file-backed") {
+    lines.push(
+      `Transport: file-backed — ${review.transport.diffBytes.toLocaleString("en-US")}-byte diff across ${review.transport.fileCount} file${review.transport.fileCount === 1 ? "" : "s"}; lanes read per-file diff sections from disk (required reads enforced from tool events).`,
+    );
+  }
   for (const lane of review.lanes) {
     const findingsWord = `${lane.findings.length} finding${lane.findings.length === 1 ? "" : "s"}`;
     const tail = lane.status === "complete" ? `complete — ${findingsWord}` : `FAILED (${lane.reason})`;
-    lines.push(`- ${lane.laneId} (${lane.tier}, ${lane.modelLabel}): ${tail}`);
+    const usage = telemetryTail(lane.telemetry);
+    lines.push(`- ${lane.laneId} (${lane.tier}, ${lane.modelLabel}): ${tail}${usage ? ` [${usage}]` : ""}`);
   }
   const adjudication = review.adjudication ?? { status: "skipped", reason: "not assembled" };
   if (adjudication.status === "complete") {
@@ -245,6 +277,12 @@ export function renderReview(capture, review) {
       status: review.status,
       reason: review.status === "complete" ? undefined : review.reason,
       mode: review.mode,
+      // I8 additions (additive protocol keys): the transport the review ran
+      // under and each lane's host-computed runtime telemetry — informational
+      // only, never a gate input on either side of the contract.
+      ...(review.transport?.mode === "file-backed"
+        ? { transport: { mode: "file-backed", files: review.transport.fileCount, diffBytes: review.transport.diffBytes } }
+        : {}),
       findings: findings.map((finding) => ({
         severity: finding.severity,
         title: machineText(finding.title),
@@ -259,6 +297,15 @@ export function renderReview(capture, review) {
         tier: lane.tier,
         status: lane.status,
         findings: lane.status === "complete" ? lane.findings.length : 0,
+        ...(lane.telemetry
+          ? {
+              telemetry: {
+                calls: lane.telemetry.calls,
+                dispatchMs: lane.telemetry.dispatchMs,
+                usageNanoAiu: lane.telemetry.usageNanoAiu ?? 0,
+              },
+            }
+          : {}),
       })),
     }),
     "```",

@@ -42,6 +42,7 @@ async function runLaneUnderBudget({
   batchEndAt,
   totalEndAt,
   signal,
+  transport = null,
 }) {
   const hardEndAt = Math.min(batchEndAt, totalEndAt);
   const attempts = [];
@@ -66,6 +67,7 @@ async function runLaneUnderBudget({
       modelOverride: attempt.model,
       signal,
       createRuntime,
+      transport,
     }).catch((error) => {
       // A child-runtime startup failure (spawn, auth, SDK construction) is a
       // failed lane attempt, never a batch-wide rejection: sibling lanes keep
@@ -109,6 +111,9 @@ async function runLaneUnderBudget({
       label: attempt.label,
       status: outcome.status,
       reason: outcome.status === "complete" ? undefined : reason,
+      // I8: per-attempt runtime telemetry, when the child session produced
+      // usage events (informational only — never an input to any decision).
+      ...(outcome.telemetry ? { telemetry: outcome.telemetry } : {}),
     });
     if (outcome.status === "complete") return { ...outcome, attempts };
     if (reason !== outcome.reason) {
@@ -146,7 +151,8 @@ export function batchStatus(laneResults) {
 // semantics). The batch window (batchMs) opens at first dispatch and the
 // total cap (totalMs) bounds the whole run including cleanup; both clip every
 // attempt deadline. `signal` cancels every not-yet-finished lane; progress is
-// reported per lane through onLaneDone as each settles.
+// reported per lane through onLaneDone as each settles. `transport` (I8), when
+// non-null, switches every lane to the file-backed large-diff transport.
 export async function runLaneBatch({
   mode,
   lanes,
@@ -157,6 +163,7 @@ export async function runLaneBatch({
   createRuntime,
   onLaneDone = null,
   signal = null,
+  transport = null,
 }) {
   if (lanes.length === 0) {
     throw new Error(`review mode "${mode}" has an empty topology`);
@@ -176,6 +183,7 @@ export async function runLaneBatch({
         batchEndAt,
         totalEndAt,
         signal,
+        transport,
       });
       if (onLaneDone) {
         // Progress reporting is not a lane result: a throwing or hanging

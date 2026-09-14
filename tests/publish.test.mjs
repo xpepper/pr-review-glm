@@ -609,7 +609,7 @@ describe("publishReview gates", () => {
       reviewsAfter: [],
     });
     await assert.rejects(
-      publishReview({ retained: retained(), runGh }),
+      publishReview({ retained: retained(), runGh, sleep: async () => {} }),
       (error) => error instanceof PublishError && error.message.includes("did not land"),
     );
   });
@@ -687,5 +687,105 @@ describe("renderPublishResult", () => {
       staleBase: true,
     });
     assert(both.includes("head and base had moved"), both);
+  });
+});
+
+// I8: bounded uncertain-write reconciliation (the I7 review P2 — a single
+// scan over a lagging listing could fail closed over a landed review and bait
+// a duplicating rerun) and the AbortSignal threading through paginated gh
+// calls (the I7 review P2 — a cancelled review paged on while holding the
+// per-target lock).
+describe("publishReview reconciliation and cancellation (I8)", () => {
+  const markerReview = (marker) => [{ user: { login: VIEWER }, html_url: "https://github.com/x#review-late", body: marker }];
+  const noSleep = async () => {};
+
+  function sequencingGh({ lists, post }) {
+    // lists: consumed in order by every non-POST /reviews call; the last entry
+    // repeats. Everything else mirrors fakeGh's happy defaults.
+    const calls = [];
+    let reviewsCall = 0;
+    const runGh = async (args, opts = {}) => {
+      calls.push({ args, opts });
+      const joined = args.join(" ");
+      if (joined.includes("api user")) return ghReply({ login: VIEWER });
+      if (args.includes("POST")) return post ?? ghReply({ html_url: "https://github.com/x#review-1" });
+      if (joined.includes("/reviews")) {
+        const list = lists[Math.min(reviewsCall, lists.length - 1)];
+        reviewsCall += 1;
+        return ghReply(list);
+      }
+      if (joined.includes("/files")) return ghReply(filesJson);
+      if (joined.includes("repos/xpepper/pr-review-glm/pulls/33")) return ghReply(openPr());
+      return { code: 1, stdout: "", stderr: `fake gh: unmatched ${joined}`, timedOut: false };
+    };
+    return { runGh, calls };
+  }
+
+  it("reconciles a landed-but-lagging review on a later bounded scan, with the lag disclosed", async () => {
+    const marker = idempotencyMarker(capture.repo, capture.number, HEAD, BASE);
+    const sleeps = [];
+    const { runGh, calls } = sequencingGh({
+      post: { code: 1, stdout: "", stderr: "gh: server error (HTTP 502)", timedOut: false },
+      lists: [[], [], markerReview(marker)], // pre-POST empty, scan 1 still empty, scan 2 sees it
+    });
+    const outcome = await publishReview({ retained: retained(), runGh, sleep: async (ms) => sleeps.push(ms) });
+    assert.equal(outcome.status, "published");
+    assert.equal(outcome.reconciled, true);
+    assert.equal(outcome.reconcileScans, 2);
+    assert.deepEqual(sleeps, [2000], "exactly one wait between the two scans");
+    const scans = calls.filter((c) => !c.args.includes("POST") && c.args.join(" ").includes("/reviews"));
+    assert.equal(scans.length, 3, "pre-POST scan + two reconciliation scans, then stop on success");
+    const text = renderPublishResult(capture, outcome);
+    assert.match(text, /review-scan 2 of 3/, "the render discloses which scan reconciled");
+  });
+
+  it("fails closed only after all bounded scans, disclosing the scan count", async () => {
+    const sleeps = [];
+    const { runGh, calls } = sequencingGh({
+      post: { code: 1, stdout: "", stderr: "gh: server error (HTTP 503)", timedOut: false },
+      lists: [[]],
+    });
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh, sleep: async (ms) => sleeps.push(ms) }),
+      (error) => error instanceof PublishError && /no review carrying the idempotency marker appeared within 3 reconciliation scans/.test(error.message),
+    );
+    assert.deepEqual(sleeps, [2000, 2000]);
+    const scans = calls.filter((c) => !c.args.includes("POST") && c.args.join(" ").includes("/reviews"));
+    assert.equal(scans.length, 4, "pre-POST scan + exactly three reconciliation scans");
+  });
+
+  it("a cancelled review stops asking gh for anything: no POST happens", async () => {
+    const controller = new AbortController();
+    const { runGh, calls } = sequencingGh({ lists: [[]] });
+    const wrapped = async (args, opts) => {
+      const result = await runGh(args, opts);
+      // The abort lands right after the first PR fetch — the next gh call
+      // (the viewer lookup) must be refused by the signal check.
+      controller.abort(new Error("parent session ended"));
+      return result;
+    };
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh: wrapped, signal: controller.signal, sleep: noSleep }),
+      (error) => error instanceof PublishError && /cancelled while resolving the authenticated gh user/.test(error.message),
+    );
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0, "nothing was posted");
+  });
+
+  it("an abort during the reconciliation scan stops paging instead of continuing scans (the per-PR lock is released)", async () => {
+    const controller = new AbortController();
+    const { runGh, calls } = sequencingGh({
+      post: { code: 1, stdout: "", stderr: "gh: server error (HTTP 500)", timedOut: false },
+      lists: [[]],
+    });
+    const wrapped = async (args, opts) => {
+      if (args.includes("POST")) controller.abort(new Error("parent session ended"));
+      return runGh(args, opts);
+    };
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh: wrapped, signal: controller.signal, sleep: noSleep }),
+      (error) => error instanceof PublishError && /cancelled while reconciling/.test(error.message),
+    );
+    const scans = calls.filter((c) => !c.args.includes("POST") && c.args.join(" ").includes("/reviews"));
+    assert.equal(scans.length, 1, "only the pre-POST scan ran; the aborted reconciliation scan never paged");
   });
 });

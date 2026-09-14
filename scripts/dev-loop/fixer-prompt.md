@@ -3,9 +3,13 @@ Fix review findings on pull request #{PR_NUMBER} of the repo at {REPO_ROOT}
 
 Findings (JSON): {FINDINGS_JSON}
 
+The findings list is scope-limited by the loop's severity ladder (I8): early
+rounds carry only the blocking findings (P0/P1); later rounds may widen to
+include P2s. Address everything you are given.
 Address every P0 and P1 finding; fix P2s when clearly right, otherwise note why not.
 Follow AGENTS.md conventions. When done, re-run `node --test tests/*.test.mjs` and the
-applicable smoke scripts, push to the branch, and post a PR comment summarizing what
-you fixed. Do NOT merge. Do NOT create or push release tags (`vX.Y.Z`) — the loop's
+applicable smoke scripts, push to the branch, and post a PR comment summarizing what you
+fixed. Do NOT merge. Do NOT create or push release tags (`vX.Y.Z`) — the loop's
 merge path tags merged main itself, and a tag pushed from the branch collides with it.
 Do not expand scope beyond the findings.
+

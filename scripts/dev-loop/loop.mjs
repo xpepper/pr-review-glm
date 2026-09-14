@@ -110,7 +110,14 @@ export async function runLoop(deps) {
       if (worker.code !== 0 || worker.timedOut) return fail(`worker failed (code=${worker.code}, timedOut=${worker.timedOut})`);
     }
 
-    let fixerBudget = 2;
+    // I8: the fixer budget rises 2 → 4 with a severity ladder for what each
+    // round receives (the V1/M1 pain: two dogfood P1s exhausted a 2-round
+    // budget and forced supervisor folds). Rounds 1–2 stay surgical — the
+    // blocking findings only (P0/P1; a gate-synthesized finding is P0), so
+    // the fixer cannot wander into discretionary P2s while a blocker stands.
+    // Rounds 3–4 widen to every finding: when the blockers are gone but the
+    // verdict still blocks, the P2s are what remains to address.
+    let fixerBudget = 4;
     // assess(): gates + all active reviews. Returns fatal / blocking / clean.
     const assess = async () => {
       const gates = await timed.gates();
@@ -156,8 +163,14 @@ export async function runLoop(deps) {
         if (fixerBudget === 0) return fail(`unresolved after fixer budget: ${state.reason}`);
         fixerBudget -= 1;
         iteration.fixerRounds += 1;
-        log(`fixer round ${iteration.fixerRounds}: ${state.reason}`);
-        const fixed = await timed.fixer(iteration.prNumber, state.findings);
+        // Severity ladder: rounds 1–2 carry the blocking findings only; rounds
+        // 3–4 widen to everything. A blocking verdict with no P0/P1 at all
+        // (request-changes over P2s) keeps the full list — scoping it would
+        // dispatch a fixer with nothing to fix.
+        const blockers = state.findings.filter((finding) => finding?.severity !== "P2");
+        const scopedFindings = iteration.fixerRounds <= 2 && blockers.length > 0 ? blockers : state.findings;
+        log(`fixer round ${iteration.fixerRounds}: ${state.reason}${scopedFindings.length !== state.findings.length ? ` (${scopedFindings.length} of ${state.findings.length} findings in scope — blockers first)` : ""}`);
+        const fixed = await timed.fixer(iteration.prNumber, scopedFindings);
         if (fixed.code !== 0 || fixed.timedOut) return fail(`fixer failed (code=${fixed.code}, timedOut=${fixed.timedOut})`);
         state = await assess();
       }
