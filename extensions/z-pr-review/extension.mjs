@@ -184,6 +184,10 @@ async function runReview(parsed) {
     // Publication authority (I7): --comment or --no-comment are explicit;
     // absent a flag, config autoPostReviews decides. Captured before lanes
     // start so no later state can grant a write the invocation didn't ask for.
+    // S46: --self-review (parse-validated to imply --comment) is the explicit
+    // self-publication authorization — it is threaded to publishReview ONLY
+    // from this flag, so a config-driven publication (comment flag absent)
+    // structurally cannot carry it and still hits the self-author refusal.
     const publishAuthority =
       flags.comment === true
         ? "--comment"
@@ -340,8 +344,10 @@ async function runReview(parsed) {
         );
       }
       // The review's controller rides along: a cancelled review (session end)
-      // must not reach the POST even if it reached publication.
-      await runPublication(target, controller.signal);
+      // must not reach the POST even if it reached publication. The S46
+      // authorization travels with the invocation that granted it (the parser
+      // only produces flags.selfReview alongside flags.comment).
+      await runPublication(target, controller.signal, flags.selfReview === true);
     }
   } catch (error) {
     if (error instanceof CaptureError) {
@@ -382,13 +388,13 @@ async function runReview(parsed) {
 // one retained promise per PR ever seen.
 const publicationLocks = new Map();
 
-async function runPublication(retained, signal) {
+async function runPublication(retained, signal, allowSelfReview = false) {
   const { capture } = retained;
   const key = `${capture.repo}#${capture.number}`;
   const prior = publicationLocks.get(key) ?? Promise.resolve();
   const run = prior.then(
-    () => publishReview({ retained, signal }),
-    () => publishReview({ retained, signal }),
+    () => publishReview({ retained, signal, allowSelfReview }),
+    () => publishReview({ retained, signal, allowSelfReview }),
   );
   const tail = run.catch(() => {});
   publicationLocks.set(key, tail);

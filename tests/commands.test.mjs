@@ -36,6 +36,7 @@ describe("parseReviewArgs", () => {
         mode: null,
         comment: null,
         all: false,
+        selfReview: false,
       },
     });
   });
@@ -51,6 +52,7 @@ describe("parseReviewArgs", () => {
         mode: null,
         comment: null,
         all: false,
+        selfReview: false,
       },
     });
     assert.deepEqual(parseReviewArgs("7 --deep --no-comment --all"), {
@@ -63,8 +65,51 @@ describe("parseReviewArgs", () => {
         mode: "deep",
         comment: false,
         all: true,
+        selfReview: false,
       },
     });
+  });
+
+  it("parses --self-review as an explicit self-publication authorization, only with --comment", () => {
+    assert.deepEqual(parseReviewArgs("7 --comment --self-review"), {
+      kind: "review",
+      number: 7,
+      flags: {
+        captureOnly: false,
+        includeDrafts: false,
+        includeClosed: false,
+        mode: null,
+        comment: true,
+        all: false,
+        selfReview: true,
+      },
+    });
+    // Composes with every other publication-relevant flag.
+    assert.deepEqual(parseReviewArgs("9 --full --comment --self-review --all"), {
+      kind: "review",
+      number: 9,
+      flags: {
+        captureOnly: false,
+        includeDrafts: false,
+        includeClosed: false,
+        mode: "full",
+        comment: true,
+        all: true,
+        selfReview: true,
+      },
+    });
+  });
+
+  it("rejects --self-review without an explicit --comment publication request", () => {
+    // This is the structural guarantee that config autoPostReviews (which
+    // grants publication when NO comment flag was passed) can never carry the
+    // self-review authorization: the flag is a parse error on its own.
+    for (const args of ["5 --self-review", "5 --deep --self-review", "5 --no-comment --self-review"]) {
+      const result = parseReviewArgs(args);
+      assert.equal(result.kind, "error", args);
+      assert(result.message.includes("--self-review"), `${args}: ${result.message}`);
+      assert(result.message.includes("--comment"), `${args}: ${result.message}`);
+    }
   });
 
   it("parses the I6 select and inspect subcommands", () => {
@@ -110,7 +155,9 @@ describe("parseReviewArgs", () => {
       ["5 --capture-only --quick", "no effect with --capture-only"],
       ["5 --capture-only --comment", "no effect with --capture-only"],
       ["5 --capture-only --no-comment", "no effect with --capture-only"],
+      ["5 --capture-only --self-review", "no effect with --capture-only"],
       ["5 --capture-only --all", "no effect with --capture-only"],
+      ["5 --comment --self-review --self-review", "appears twice"],
     ]) {
       const result = parseReviewArgs(args);
       assert.equal(result.kind, "error", args);
@@ -150,6 +197,7 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     assert(text.includes("/z-pr-review select"), "must name the I6 selection as implemented");
     assert(text.includes("/z-pr-review inspect"), "must name the I6 retained-result inspect as implemented");
     assert(text.includes("--comment"), "must name the I7 gated publication as implemented");
+    assert(text.includes("--self-review"), "must name the S46 self-review publication opt-in");
     assert(text.includes("file-backed transport"), "must name the I8 large-diff transport as implemented");
     assert(text.includes("telemetry"), "must name the I8 lane telemetry as implemented");
     assert(text.includes("V2"), "must name the next increment");
@@ -194,6 +242,9 @@ describe("renderStatus / renderHelp / renderCapture", () => {
     assert(text.includes("--capture-only"));
     assert(text.includes("--include-drafts"));
     assert(text.includes("--include-closed"));
+    assert(text.includes("--self-review"), "the self-review opt-in must appear in help");
+    assert(text.includes("--comment --self-review") || text.includes("--self-review: with --comment"),
+      "help must tie --self-review to --comment, never present it as standalone authority");
     assert(text.includes("/z-pr-review-config"));
   });
 });

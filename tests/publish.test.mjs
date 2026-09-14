@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   PublishError,
+  SELF_REVIEW_DISCLOSURE,
   anchorMapFromFiles,
   buildPublication,
   idempotencyMarker,
@@ -335,6 +336,7 @@ describe("publishReview gates", () => {
     const outcome = await publishReview({ retained: retained(), runGh });
     assert.equal(outcome.status, "refused");
     assert(outcome.reason.includes("self"));
+    assert(outcome.reason.includes("--self-review"), "the refusal names the explicit opt-in");
     assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0);
   });
 
@@ -845,6 +847,96 @@ describe("publishReview abort-aware reconciliation backoff (fold round 1)", () =
     );
     const scans = calls.filter((c) => !c.args.includes("POST") && c.args.join(" ").includes("/reviews"));
     assert.equal(scans.length, 2, "pre-POST scan + exactly one reconciliation scan; the aborted backoff never reached scan 2");
+  });
+});
+
+// S46 (issue #46): the explicit opt-in that lets the PR author publish the
+// COMMENT review to their own PR. The default refusal stays fail-closed; only
+// a deliberate allowSelfReview authorization (extension.mjs passes it solely
+// for the parse-validated --comment --self-review pairing) opens the gate, and
+// the posted body discloses that authorization in static code text.
+describe("publishReview self-review opt-in (S46)", () => {
+  it("buildPublication adds the static disclosure only for an authorized self-review", () => {
+    const compose = (selfReview) =>
+      buildPublication({
+        capture,
+        review,
+        selected: findings,
+        anchorMap: anchorMapFromFiles(filesJson),
+        currentHead: HEAD,
+        currentBase: BASE,
+        stale: false,
+        selfReview,
+      });
+    const selfPublication = compose(true);
+    assert(selfPublication.body.includes(SELF_REVIEW_DISCLOSURE), "the disclosed authorization rides the COMMENT body");
+    const ordinary = compose(false);
+    assert(!ordinary.body.includes(SELF_REVIEW_DISCLOSURE), "an ordinary publication carries no self-review disclosure");
+    // The disclosure is code-owned static text: it names the flag, so a reader
+    // of the PR can tell this was an explicitly authorized self-publication.
+    assert(SELF_REVIEW_DISCLOSURE.includes("--self-review"));
+  });
+
+  it("publishes the author's own PR under the explicit opt-in, with the disclosure in the posted body", async () => {
+    const { runGh, calls } = fakeGh({ viewer: { login: AUTHOR } });
+    const outcome = await publishReview({ retained: retained(), runGh, allowSelfReview: true });
+    assert.equal(outcome.status, "published");
+    assert.equal(outcome.selfReview, true);
+    const posts = calls.filter((c) => c.args.includes("POST"));
+    assert.equal(posts.length, 1, "exactly one POST");
+    const payload = JSON.parse(posts[0].opts.stdin);
+    assert.equal(payload.event, "COMMENT");
+    assert(payload.body.includes(SELF_REVIEW_DISCLOSURE), "the posted COMMENT discloses the explicit authorization");
+    assert(payload.body.includes(idempotencyMarker(capture.repo, capture.number, HEAD, BASE)),
+      "the idempotency marker is unchanged by the opt-in");
+  });
+
+  it("the opt-in changes nothing when the viewer did not author the PR", async () => {
+    const { runGh, calls } = fakeGh(); // viewer = VIEWER, author = AUTHOR
+    const outcome = await publishReview({ retained: retained(), runGh, allowSelfReview: true });
+    assert.equal(outcome.status, "published", "a non-self publication proceeds normally, opt-in or not");
+    assert.equal(outcome.selfReview, false);
+    const payload = JSON.parse(calls.find((c) => c.args.includes("POST")).opts.stdin);
+    assert(!payload.body.includes(SELF_REVIEW_DISCLOSURE), "no self-review disclosure on someone else's PR");
+  });
+
+  it("the opt-in does not bypass the draft gate", async () => {
+    const { runGh, calls } = fakeGh({ pr: openPr({ draft: true }), viewer: { login: AUTHOR } });
+    const outcome = await publishReview({ retained: retained(), runGh, allowSelfReview: true });
+    assert.equal(outcome.status, "refused");
+    assert(outcome.reason.includes("draft"));
+    assert.equal(calls.filter((c) => c.args.includes("POST")).length, 0);
+  });
+
+  it("the opt-in does not bypass the missing-author fail-closed", async () => {
+    const { runGh } = fakeGh({ pr: openPr({ user: {} }), viewer: { login: AUTHOR } });
+    await assert.rejects(
+      publishReview({ retained: retained(), runGh, allowSelfReview: true }),
+      (error) => error instanceof PublishError && error.message.includes("no author login"),
+    );
+  });
+
+  it("a stale self-review publication carries both the stale note and the authorization disclosure", async () => {
+    const { runGh, calls } = fakeGh({ pr: openPr({ head: { sha: MOVED } }), viewer: { login: AUTHOR } });
+    const outcome = await publishReview({ retained: retained(), runGh, allowSelfReview: true });
+    assert.equal(outcome.status, "published");
+    assert.equal(outcome.stale, true);
+    assert.equal(outcome.inlineCount, 0, "staleness semantics are unchanged by the opt-in");
+    const payload = JSON.parse(calls.find((c) => c.args.includes("POST")).opts.stdin);
+    assert(payload.body.includes("diff has moved since capture"));
+    assert(payload.body.includes(SELF_REVIEW_DISCLOSURE));
+  });
+
+  it("renders the self-review disclosure in the chat result too", () => {
+    const text = renderPublishResult(capture, {
+      status: "published",
+      reviewUrl: "https://x/r",
+      inlineCount: 1,
+      notedCount: 0,
+      stale: false,
+      selfReview: true,
+    });
+    assert(text.includes("--self-review"), "the chat render discloses the self-review authorization");
   });
 });
 

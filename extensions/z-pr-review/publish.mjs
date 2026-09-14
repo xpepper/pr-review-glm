@@ -5,14 +5,25 @@
 // anchors. Publication posts ONE COMMENT review whose inline comments are the
 // first ≤50 selected findings whose anchors re-validate against the live
 // `pulls/N/files` hunks; everything else goes to body notes. Draft, closed,
-// and self-author PRs are refused; a moved head OR base (since capture)
-// degrades to a body-only comment naming the frozen commits and bases; an idempotency marker makes re-runs skip and
+// and self-author PRs are refused — the self-author refusal alone can be
+// explicitly overridden (S46, issue #46) by the deliberate
+// --comment --self-review invocation pairing, which extension.mjs translates
+// into allowSelfReview here and which the posted body then discloses. A moved
+// head OR base (since capture) degrades to a body-only comment naming the
+// frozen commits and bases; an idempotency marker makes re-runs skip and
 // lets an uncertain write response be reconciled. The head AND base are
 // re-pinned immediately before the POST, and a cancelled review (its abort
 // signal) never writes. No selected findings means no POST at all.
 import { spawn } from "node:child_process";
 
 export const MAX_INLINE_ANCHORS = 50;
+// S46: the static disclosure line an explicitly authorized self-review
+// publication carries in the posted COMMENT body. Code-owned text, the same
+// authority class as the idempotency marker — never model-influenced — so a
+// PR reader can tell the author published the review to their own PR on
+// purpose.
+export const SELF_REVIEW_DISCLOSURE =
+  "Self-review disclosure: this review was published by the PR's own author, explicitly authorized at invocation time by the --self-review flag.";
 // GitHub's documented review-body cap is 65,536 characters; stop well short so
 // composition can never trip the API's own limit instead of our gate.
 export const MAX_BODY_CHARS = 60_000;
@@ -186,10 +197,11 @@ function commentBody(finding) {
 
 // Composes the single COMMENT review: header, optional body notes for every
 // finding that did not become an inline comment, the coverage disclosure for
-// non-complete reviews, and the idempotency marker. A stale review (head OR
-// base moved since capture) disables inline comments entirely — the body names
-// both commits and both bases (spec's stale rule, extended to the base).
-export function buildPublication({ capture, review, selected, anchorMap, currentHead, currentBase, stale }) {
+// non-complete reviews, the S46 self-review authorization disclosure, and the
+// idempotency marker. A stale review (head OR base moved since capture)
+// disables inline comments entirely — the body names both commits and both
+// bases (spec's stale rule, extended to the base).
+export function buildPublication({ capture, review, selected, anchorMap, currentHead, currentBase, stale, selfReview = false }) {
   const inline = [];
   const noted = [];
   for (const finding of selected) {
@@ -213,6 +225,12 @@ export function buildPublication({ capture, review, selected, anchorMap, current
   lines.push(
     `${selected.length} finding${selected.length === 1 ? "" : "s"} selected for publication — all host-validated against the diff captured at review time.`,
   );
+  // S46: only an actually-authorized self-review publication (the viewer
+  // authored the PR AND allowSelfReview was passed) discloses; an ordinary
+  // publication of someone else's PR never claims self-review authorization.
+  if (selfReview === true) {
+    lines.push("", SELF_REVIEW_DISCLOSURE);
+  }
   if (stale) {
     lines.push(
       "",
@@ -344,15 +362,20 @@ const isOpenState = (pr) => String(pr.state ?? "").toUpperCase() === "OPEN";
 // review must not write — checked before any gh call and again immediately
 // before the POST (an abort landing during the POST itself is reconciled by
 // the marker scan on any later run; that residual window is accepted).
+// `allowSelfReview` (S46) is the explicit self-publication authorization; it
+// is plain code authority threaded from the parse-validated
+// --comment --self-review pairing (extension.mjs) and defaults to false, so
+// the self-author gate stays fail-closed for every other caller shape.
 // Outcomes (never a silent partial write):
 //   { status: "skipped", reason }            — no selected findings; no POST
 //   { status: "refused", reason }            — a gate declined the PR; no POST
 //   { status: "already-published", reviewUrl, marker } — idempotency skip
-//   { status: "published", reviewUrl, inlineCount, notedCount, stale, reconciled }
+//   { status: "published", reviewUrl, inlineCount, notedCount, stale, selfReview, reconciled }
 // Throws PublishError on every fail-closed condition.
 export async function publishReview({
   retained,
   signal = null,
+  allowSelfReview = false,
   runGh = defaultRunGh,
   cwd = process.cwd(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -385,8 +408,20 @@ export async function publishReview({
   if (prAuthor === null) {
     throw new PublishError(`PR #${capture.number} has no author login; the self-review gate cannot run, so failing closed — nothing was posted.`);
   }
+  // S46: the self-author gate stays fail-closed by default; the ONLY override
+  // is the explicit allowSelfReview authorization, which the parser only ever
+  // attaches to a deliberate --comment --self-review invocation (never config
+  // autoPostReviews). An authorized self-review is still a self-review: the
+  // flag is remembered so the body discloses it and the outcome reports it.
+  let selfReview = false;
   if (prAuthor === viewer.login) {
-    return { status: "refused", reason: `PR #${capture.number} is authored by ${viewer.login} (you); self-review publication is refused.` };
+    if (allowSelfReview !== true) {
+      return {
+        status: "refused",
+        reason: `PR #${capture.number} is authored by ${viewer.login} (you); self-review publication is refused. Re-run with --comment --self-review to publish it to your own PR.`,
+      };
+    }
+    selfReview = true;
   }
   const currentHead = pr.head?.sha;
   if (typeof currentHead !== "string" || !/^[0-9a-f]{40}$/.test(currentHead)) {
@@ -445,6 +480,7 @@ export async function publishReview({
     currentHead,
     currentBase,
     stale,
+    selfReview,
   });
   // Body and per-comment caps are enforced inside buildPublication at
   // composition time — an oversized payload fails our gate there, before the
@@ -492,6 +528,7 @@ export async function publishReview({
     stale,
     staleHead,
     staleBase,
+    selfReview,
   };
   if (post.code === 0) {
     let created = {};
@@ -602,6 +639,11 @@ export function renderPublishResult(capture, outcome) {
         ? "base had advanced (head unchanged)"
         : "head had moved";
     lines.push(`The ${moved} since capture — the comment is body-only and names both commits and bases.`);
+  }
+  if (outcome.selfReview === true) {
+    lines.push(
+      "Self-review publication: this COMMENT went to a PR you authored — explicitly authorized by --self-review, and disclosed in the posted comment.",
+    );
   }
   if (outcome.reconciled === true) {
     lines.push(
