@@ -1,102 +1,103 @@
 // M1 no-inference smoke script: marketplace consistency. The public marketplace
 // entry for z-pr-review (xpepper/copilot-plugins) must exist, point at THIS
-// repository at the repo root, carry the same version as plugin.json, and pin
-// the matching release tag. This is the gate-enforced release discipline: every
-// plugin.json bump also bumps the marketplace entry, or the next assessment
-// fails here. Pure script smoke (no Copilot SDK), like smoke-l1.mjs.
+// repository at the repo root, and carry an internally consistent version+ref
+// pair matching EITHER plugin.json (an operator bumped early — the M1-era
+// behavior) OR the last released tag (the normal state while a new version is
+// in flight). This either-or acceptance is the R45 fix (issue #45): the entry
+// bump is now a POST-MERGE step of the loop's merge tail
+// (scripts/dev-loop/marketplace.mjs, bumpMarketplaceEntry — it runs only after
+// the release tag exists), so assessments no longer force the public entry to
+// move before the tag does — the window where `copilot plugin
+// install/update` pointed at a missing ref. Pure script smoke (no Copilot
+// SDK), like smoke-l1.mjs.
 //
 // Usage:
 //   node tests/smoke-m1.mjs
 // Optional env: ZPR_MARKETPLACE_MANIFEST_URL (override manifest URL),
-// GH_TOKEN (raises the GitHub API rate limit; works unauthenticated too).
+// ZPR_TAGS_URL (override the release-tags URL), GH_TOKEN (raises the GitHub
+// API rate limit; works unauthenticated too).
 
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  checkMarketplaceConsistency,
+  highestReleaseVersion,
+  MARKETPLACE_REPO,
+  PLUGIN_NAME,
+  PLUGIN_REPO,
+} from "../scripts/dev-loop/marketplace.mjs";
 
-const MARKETPLACE_REPO = "xpepper/copilot-plugins";
-const PLUGIN_NAME = "z-pr-review";
-const PLUGIN_REPO = "xpepper/pr-review-glm";
+// Re-exported for tests/marketplace.test.mjs — the smoke remains the single
+// import surface for the gate's rules (pure logic lives in the module so the
+// loop's post-merge step and this pre-merge gate share one rule set).
+export { checkMarketplaceConsistency };
+
 // The contents API with the raw media type serves the manifest FRESH; the
 // raw.githubusercontent CDN can lag a just-pushed entry bump by ~5 minutes,
 // which would fail the discipline gate spuriously (verified 2026-09-13).
 const DEFAULT_MANIFEST_URL =
-  "https://api.github.com/repos/xpepper/copilot-plugins/contents/.github/plugin/marketplace.json";
+  `https://api.github.com/repos/${MARKETPLACE_REPO}/contents/.github/plugin/marketplace.json`;
+// Release tags live in THIS repository; the highest existing vX.Y.Z is the
+// "last released" arm of the either-or acceptance (R45). per_page=100 covers
+// this repo's release cadence for years; the response order is not guaranteed
+// to be newest-first, so the max is taken over the whole page numerically.
+const DEFAULT_TAGS_URL = `https://api.github.com/repos/${PLUGIN_REPO}/tags?per_page=100`;
 
-// Pure consistency rules, exported for unit tests (tests/marketplace.test.mjs).
-// Every problem line names the marketplace repo so a failing gate points at the
-// place to fix, not just the symptom.
-//
-// Deliberate scope (dogfood P2, dispositioned design-inherent 2026-09-13): the
-// rules verify MANIFEST consistency only — the pinned tag v{version} cannot be
-// existence-checked here because it is pushed at the increment merge (never from
-// a branch), so pre-merge assessments would always fail it. Tag existence is
-// enforced by the merge-time tagging plus the post-merge marketplace install
-// verification.
-export function checkMarketplaceConsistency({ manifest, pluginVersion }) {
-  const problems = [];
-  const plugins = Array.isArray(manifest?.plugins) ? manifest.plugins : null;
-  if (!plugins) {
-    return { problems: [`marketplace ${MARKETPLACE_REPO} manifest has no plugins[] array`] };
-  }
-  const entry = plugins.find((p) => p?.name === PLUGIN_NAME);
-  if (!entry) {
-    return { problems: [`marketplace ${MARKETPLACE_REPO} has no ${PLUGIN_NAME} entry`] };
-  }
-  if (entry.source?.source !== "github") {
-    problems.push(
-      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must use the github source form, found ${JSON.stringify(entry.source?.source)}`,
-    );
-  }
-  if (entry.source?.repo !== PLUGIN_REPO) {
-    problems.push(
-      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must point at ${PLUGIN_REPO}, found ${String(entry.source?.repo)}`,
-    );
-  }
-  if (entry.source?.path !== ".") {
-    problems.push(
-      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must use the repo root (path "."), found ${JSON.stringify(entry.source?.path)}`,
-    );
-  }
-  if (entry.version !== pluginVersion) {
-    problems.push(
-      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} version ${String(entry.version)} != plugin.json ${pluginVersion} — bump the entry (and its ref tag) in the same increment; one-line direct push, disclosed in the increment PR`,
-    );
-  }
-  if (entry.source?.ref !== `v${pluginVersion}`) {
-    problems.push(
-      `marketplace ${MARKETPLACE_REPO} entry ${PLUGIN_NAME} must pin source.ref to v${pluginVersion}, found ${JSON.stringify(entry.source?.ref)}`,
-    );
-  }
-  return { problems };
-}
-
-export async function fetchMarketplaceManifest(url = process.env.ZPR_MARKETPLACE_MANIFEST_URL ?? DEFAULT_MANIFEST_URL) {
+// The token is only ever sent to GitHub's API host — an overridden URL is
+// often exactly how a leak gets set up (dogfood P2, 2026-09-13).
+function apiHeaders(url) {
   const headers = { Accept: "application/vnd.github.raw" };
-  // The token is only ever sent to GitHub's API host — a overridden manifest URL
-  // is often exactly how a leak gets set up (dogfood P2, 2026-09-13).
   if (process.env.GH_TOKEN && new URL(url).host === "api.github.com") {
     headers.Authorization = `Bearer ${process.env.GH_TOKEN}`;
   }
-  const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+  return headers;
+}
+
+export async function fetchMarketplaceManifest(url = process.env.ZPR_MARKETPLACE_MANIFEST_URL ?? DEFAULT_MANIFEST_URL) {
+  const response = await fetch(url, { headers: apiHeaders(url), signal: AbortSignal.timeout(30_000) });
   if (!response.ok) {
     throw new Error(`marketplace ${MARKETPLACE_REPO} manifest fetch failed: HTTP ${response.status}`);
   }
   return response.json();
 }
 
+// Derives the last released version (highest existing vX.Y.Z tag, numeric
+// max via the shared version.mjs comparison — reused, not forked). Fails
+// closed: the either-or gate cannot accept the "last released" arm on an
+// invented version, so a failed or malformed tags fetch fails the smoke.
+export async function fetchLatestReleaseVersion(url = process.env.ZPR_TAGS_URL ?? DEFAULT_TAGS_URL) {
+  const response = await fetch(url, { headers: apiHeaders(url), signal: AbortSignal.timeout(30_000) });
+  if (!response.ok) {
+    throw new Error(`${PLUGIN_REPO} release tags fetch failed: HTTP ${response.status}`);
+  }
+  const tags = await response.json();
+  if (!Array.isArray(tags)) {
+    throw new Error(`${PLUGIN_REPO} release tags response is not an array`);
+  }
+  return highestReleaseVersion(tags.map((tag) => tag?.name));
+}
+
 async function main() {
   const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
   const plugin = JSON.parse(readFileSync(join(repoRoot, "plugin.json"), "utf8"));
   const manifest = await fetchMarketplaceManifest();
-  const { problems } = checkMarketplaceConsistency({ manifest, pluginVersion: plugin.version });
+  const lastReleased = await fetchLatestReleaseVersion();
+  const { problems } = checkMarketplaceConsistency({
+    manifest,
+    pluginVersion: plugin.version,
+    lastReleasedVersion: lastReleased.version,
+  });
   if (problems.length) {
     console.error(problems.join("\n"));
     process.exit(1);
   }
+  const arm = lastReleased.version && lastReleased.version !== plugin.version
+    ? `last released tag v${lastReleased.version} (new version ${plugin.version} in flight)`
+    : `plugin.json version (${plugin.version})`;
   console.log(`PASS ${PLUGIN_NAME} entry present in ${MARKETPLACE_REPO}`);
   console.log(`PASS entry points at ${PLUGIN_REPO} (root path ".")`);
-  console.log(`PASS entry version == plugin.json version (${plugin.version}), ref pinned to v${plugin.version}`);
+  console.log(`PASS entry version matches ${arm}, ref pinned to the matching tag`);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

@@ -1,15 +1,16 @@
-// Unit tests for the M1 marketplace-consistency rules (tests/smoke-m1.mjs).
-// The network fetch itself is exercised by the smoke; these cover the
-// rule matrix, including the release-discipline failure messages.
+// Unit tests for the M1 marketplace-consistency rules (tests/smoke-m1.mjs,
+// pure logic in scripts/dev-loop/marketplace.mjs). The network fetch itself is
+// exercised by the smoke; these cover the rule matrix, including the R45
+// either-or release-discipline acceptance and failure messages.
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { checkMarketplaceConsistency, fetchMarketplaceManifest } from "./smoke-m1.mjs";
+import { checkMarketplaceConsistency, fetchLatestReleaseVersion, fetchMarketplaceManifest } from "./smoke-m1.mjs";
 
 const entry = (overrides = {}, sourceOverrides = {}) => ({
   name: "z-pr-review",
-  version: "0.2.5",
-  source: { source: "github", repo: "xpepper/pr-review-glm", path: ".", ref: "v0.2.5", ...sourceOverrides },
+  version: "0.2.7",
+  source: { source: "github", repo: "xpepper/pr-review-glm", path: ".", ref: "v0.2.7", ...sourceOverrides },
   ...overrides,
 });
 
@@ -19,7 +20,8 @@ describe("checkMarketplaceConsistency", () => {
   it("passes on the consistent entry shape", () => {
     const { problems } = checkMarketplaceConsistency({
       manifest: manifestWith([entry()]),
-      pluginVersion: "0.2.5",
+      pluginVersion: "0.2.7",
+      lastReleasedVersion: "0.2.7",
     });
     assert.deepEqual(problems, []);
   });
@@ -27,21 +29,23 @@ describe("checkMarketplaceConsistency", () => {
   it("fails naming the marketplace repo when the entry is missing", () => {
     const { problems } = checkMarketplaceConsistency({
       manifest: manifestWith([{ name: "some-other-plugin" }]),
-      pluginVersion: "0.2.5",
+      pluginVersion: "0.2.7",
+      lastReleasedVersion: "0.2.6",
     });
     assert.equal(problems.length, 1);
     assert.match(problems[0], /xpepper\/copilot-plugins.*no z-pr-review entry/);
   });
 
   it("fails when the manifest has no plugins array", () => {
-    const { problems } = checkMarketplaceConsistency({ manifest: { name: "xpepper-copilot-plugins" }, pluginVersion: "0.2.5" });
+    const { problems } = checkMarketplaceConsistency({ manifest: { name: "xpepper-copilot-plugins" }, pluginVersion: "0.2.7", lastReleasedVersion: "0.2.6" });
     assert.match(problems[0], /xpepper\/copilot-plugins.*no plugins\[\] array/);
   });
 
   it("fails when the entry points at a different repository", () => {
     const { problems } = checkMarketplaceConsistency({
       manifest: manifestWith([entry({}, { repo: "someone/else" })]),
-      pluginVersion: "0.2.5",
+      pluginVersion: "0.2.7",
+      lastReleasedVersion: "0.2.6",
     });
     assert.match(problems[0], /must point at xpepper\/pr-review-glm, found someone\/else/);
   });
@@ -49,53 +53,101 @@ describe("checkMarketplaceConsistency", () => {
   it("fails when the entry no longer installs from the repo root", () => {
     const { problems } = checkMarketplaceConsistency({
       manifest: manifestWith([entry({}, { path: "plugins/z-pr-review" })]),
-      pluginVersion: "0.2.5",
+      pluginVersion: "0.2.7",
+      lastReleasedVersion: "0.2.6",
     });
     assert.match(problems[0], /repo root \(path "\."\)/);
-  });
-
-  it("fails with the release-discipline remedy on a version mismatch", () => {
-    const { problems } = checkMarketplaceConsistency({
-      manifest: manifestWith([entry({ version: "0.2.4" }, { ref: "v0.2.4" })]),
-      pluginVersion: "0.2.5",
-    });
-    const versionProblem = problems.find((p) => p.includes("version"));
-    assert.ok(versionProblem, `expected a version problem, got: ${problems.join(" | ")}`);
-    assert.match(versionProblem, /0\.2\.4 != plugin\.json 0\.2\.5/);
-    assert.match(versionProblem, /bump the entry/);
-    assert.match(versionProblem, /xpepper\/copilot-plugins/);
-  });
-
-  it("fails when the ref tag does not match the plugin version", () => {
-    const { problems } = checkMarketplaceConsistency({
-      manifest: manifestWith([entry({}, { ref: "main" })]),
-      pluginVersion: "0.2.5",
-    });
-    assert.match(problems[0], /must pin source\.ref to v0\.2\.5, found "main"/);
-  });
-
-  it("reports every problem at once", () => {
-    const { problems } = checkMarketplaceConsistency({
-      manifest: manifestWith([entry({ version: "0.2.4" }, { repo: "someone/else", ref: "v0.2.4" })]),
-      pluginVersion: "0.2.5",
-    });
-    assert.equal(problems.length, 3);
   });
 
   it("fails when the entry does not use the github source form", () => {
     const { problems } = checkMarketplaceConsistency({
       manifest: manifestWith([entry({}, { source: "git", repo: "xpepper/pr-review-glm" })]),
-      pluginVersion: "0.2.5",
+      pluginVersion: "0.2.7",
+      lastReleasedVersion: "0.2.6",
     });
     assert.match(problems[0], /must use the github source form, found "git"/);
   });
+
+  describe("either-or release discipline (R45: the entry bump is a post-merge step)", () => {
+    it("arm 1 — accepts the entry at the plugin.json version (an operator may have bumped early)", () => {
+      const { problems } = checkMarketplaceConsistency({
+        manifest: manifestWith([entry({ version: "0.2.8" }, { ref: "v0.2.8" })]),
+        pluginVersion: "0.2.8",
+        lastReleasedVersion: "0.2.7",
+      });
+      assert.deepEqual(problems, []);
+    });
+
+    it("arm 2 — accepts the entry still at the last released tag while the new version is in flight (no missing-tag window)", () => {
+      const { problems } = checkMarketplaceConsistency({
+        manifest: manifestWith([entry({ version: "0.2.7" }, { ref: "v0.2.7" })]),
+        pluginVersion: "0.2.8",
+        lastReleasedVersion: "0.2.7",
+      });
+      assert.deepEqual(problems, []);
+    });
+
+    it("fails when the entry matches NEITHER plugin.json NOR the last released tag, naming both arms", () => {
+      const { problems } = checkMarketplaceConsistency({
+        manifest: manifestWith([entry({ version: "0.2.5" }, { ref: "v0.2.5" })]),
+        pluginVersion: "0.2.8",
+        lastReleasedVersion: "0.2.7",
+      });
+      assert.equal(problems.length, 1);
+      assert.match(problems[0], /0\.2\.5/);
+      assert.match(problems[0], /plugin\.json 0\.2\.8/);
+      assert.match(problems[0], /v0\.2\.7/);
+      assert.match(problems[0], /xpepper\/copilot-plugins/);
+    });
+
+    it("with no release tags at all (lastReleasedVersion null), only the plugin.json arm remains", () => {
+      const { problems } = checkMarketplaceConsistency({
+        manifest: manifestWith([entry({ version: "0.2.5" }, { ref: "v0.2.5" })]),
+        pluginVersion: "0.2.8",
+        lastReleasedVersion: null,
+      });
+      assert.equal(problems.length, 1);
+      assert.match(problems[0], /plugin\.json 0\.2\.8/);
+      assert.match(problems[0], /no release tag|none/i);
+    });
+
+    it("requires source.ref to match the ENTRY's own version, whichever arm it matched", () => {
+      const { problems } = checkMarketplaceConsistency({
+        manifest: manifestWith([entry({ version: "0.2.7" }, { ref: "v0.2.5" })]),
+        pluginVersion: "0.2.8",
+        lastReleasedVersion: "0.2.7",
+      });
+      assert.equal(problems.length, 1);
+      assert.match(problems[0], /must pin source\.ref to v0\.2\.7 \(its own version\), found "v0\.2\.5"/);
+    });
+
+    it("still refuses a branch ref", () => {
+      const { problems } = checkMarketplaceConsistency({
+        manifest: manifestWith([entry({}, { ref: "main" })]),
+        pluginVersion: "0.2.7",
+        lastReleasedVersion: "0.2.6",
+      });
+      assert.match(problems[0], /must pin source\.ref to v0\.2\.7 \(its own version\), found "main"/);
+    });
+  });
+
+  it("reports every problem at once", () => {
+    const { problems } = checkMarketplaceConsistency({
+      manifest: manifestWith([entry({ version: "0.2.5" }, { repo: "someone/else", ref: "v0.2.4" })]),
+      pluginVersion: "0.2.7",
+      lastReleasedVersion: "0.2.6",
+    });
+    assert.equal(problems.length, 3, problems.join(" | "));
+  });
 });
 
-describe("fetchMarketplaceManifest token handling", () => {
-  const stubFetch = (capture) => async (url, init) => {
+describe("fetch helpers token handling", () => {
+  // An array body satisfies BOTH fetchers (the manifest fetch returns
+  // response.json() unchecked here; the tags fetch requires an array).
+  const stubFetch = (capture, body = []) => async (url, init) => {
     capture.url = url;
     capture.headers = init.headers;
-    return { ok: true, json: async () => ({ plugins: [] }) };
+    return { ok: true, json: async () => body };
   };
   const realFetch = globalThis.fetch;
 
@@ -106,6 +158,10 @@ describe("fetchMarketplaceManifest token handling", () => {
       globalThis.fetch = stubFetch(toGithub);
       await fetchMarketplaceManifest();
       assert.equal(toGithub.headers.Authorization, "Bearer tok");
+      const toGithubTags = {};
+      globalThis.fetch = stubFetch(toGithubTags);
+      await fetchLatestReleaseVersion();
+      assert.equal(toGithubTags.headers.Authorization, "Bearer tok");
 
       const toElsewhere = {};
       globalThis.fetch = stubFetch(toElsewhere);
@@ -123,9 +179,33 @@ describe("fetchMarketplaceManifest token handling", () => {
     globalThis.fetch = stubFetch(capture);
     try {
       await fetchMarketplaceManifest();
+      await fetchLatestReleaseVersion();
       assert.equal(capture.headers.Authorization, undefined);
     } finally {
       globalThis.fetch = realFetch;
     }
+  });
+
+  it("fetchLatestReleaseVersion derives the highest vX.Y.Z tag from the plugin repo's tag list", async () => {
+    const tags = [
+      { name: "v0.2.7" },
+      { name: "v0.2.10" },
+      { name: "not-a-release" },
+    ];
+    globalThis.fetch = stubFetch({}, tags);
+    try {
+      const { version } = await fetchLatestReleaseVersion();
+      assert.equal(version, "0.2.10");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("fetchLatestReleaseVersion fails closed on HTTP and shape errors (never reports a bogus last release)", async () => {
+    globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
+    await assert.rejects(fetchLatestReleaseVersion(), /HTTP 503/);
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ oops: true }) });
+    await assert.rejects(fetchLatestReleaseVersion(), /not an array/i);
+    globalThis.fetch = realFetch;
   });
 });

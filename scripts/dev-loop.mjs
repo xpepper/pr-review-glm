@@ -12,7 +12,8 @@ import {
   gateSmokes, gateTests, isFullOid, mergeabilityGate, reportGates, runPreflightGates, selectIncrementPr, verifyIncrementPrOwnedByViewer,
 } from "./dev-loop/gates.mjs";
 import { runLoop } from "./dev-loop/loop.mjs";
-import { gateVersionBump, releaseTagReservation, verifyBumpAtMerge } from "./dev-loop/version.mjs";
+import { gateVersionBump, parseVersion, releaseTagReservation, verifyBumpAtMerge } from "./dev-loop/version.mjs";
+import { bumpMarketplaceEntry } from "./dev-loop/marketplace.mjs";
 import { deleteMergedBranch, mergeTail, squashMergeAtHead } from "./dev-loop/merge-tail.mjs";
 import { runDogfoodReview } from "./dev-loop/dogfood.mjs";
 import { findResumablePr, recoverCheckout } from "./dev-loop/resume.mjs";
@@ -367,6 +368,34 @@ async function runMain(options, { zcode, phaseEnv }) {
       });
       if (tailed.code !== 0) return tailed;
       log(`merge: ${bump.tag} tagged at the merge commit`);
+      // R45 marketplace publication: the entry bump is a POST-MERGE step, run
+      // only now that the release tag exists on origin — the pre-merge gate
+      // (smoke-m1) accepts the entry at EITHER plugin.json or the last
+      // released tag precisely so the public index never has to move before
+      // the tag does (the issue #45 missing-ref window). The bump touches only
+      // our entry (version + source.ref together) via the contents API and
+      // verifies afterwards, fail-loudly with the tag name if the pinned ref
+      // is missing. Like a tail failure this cannot un-merge — but it leaves
+      // the release UNPUBLISHED (installs keep getting the previous version),
+      // so it fails the merge path rather than warning: the next run's gate
+      // accepts the stale entry (arm 2) and would otherwise ship release after
+      // release without ever surfacing the skipped bump.
+      // plugin.json was validated on this same checkout moments ago by the
+      // tagging tail; the guard keeps a mid-tail checkout surprise fail-closed
+      // instead of an escaped exception.
+      let released = null;
+      try {
+        released = parseVersion(read("plugin.json"), "plugin.json (main)");
+      } catch (error) {
+        released = { error: `plugin.json (main) cannot be read: ${String(error?.code ?? error?.message ?? error)}` };
+      }
+      if (released.error) {
+        return { code: 1, stdout: "", stderr: `cannot read the released version to publish to the marketplace (merge and release tag ${bump.tag} completed): ${released.detail}`, timedOut: false };
+      }
+      const published = await bumpMarketplaceEntry({ run, repoRoot, version: released.version });      if (!published.ok) {
+        return { code: 1, stdout: "", stderr: `marketplace entry bump failed (merge and release tag v${released.version} completed — fix the entry by hand, do not re-merge): ${published.detail}`, timedOut: false };
+      }
+      log(`merge: ${published.detail}`);
       // --delete-branch equivalent, run ONLY after GitHub confirmed MERGED and
       // the release tag landed (run-3 dogfood P1: deleting earlier means a
       // failed confirmation or tail strands a merged PR whose branch is already

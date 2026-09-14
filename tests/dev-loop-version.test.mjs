@@ -6,7 +6,7 @@ import { describe, it } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { compareVersions, gateVersionBump, parseVersion, releaseTagReservation, tagMergedRelease, verifyBumpAtMerge } from "../scripts/dev-loop/version.mjs";
+import { compareVersions, gateVersionBump, isStrictVersion, parseVersion, releaseTagReservation, tagMergedRelease, verifyBumpAtMerge } from "../scripts/dev-loop/version.mjs";
 
 const manifest = (version) => `${JSON.stringify({ name: "z-pr-review", version }, null, 2)}\n`;
 const ok = (stdout = "") => async () => ({ code: 0, stdout, stderr: "" });
@@ -40,6 +40,17 @@ describe("parseVersion", () => {
     assert.match(parseVersion("{}", "m").error, /no strict X\.Y\.Z/);
     for (const bad of ["0.1", "1.2.3-rc1", "v1.2.3", "latest", 3, "01.2.3", "1.02.3", "1.2.03", "1.2.3\n", "1.2.3 ", "1.2.3\nx"]) {
       assert.match(parseVersion(manifest(bad), "m").error, /no strict X\.Y\.Z/);
+    }
+  });
+});
+
+// R45: the marketplace module reuses this predicate for release tag names —
+// pin it so tag validation cannot drift from manifest validation.
+describe("isStrictVersion", () => {
+  it("accepts only strict X.Y.Z strings", () => {
+    for (const good of ["0.0.0", "0.2.7", "1.0.0", "10.20.30"]) assert.equal(isStrictVersion(good), true, good);
+    for (const bad of ["1.2.3-rc1", "v1.2.3", "01.2.3", "1.2.03", "1.2.3 ", "1.2.3\n", "", null, undefined, 3, {}, "latest"]) {
+      assert.equal(isStrictVersion(bad), false, String(bad));
     }
   });
 });
