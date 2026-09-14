@@ -390,9 +390,10 @@ async function runMain(options, { zcode, phaseEnv }) {
         released = { error: `plugin.json (main) cannot be read: ${String(error?.code ?? error?.message ?? error)}` };
       }
       if (released.error) {
-        return { code: 1, stdout: "", stderr: `cannot read the released version to publish to the marketplace (merge and release tag ${bump.tag} completed): ${released.detail}`, timedOut: false };
+        return { code: 1, stdout: "", stderr: `cannot read the released version to publish to the marketplace (merge and release tag ${bump.tag} completed): ${released.error}`, timedOut: false };
       }
-      const published = await bumpMarketplaceEntry({ run, repoRoot, version: released.version });      if (!published.ok) {
+      const published = await bumpMarketplaceEntry({ run, repoRoot, version: released.version });
+      if (!published.ok) {
         return { code: 1, stdout: "", stderr: `marketplace entry bump failed (merge and release tag v${released.version} completed — fix the entry by hand, do not re-merge): ${published.detail}`, timedOut: false };
       }
       log(`merge: ${published.detail}`);

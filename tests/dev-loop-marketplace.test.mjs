@@ -9,6 +9,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { applyEntryBump, bumpMarketplaceEntry, highestReleaseVersion } from "../scripts/dev-loop/marketplace.mjs";
+import { parseVersion } from "../scripts/dev-loop/version.mjs";
 
 // Mirrors the live manifest's shape (canonical JSON.stringify(…, null, 2) with
 // a trailing newline — verified 2026-09-15), with a sibling entry that must
@@ -250,5 +251,30 @@ describe("bumpMarketplaceEntry", () => {
     assert.equal(result.ok, false);
     assert.match(result.detail, /no z-pr-review entry/);
     assert.equal(putCalls(calls).length, 0, "no commit is attempted");
+  });
+});
+
+// The merge path in scripts/dev-loop.mjs stops fail-loudly when the post-merge
+// version read fails, interpolating the version result's reason into its
+// stderr. Both error paths that build the result — parseVersion's error return
+// and the read-failure catch in dev-loop.mjs — carry the reason on `.error`;
+// an earlier draft interpolated `.detail`, undefined on both paths, so the
+// stop reason read "…): undefined" and lost the actual cause (review finding).
+// This pins the shape the interpolation relies on.
+describe("post-merge version read fail-loud reason", () => {
+  it("carries the reason on .error — the field the merge path interpolates — never .detail (which renders undefined)", () => {
+    for (const text of ["{oops", "{}"]) {
+      const released = parseVersion(text, "plugin.json (main)");
+      assert.match(released.error, /plugin\.json \(main\)/, "the failure mode under test must fire");
+      assert.equal(released.detail, undefined, "the reason lives on .error; interpolating .detail renders 'undefined'");
+    }
+    // The composed stop reason carries the actual parse failure — interpolating
+    // the wrong field would end the message with the literal "undefined"
+    // instead. (The missing-version reason text above legitimately contains
+    // "undefined" as the reported value, so this uses the unparseable case.)
+    const released = parseVersion("{oops", "plugin.json (main)");
+    const stderr = `cannot read the released version to publish to the marketplace (merge and release tag v0.2.8 completed): ${released.error}`;
+    assert.match(stderr, /is not parseable JSON/);
+    assert.doesNotMatch(stderr, /undefined/, "the fail-loud output must carry the actual reason, never an undefined field");
   });
 });
