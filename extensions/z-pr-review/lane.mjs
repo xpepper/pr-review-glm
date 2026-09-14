@@ -521,7 +521,14 @@ function noteUsageCheckpoint(outcome, data) {
   const total = Number(data?.totalNanoAiu);
   if (!Number.isFinite(total) || total < 0) return;
   const telemetry = (outcome.telemetry ??= emptyTelemetry());
-  if (telemetry.firstNanoAiu === undefined) telemetry.firstNanoAiu = total;
+  if (telemetry.firstNanoAiu === undefined) {
+    // The checkpoint total is session-accumulated. If it arrives BEFORE any
+    // dispatch it is a clean baseline; if dispatches already happened, the
+    // total already includes this (fresh, per-attempt) session's own spend —
+    // the baseline is 0, not that total, or the delta would silently drop
+    // everything accrued before the first checkpoint (dogfood round-1 P2).
+    telemetry.firstNanoAiu = telemetry.calls > 0 ? 0 : total;
+  }
   telemetry.lastNanoAiu = total;
 }
 

@@ -164,3 +164,50 @@ describe("FILE_BACKED_THRESHOLD_BYTES", () => {
     assert.equal(FILE_BACKED_THRESHOLD_BYTES, 200_000);
   });
 });
+
+// Dogfood round-1 fold: headerless sections (binary files, mode-only
+// changes) carry their boundary path instead of refusing the whole review.
+describe("splitDiffSections (headerless sections, fold round 1)", () => {
+  it("binary and mode-only sections take their path from the diff --git boundary line", () => {
+    const diff = [
+      "diff --git a/src/a.mjs b/src/a.mjs",
+      "--- a/src/a.mjs",
+      "+++ b/src/a.mjs",
+      "@@ -1,1 +1,2 @@",
+      " ctx",
+      "+x",
+      "diff --git a/logo.png b/logo.png",
+      "index 1111..2222 100644",
+      "Binary files a/logo.png and b/logo.png differ",
+      "diff --git a/tool.sh b/tool.sh",
+      "old mode 100755",
+      "new mode 100644",
+    ].join("\n");
+    const sections = splitDiffSections(diff);
+    assert.deepEqual(sections.map((s) => s.path), ["src/a.mjs", "logo.png", "tool.sh"]);
+    assert.deepEqual(sections.map((s) => s.hadHeader), [true, false, false]);
+  });
+  it("a headerless section still builds a transport entry (empty ranges) instead of failing the review", async () => {
+    const root = mkdtempSync(join(tmpdir(), "z-pr-review-transport-binary-"));
+    try {
+      const diff = [
+        "diff --git a/logo.png b/logo.png",
+        "index 1111..2222 100644",
+        "Binary files a/logo.png and b/logo.png differ",
+        "diff --git a/src/a.mjs b/src/a.mjs",
+        "--- a/src/a.mjs",
+        "+++ b/src/a.mjs",
+        "@@ -1,1 +1,2 @@",
+        " ctx",
+        "+x",
+      ].join("\n");
+      const transport = await buildFileBackedTransport({ envelope: { ...ENVELOPE, diff }, thresholdBytes: 1, tempRoot: root });
+      assert.equal(transport.fileCount, 2);
+      assert.equal(transport.files[0].path, "logo.png");
+      assert.deepEqual(transport.files[0].ranges, []);
+      assert.deepEqual(transport.files[1].ranges, ["1-2"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

@@ -499,7 +499,27 @@ export async function publishReview({
   // rerun, whose own pre-POST scan hits the same lagging listing and would
   // duplicate the comment. Retrying the scan a few times lets the marker
   // surface so the rerun path never forms. Each scan re-checks the abort
-  // signal (a cancelled review stops reconciling immediately).
+  // signal, and so does the backoff between scans (dogfood round-1 P2: a
+  // cancelled review must not sit out the full delay before noticing).
+  const backoff = async () => {
+    if (!signal) {
+      await sleep(RECONCILE_DELAY_MS);
+      return;
+    }
+    const { promise, reject } = Promise.withResolvers();
+    const onAbort = () =>
+      reject(new PublishError("the review was cancelled while waiting to reconcile an uncertain review POST; nothing more was attempted."));
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    try {
+      await Promise.race([sleep(RECONCILE_DELAY_MS), promise]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  };
   for (let scan = 1; scan <= RECONCILE_SCANS; scan += 1) {
     const afterReviews = await ghListOrThrow(runGh, cwd, prPath + "/reviews", {
       pageSize: REVIEWS_PAGE_SIZE,
@@ -517,7 +537,7 @@ export async function publishReview({
         reconcileScans: scan,
       };
     }
-    if (scan < RECONCILE_SCANS) await sleep(RECONCILE_DELAY_MS);
+    if (scan < RECONCILE_SCANS) await backoff();
   }
   throw new PublishError(
     `the review POST did not land (uncertain response: ${post.code === 0 ? "unparseable response body" : firstLine(post.stderr) || "no output"}) and no review carrying the idempotency marker appeared within ${RECONCILE_SCANS} reconciliation scans; failing closed — re-run publication if the PR is still open.`,

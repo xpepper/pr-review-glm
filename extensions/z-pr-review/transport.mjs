@@ -30,7 +30,13 @@ export class TransportError extends Error {
 // Each section carries its primary display path — the new side (`+++ b/x`)
 // when present, the old side (`--- a/x`) for deletions — so renames appear
 // once under their post-image name (a finding may anchor either side; the
-// section text contains both). Leading text before the first boundary (never
+// section text contains both). Sections with NO ---/+++ header at all
+// (binary files: "Binary files a/x and b/x differ"; mode-only changes) take
+// their path from the `diff --git a/x b/x` boundary line itself — rejecting
+// them would refuse to review any large PR that touches a binary file. The
+// boundary path is the fallback, never the preference (a quoted/escaped
+// `diff --git` path can carry git's C-style quoting; the ---/+++ forms are
+// the canonical ones). Leading text before the first boundary (never
 // produced by `gh pr diff`, but refused silently-dropped) rides on the first
 // section; a diff with no boundary at all is one section.
 export function splitDiffSections(diffText) {
@@ -38,26 +44,34 @@ export function splitDiffSections(diffText) {
   const sections = [];
   let current = null;
   let primary = null;
+  let boundaryPath = null;
+  let hadHeader = false;
   const push = () => {
-    if (current !== null) sections.push({ lines: current, path: primary });
+    if (current !== null) sections.push({ lines: current, path: primary ?? boundaryPath, hadHeader });
   };
   for (const line of lines) {
     if (line.startsWith("diff --git ")) {
       push();
       current = [];
       primary = null;
+      boundaryPath = boundaryPathOf(line);
+      hadHeader = false;
     } else if (current === null) {
       // Preamble before any boundary: keep it with the first real section.
       current = [];
       primary = null;
+      boundaryPath = null;
+      hadHeader = false;
     }
     const newSide = /^\+\+\+ (.+)$/.exec(line);
     if (newSide && newSide[1].trim() !== "/dev/null") {
       primary = normalizeSectionPath(newSide[1]);
+      hadHeader = true;
     } else if (primary === null) {
       const oldSide = /^--- (.+)$/.exec(line);
       if (oldSide && oldSide[1].trim() !== "/dev/null") {
         primary = normalizeSectionPath(oldSide[1]);
+        hadHeader = true;
       }
     }
     current.push(line);
@@ -67,6 +81,17 @@ export function splitDiffSections(diffText) {
     throw new TransportError("the diff has no recognizable file paths; cannot build a file-backed transport");
   }
   return sections;
+}
+
+// `diff --git a/path b/path` — the b-side names the post-image. Only the
+// plain unquoted shape is honored (git quotes exotic paths C-style; such a
+// section still carries its canonical ---/+++ header lines whenever it has
+// content, so the boundary form is only needed for headerless sections,
+// where an unparseable exotic name fails closed as before).
+function boundaryPathOf(line) {
+  const match = /^diff --git "?a\/(.+?)"? "?b\/(.+?)"?$/.exec(line.trim());
+  if (match === null) return null;
+  return normalizeSectionPath(match[2]);
 }
 
 function normalizeSectionPath(path) {
@@ -98,8 +123,12 @@ export async function buildFileBackedTransport({
       throw new TransportError(`diff section ${index + 1} repeats path "${section.path}"; cannot build a file-backed transport`);
     }
     seen.add(section.path);
+    // A headered section MUST exist in the anchor surface (the manifest and
+    // validation share one parsing contract). A headerless section (binary
+    // "Binary files … differ", mode-only) has no anchor surface entry BY
+    // CONSTRUCTION — its ranges are legitimately empty, not a disagreement.
     const entry = anchors.files.get(section.path);
-    if (entry === undefined && !anchors.touched.has(section.path)) {
+    if (section.hadHeader && entry === undefined && !anchors.touched.has(section.path)) {
       throw new TransportError(`diff section "${section.path}" is absent from the anchor surface; the manifest would disagree with validation`);
     }
     return {
@@ -111,13 +140,14 @@ export async function buildFileBackedTransport({
     };
   });
   const dir = await mkdtemp(join(tempRoot, "z-pr-review-transport-"));
-  await Promise.all(
-    files.map((file) =>
-      writeFile(join(dir, file.file), `${file.lines.join("\n")}\n`, { mode: 0o600 }).then(() =>
-        chmod(join(dir, file.file), 0o600),
-      ),
-    ),
-  );
+  // Sequential writes (dogfood round-1 P2): Promise.all over every section
+  // starts one fs op per changed file — unbounded for a pathological
+  // multi-thousand-file diff. Writing in order is milliseconds here and
+  // carries no concurrency ceiling at all.
+  for (const file of files) {
+    await writeFile(join(dir, file.file), `${file.lines.join("\n")}\n`, { mode: 0o600 });
+    await chmod(join(dir, file.file), 0o600);
+  }
   // `lines` was construction-only scaffolding; the manifest that travels into
   // prompts and results stays lean.
   const manifest = files.map(({ lines, ...rest }) => ({ ...rest, absolutePath: join(dir, rest.file) }));

@@ -789,3 +789,44 @@ describe("publishReview reconciliation and cancellation (I8)", () => {
     assert.equal(scans.length, 1, "only the pre-POST scan ran; the aborted reconciliation scan never paged");
   });
 });
+
+// Fold round-1 P2: the reconciliation backoff is abort-aware — a cancelled
+// review does not sit out the 2s delay before noticing.
+describe("publishReview abort-aware reconciliation backoff (fold round 1)", () => {
+  it("an abort landing during the backoff throws immediately instead of scanning again", async () => {
+    const controller = new AbortController();
+    const marker = idempotencyMarker(capture.repo, capture.number, HEAD, BASE);
+    const calls = [];
+    let reviewsCall = 0;
+    const runGh = async (args, opts = {}) => {
+      calls.push({ args, opts });
+      const joined = args.join(" ");
+      if (joined.includes("api user")) return ghReply({ login: VIEWER });
+      if (args.includes("POST")) return { code: 1, stdout: "", stderr: "gh: server error (HTTP 500)", timedOut: false };
+      if (joined.includes("/reviews")) {
+        reviewsCall += 1;
+        return ghReply(reviewsCall === 1 ? [] : [markerReview(marker)]); // scan 2 would see it
+      }
+      if (joined.includes("/files")) return ghReply(filesJson);
+      if (joined.includes("repos/xpepper/pr-review-glm/pulls/33")) return ghReply(openPr());
+      return { code: 1, stdout: "", stderr: `fake gh: unmatched ${joined}`, timedOut: false };
+    };
+    const markerReview = (marker) => [{ user: { login: VIEWER }, html_url: "x", body: marker }];
+    await assert.rejects(
+      publishReview({
+        retained: retained(),
+        runGh,
+        signal: controller.signal,
+        sleep: () =>
+          new Promise(() => {
+            // The abort lands the moment the backoff begins; the sleep itself
+            // never settles, so the raced abort rejection is the only outcome.
+            controller.abort(new Error("parent session ended"));
+          }),
+      }),
+      (error) => error instanceof PublishError && /cancelled while waiting to reconcile/.test(error.message),
+    );
+    const scans = calls.filter((c) => !c.args.includes("POST") && c.args.join(" ").includes("/reviews"));
+    assert.equal(scans.length, 2, "pre-POST scan + exactly one reconciliation scan; the aborted backoff never reached scan 2");
+  });
+});

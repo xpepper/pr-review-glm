@@ -163,11 +163,13 @@ export async function runLoop(deps) {
         if (fixerBudget === 0) return fail(`unresolved after fixer budget: ${state.reason}`);
         fixerBudget -= 1;
         iteration.fixerRounds += 1;
-        // Severity ladder: rounds 1–2 carry the blocking findings only; rounds
-        // 3–4 widen to everything. A blocking verdict with no P0/P1 at all
-        // (request-changes over P2s) keeps the full list — scoping it would
-        // dispatch a fixer with nothing to fix.
-        const blockers = state.findings.filter((finding) => finding?.severity !== "P2");
+        // Severity ladder: rounds 1–2 carry the BLOCKING findings only (P0/P1
+        // — reviewBlocking's own definition; a P3/nit finding from the
+        // independent reviewer is not a blocker any more than a P2 is);
+        // rounds 3–4 widen to everything. A blocking verdict with no P0/P1 at
+        // all (request-changes over P2s) keeps the full list — scoping it
+        // would dispatch a fixer with nothing to fix.
+        const blockers = state.findings.filter((finding) => finding?.severity === "P0" || finding?.severity === "P1");
         const scopedFindings = iteration.fixerRounds <= 2 && blockers.length > 0 ? blockers : state.findings;
         log(`fixer round ${iteration.fixerRounds}: ${state.reason}${scopedFindings.length !== state.findings.length ? ` (${scopedFindings.length} of ${state.findings.length} findings in scope — blockers first)` : ""}`);
         const fixed = await timed.fixer(iteration.prNumber, scopedFindings);

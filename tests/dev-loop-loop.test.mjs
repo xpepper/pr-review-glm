@@ -380,3 +380,27 @@ describe("runLoop fixer and iteration flow", () => {
     assert.deepEqual(calls.sleeps, [60_000]);
   });
 });
+
+// Dogfood round-1 fold: P3/nit findings are NOT blockers on the ladder either
+// (reviewBlocking's own definition is P0/P1 — an independent-reviewer P3/nit
+// must not ride rounds 1–2 as if it were).
+describe("runLoop severity ladder (fold round 1)", () => {
+  it("rounds 1–2 keep only P0/P1; P3 and nit findings ride with the P2s from round 3", async () => {
+    const scopes = [];
+    const { deps: d, calls } = deps({
+      mergeMode: "auto",
+      runReviewer: async () => ({
+        ...cleanRun,
+        review: review("request-changes", [
+          { severity: "P1", title: "blocker" },
+          { severity: "P3", title: "minor" },
+          { severity: "nit", title: "style" },
+        ]),
+      }),
+      runFixer: async (prNumber, findings) => { scopes.push(findings.map((f) => f.severity)); calls.fixer++; return cleanRun; },
+    });
+    await runLoop(d);
+    assert.deepEqual(scopes, [["P1"], ["P1"], ["P1", "P3", "nit"], ["P1", "P3", "nit"]]);
+    assert.equal(calls.fixer, 4);
+  });
+});

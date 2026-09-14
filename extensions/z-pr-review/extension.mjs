@@ -6,6 +6,7 @@
 // LLM never orchestrates anything here (spec: "Architecture A"); every
 // handler is plain code and the model runs only inside the lane children.
 import { joinSession } from "@github/copilot-sdk/extension";
+import { rm } from "node:fs/promises";
 import { readPluginVersion } from "./version.mjs";
 import { CaptureError, capturePullRequest } from "./capture.mjs";
 import { ConfigError, ConfigStore } from "./config.mjs";
@@ -312,6 +313,22 @@ async function runReview(parsed) {
       // The review's controller rides along: a cancelled review (session end)
       // must not reach the POST even if it reached publication.
       await runPublication(target, controller.signal);
+    }
+    // The transport directory (large diffs only) outlives its usefulness the
+    // moment the review settles — anchor validation at publication reads the
+    // live PR files API, never the transport files, and the retained result
+    // references only the capture path (which is I2-era deliberate retention:
+    // inspect names it). Best-effort removal with disclosure; a review that
+    // throws past this point leaves the dir to OS temp cleanup (dogfood
+    // round-1 P2: transport dirs are diff content on disk — never kept).
+    if (transport.mode === "file-backed") {
+      try {
+        await rm(transport.dir, { recursive: true, force: true });
+      } catch (error) {
+        await session.log(
+          `Note: could not remove the file-backed transport directory ${transport.dir} (${String(error?.message ?? error).slice(0, 120)}); remove it manually.`,
+        );
+      }
     }
   } catch (error) {
     if (error instanceof CaptureError) {

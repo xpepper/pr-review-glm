@@ -1476,8 +1476,8 @@ describe("runLane telemetry (I8, runtime events)", () => {
     assert.equal(outcome.status, "complete");
     assert.deepEqual(
       { ...outcome.telemetry },
-      { calls: 2, success: 1, error: 1, cancelled: 0, rejected: 0, dispatchMs: 1750, firstNanoAiu: 100, lastNanoAiu: 350, usageNanoAiu: 250 },
-      "the child session is fresh per attempt, so last−first checkpoint is the attempt's own spend",
+      { calls: 2, success: 1, error: 1, cancelled: 0, rejected: 0, dispatchMs: 1750, firstNanoAiu: 0, lastNanoAiu: 350, usageNanoAiu: 350 },
+      "the first checkpoint arrived after a dispatch, so it is not a clean baseline — a fresh child session's whole observed total is its own spend (fold round-1 semantics)",
     );
   });
   it("skips malformed telemetry events without failing or copying strings", async () => {
@@ -1705,10 +1705,46 @@ describe("runLaneBatch (I8 transport threading)", () => {
       assert.equal(batch.status, "complete");
       assert.match(captured.prompt, /REQUIRED READS/);
       assert.deepEqual(batch.lanes[0].attempts[0].telemetry, {
-        calls: 1, success: 1, error: 0, cancelled: 0, rejected: 0, dispatchMs: 900, firstNanoAiu: 40, lastNanoAiu: 40, usageNanoAiu: 0,
+        calls: 1, success: 1, error: 0, cancelled: 0, rejected: 0, dispatchMs: 900, firstNanoAiu: 0, lastNanoAiu: 40, usageNanoAiu: 40,
       });
     } finally {
       rmSync(transportRoot, { recursive: true, force: true });
     }
+  });
+});
+
+// Fold round-1 P2: a first checkpoint arriving AFTER dispatches already
+// happened carries the session's own accrued spend — the baseline is 0, not
+// that total (the delta would otherwise silently drop it).
+describe("runLane telemetry baseline (fold round 1)", () => {
+  it("counts spend accrued before the first observed checkpoint (fresh child session: baseline 0)", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 100 } });
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 200 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 500 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 700 } });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
+    assert.equal(outcome.status, "complete");
+    assert.equal(outcome.telemetry.firstNanoAiu, 0, "calls already ran — the first checkpoint is not a clean baseline");
+    assert.equal(outcome.telemetry.usageNanoAiu, 700);
+  });
+  it("a checkpoint observed before any dispatch is still a clean baseline", async () => {
+    const { createRuntime } = fakeRuntime([
+      async ({ emit }) => {
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 40 } });
+        emit({ type: "model.call_finished", data: { outcome: "success", dispatchDurationMs: 100 } });
+        emit({ type: "session.usage_checkpoint", data: { totalNanoAiu: 90 } });
+        emit({ type: "assistant.message", data: { content: validLaneText([]) } });
+        emit({ type: "session.idle" });
+      },
+    ]);
+    const outcome = await runLane({ lane: HEAVY_LANE, envelope: ENVELOPE, config: laneConfig, repoRoot: process.cwd(), deadlineAt: Date.now() + 60_000, createRuntime });
+    assert.equal(outcome.telemetry.firstNanoAiu, 40);
+    assert.equal(outcome.telemetry.usageNanoAiu, 50);
   });
 });
