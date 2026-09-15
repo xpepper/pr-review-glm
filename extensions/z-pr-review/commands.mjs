@@ -4,11 +4,16 @@
 
 // /z-pr-review review-invocation grammar (spec "Review pipeline"):
 //   <PR number> [--quick|--balanced|--full|--deep] [--comment|--no-comment]
-//   [--all] [--include-closed|--include-drafts] [--capture-only]
+//   [--self-review] [--all] [--include-closed|--include-drafts] [--capture-only]
 // plus the I6 selection/retention subcommands `inspect` and
 //   select all|none|<numbers, e.g. 1,3-5>
 // Parsing is total for the grammar shapes; whether a spec names findings that
 // exist is checked later against the retained review (select.mjs).
+// S46: --self-review is the explicit opt-in that authorizes publishing the
+// COMMENT review to a PR the authenticated user authored. It is deliberately
+// NOT standalone authority: the parser only accepts it paired with --comment,
+// so an ordinary publication request (or config autoPostReviews, which grants
+// publication exactly when no comment flag was passed) can never carry it.
 const MODE_FLAGS = new Map([
   ["--quick", "quick"],
   ["--balanced", "balanced"],
@@ -44,6 +49,7 @@ export function parseReviewArgs(args) {
     mode: null,
     comment: null,
     all: false,
+    selfReview: false,
   };
   const seen = new Set();
   for (const token of tokens.slice(1)) {
@@ -54,6 +60,7 @@ export function parseReviewArgs(args) {
     else if (token === "--include-drafts") flags.includeDrafts = true;
     else if (token === "--include-closed") flags.includeClosed = true;
     else if (token === "--all") flags.all = true;
+    else if (token === "--self-review") flags.selfReview = true;
     else if (token === "--comment" || token === "--no-comment") {
       if (flags.comment !== null) {
         return reviewUsageError("Choose either --comment or --no-comment, not both.");
@@ -79,14 +86,26 @@ export function parseReviewArgs(args) {
           ? "--comment"
           : flags.comment === false
             ? "--no-comment"
-            : flags.all
-              ? "--all"
-              : null;
+            : flags.selfReview
+              ? "--self-review"
+              : flags.all
+                ? "--all"
+                : null;
     if (inert !== null) {
       return reviewUsageError(
         `"${inert}" has no effect with --capture-only (no lanes, selection, or publication run); drop it.`,
       );
     }
+  }
+  // S46: --self-review only means something on an explicitly requested
+  // --comment publication. Refused here rather than ignored so no other flag
+  // combination can smuggle the authorization past the self-author gate.
+  if (flags.selfReview && flags.comment !== true) {
+    return reviewUsageError(
+      flags.comment === false
+        ? '"--self-review" authorizes self-review publication, but "--no-comment" refuses publication; use --comment --self-review to publish to your own PR, or drop --self-review.'
+        : '"--self-review" authorizes publishing a review to a PR you authored yourself; it only has meaning with --comment.',
+    );
   }
   return { kind: "review", number, flags };
 }
@@ -124,8 +143,9 @@ export function renderStatus(lastCapture = null, version = null) {
     "- /z-pr-review N --comment — gated COMMENT publication of the selected findings",
     "  (or config autoPostReviews): one POST, at most 50 inline anchors re-validated",
     "  against the PR's changed-file hunks (the rest go to body notes), draft/closed/",
-    "  self-author/stale gates, and an idempotency marker. Publication authority is",
-    "  code-owned, never model text.",
+    "  self-author (refused unless --comment --self-review explicitly opts in)/stale",
+    "  gates, and an idempotency marker. Publication authority is code-owned, never",
+    "  model text.",
     "- /z-pr-review-config — inspect and edit personal configuration.",
     "- Custom review roles and modes (schemaVersion 2 config): user-defined lanes",
     "  (prompt + tier, optional model/effort overrides) composed into custom modes;",
@@ -336,10 +356,16 @@ export function renderHelp() {
     "                                           [--all: settle the selection to every finding",
     "                                           at review time — the default selection is all",
     "                                           findings anyway; --all marks it settled]",
+    "                                           [--self-review: with --comment, explicitly",
+    "                                           authorize publishing the COMMENT to a PR you",
+    "                                           authored yourself — the posted comment",
+    "                                           discloses the authorization]",
     "",
     "The retained result lives for the session; selection and inspect are pure code over it.",
     "Publication is gated: /z-pr-review <N> --comment (or config autoPostReviews, unless",
     "--no-comment) posts the selected findings as one COMMENT review after the report.",
+    "Self-authored PRs refuse publication by default; only the explicit",
+    "--comment --self-review pairing opts in (config autoPostReviews never implies it).",
     "Configuration: /z-pr-review-config [show] | key=value ... | unset key ...",
   ].join("\n");
 }
