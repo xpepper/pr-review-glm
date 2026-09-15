@@ -149,7 +149,8 @@ upstream `lib/` reused with attribution.
   root), and `source.ref` tag pinning is HONORED by install/update (verified live:
   `plugin update` tracked ref `v0.2.3` then `v0.2.4` exactly). Because entries are
   pinned, each release tag must exist on origin before a fresh install of that
-  version works — push the tag at merge, before announcing the release.
+  version works — R45 moved the entry bump to AFTER the tag exists (below), so the
+  index never points at a missing ref.
 - Marketplace-installed plugins do **not** need `--experimental` on 1.0.83
   (registration + dispatch verified without it); `--plugin-dir` dev loading still
   uses it.
@@ -163,12 +164,24 @@ upstream `lib/` reused with attribution.
   clears it (observed 2026-09-14). The dev-loop's own phases are exempt: they run
   under the isolated phase HOME (`buildPhaseEnv`), where installed plugins never
   exist.
-- **Release discipline (gate-enforced from M1):** every increment that bumps
-  `plugin.json` also bumps the marketplace entry version AND its `ref` tag in the same
-  increment; `tests/smoke-m1.mjs` (run inside `gateSmokes`) fails the assessment
-  otherwise. The smoke reads the manifest via the GitHub contents API, not
-  raw.githubusercontent — the raw CDN can lag a just-pushed bump by ~5 minutes and
-  fail the gate spuriously.
+- **Release discipline (reworked at R45, 2026-09-15 — closes the issue #45
+  missing-tag window):** the marketplace entry bump is a POST-MERGE step of the
+  loop's merge tail: after `tagMergedRelease` pushes the release tag,
+  `bumpMarketplaceEntry` (`scripts/dev-loop/marketplace.mjs`, wired in
+  `scripts/dev-loop.mjs`) bumps the entry's `version` AND `source.ref` together
+  via the GitHub contents API (one entry-scoped commit, siblings never stomped,
+  one fresh-refetch retry on rejection — the pull --rebase equivalent, never a
+  force) and then verifies, FAILING LOUDLY with the tag name if the pinned ref
+  does not exist on origin. The pre-merge gate `tests/smoke-m1.mjs` (run inside
+  `gateSmokes`) accepts the live entry at EITHER `plugin.json`'s version (an
+  operator bumped early) OR the last released tag `vX.Y.Z` (the normal state
+  while a new version is in flight) — entry `version` and `source.ref` must
+  agree with each other. A failed post-merge bump fails the merge path (the
+  release is unpublished until fixed by hand); it is never silently skipped,
+  because the next run's gate would accept the stale entry as arm 2. The smoke
+  reads the manifest via the GitHub contents API, not raw.githubusercontent —
+  the raw CDN can lag a just-pushed bump by ~5 minutes and fail the gate
+  spuriously.
 - **Release tags are ANNOTATED (convention decided at I8, 2026-09-14):** every tag
   v0.2.0–v0.2.5 on origin already was (each `vX.Y.Z^{}` dereferences to its merge
   commit), and the loop's own path now matches: `verifyBumpAtMerge` reserves the tag

@@ -16,6 +16,14 @@ const SEMVER_PATTERN = /^\d+\.\d+\.\d+(?![\s\S])/;
 // Strict semver also forbids leading zeros in numeric identifiers ("01.2.3").
 const hasLeadingZero = (part) => part.length > 1 && part.startsWith("0");
 
+// The one strict X.Y.Z predicate (shared, not forked, by the marketplace
+// release-publication module — R45: release tag names vX.Y.Z must validate by
+// exactly the rule manifest versions validate by, or a malformed tag could be
+// mistaken for a releasable version).
+export function isStrictVersion(version) {
+  return typeof version === "string" && SEMVER_PATTERN.test(version) && !version.split(".").some(hasLeadingZero);
+}
+
 export function parseVersion(manifestText, source) {
   let manifest;
   try {
@@ -24,7 +32,7 @@ export function parseVersion(manifestText, source) {
     return { error: `${source} is not parseable JSON` };
   }
   const version = manifest?.version;
-  if (typeof version !== "string" || !SEMVER_PATTERN.test(version) || version.split(".").some(hasLeadingZero)) {
+  if (!isStrictVersion(version)) {
     return { error: `${source} has no strict X.Y.Z version: ${String(version)}` };
   }
   return { version };
