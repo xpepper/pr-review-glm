@@ -17,14 +17,36 @@ The `STATUS:` line above is machine-owned (dev-loop protocol,
 parses and validates it. Keep it directly under the H1 title. The grammar accepts
 `I`/`L`/`V`/`C` ids since I4 (PR #18) and `M` (marketplace infra) since M1 prep.
 
-## Recorded state (2026-09-14, after V2)
+## Recorded state (2026-09-15, after R45 + S46)
 
-- `main` = V2 complete (the ground-testing feedback round). Working tree clean. No open
-  PRs should remain. **Version is 0.2.7**; tags `v0.2.0`–`v0.2.7` (each peels to its
-  merge commit; ANNOTATED by explicit convention since I8 — see AGENTS.md). V2 landed
-  via the supervised conventional path (user unavailable at session start — the FOURTH
-  supervised landing after I7/M1/I8), so **the first loop-owned release milestone
-  remains parked and belongs to the 1.0.0 era** (V3 or later).
+- `main` = R45 + S46 complete (both from GitHub issues #45/#46, not ROADMAP-planned
+  increments). Working tree clean. No open PRs should remain once the docs catch-up
+  lands. **Version is 0.2.8**; tags `v0.2.0`–`v0.2.8` (each peels to its merge
+  commit; ANNOTATED by explicit convention since I8 — see AGENTS.md). Tests:
+  **528/528** on main (`node --test tests/*.test.mjs`, recounted 2026-09-15).
+- **How R45/S46 landed — a new supervised pattern worth reusing:** one supervisor
+  session, two implementer subagents in parallel git worktrees (disjoint file
+  ownership), a fresh task-reviewer subagent per branch (spec + quality verdicts),
+  fix rounds from review + dogfood folds, then the user merged both PRs (#49 first,
+  #48 rebased onto it). Dogfood reviews ran through the INSTALLED copy
+  (`tests/groundtest-v2.mjs` — works on open PRs too, `--no-comment`); SDK smokes
+  ran serialized after the uninstall dance (see AGENTS.md).
+- **R45 (PR #49) changed the release flow — read this before any release work:** the
+  marketplace entry bump is now POST-MERGE. Pre-merge, `tests/smoke-m1.mjs` accepts
+  the live entry at EITHER `plugin.json`'s version OR the last released tag (a
+  new version in flight leaves the entry alone — no more missing-ref window). At
+  merge: annotated tag first, then the entry bump (`bumpMarketplaceEntry` /
+  `publishTaggedVersion` in `scripts/dev-loop/marketplace.mjs`; loop-wired in the
+  merge tail; a supervised/manual landing runs its steps directly — first LIVE
+  execution 2026-09-15 for 0.2.8, clean, verified by re-read). AGENTS.md's
+  release-discipline passage describes the new flow.
+- **S46 (PR #48): self-review publication is now possible** — `--comment
+  --self-review` (accepted by the parser ONLY as that pairing) lets the PR's author
+  publish the gated COMMENT review to their own PR, with a static code-owned
+  disclosure in the posted body. Default self-author refusal stays fail-closed;
+  config `autoPostReviews` can never imply the authorization. A solo-maintainer
+  dogfood (`--comment --self-review` on the session's own PR) is now available if
+  the user opts in.
 - **V2 delivered (details in the ROADMAP row):** four real reviews of merged PRs
   (#43/#41/#37/#44) through the INSTALLED marketplace copy via a new driver
   `tests/groundtest-v2.mjs` (built on a `pluginDir: null` option in
@@ -51,23 +73,36 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
   (post-v1 UX today — changing it reopens the settled I7 fold-3 marker design), and
   the parked first loop-owned release milestone (needs a healthy zcode-headless
   environment and the user's terminal launch).
-- **Marketplace discipline (unchanged, gate-enforced):** entry bumped to 0.2.7/v0.2.7
-  in-lockstep (xpepper/copilot-plugins e5807e5, rebased over the sibling's same-day
-  d0a471e — if the push is rejected, pull --rebase and verify the gem-pr-review entry
-  is untouched; never stomp). Uninstall the marketplace copy before any
-  `--plugin-dir` session or manual smoke run from a normal shell (`copilot plugin
-  uninstall z-pr-review`; verify with `copilot plugin list` — a first uninstall can
-  leave a stale listing), and REINSTALL before handing back. Loop phases are exempt
+- **Marketplace discipline (NEW FLOW since R45, gate-enforced):** entry at
+  0.2.8/v0.2.8 as of 2026-09-15. The entry moves POST-merge only (tag first, then
+  the surgical contents-API bump — never a pre-merge marketplace write for the
+  in-flight version; pull --rebase semantics on rejection; never stomp the sibling
+  gem-pr-review entry). Uninstall the marketplace copy before any `--plugin-dir`
+  session or manual smoke run from a normal shell (`copilot plugin uninstall
+  z-pr-review`; verify with `copilot plugin list` — a first uninstall can leave a
+  stale listing), and REINSTALL/update before handing back. Loop phases are exempt
   (isolated HOME). Full facts in AGENTS.md.
-- **Publication is live (unchanged from I7):** `/z-pr-review N --comment` (or config
+- **Publication is live (S46 update):** `/z-pr-review N --comment` (or config
   `autoPostReviews`, unless `--no-comment`) publishes the retained settled selection
-  as ONE gated COMMENT review; `select`/`inspect` do not publish. Batch
-  `partial`/`failed` and `degraded` block the dogfood merge (fail-closed).
+  as ONE gated COMMENT review; the PR's own author publishes only with the explicit
+  `--comment --self-review` pairing (disclosed in the posted body);
+  `select`/`inspect` do not publish. Batch `partial`/`failed` and `degraded` block
+  the dogfood merge (fail-closed).
+- **Riding minors (non-blocking, fold opportunistically — do not reopen settled
+  decisions for them):** S46 — commands.mjs inert-flag chain one nesting level
+  deeper (flatten on the next flag); a help-text OR-assertion;
+  `buildPublication` at 9 destructured params. R45 — the merge-tail comment's
+  arm-2 rationale overstates when the tag exists; smoke-m1's PASS line names the
+  arm by input side, not by which arm the entry matched; tags-pagination residual
+  (first page only, 8/100 today — revisit near the cap). The loop-driven
+  post-merge bump's first LOOP-WIRED run (vs. the supervised module invocation
+  already executed live) is still to be observed at the first loop-owned release.
 - **Attribution state:** I3–V2 are original code; `docs/ATTRIBUTION.md` lists no
   reused modules. The upstream LICENSE issue (10ego/pi-pr-review#150) stays open as a
   standing record.
-- Tests: `node --test tests/*.test.mjs` (**485** on the V2 branch head, after dogfood
-  folds 1–3 (fold 3 dispositioned the local-tag TOCTOU family as a DOCUMENTED DESIGN
+- Tests: `node --test tests/*.test.mjs` (**528** on main, recounted 2026-09-15 after
+  R45 + S46; recount whenever a doc claims a count — they drift). Historical V2 fold
+  detail: dogfood folds 1–3 (fold 3 dispositioned the local-tag TOCTOU family as a DOCUMENTED DESIGN
   RESIDUAL after three repeating rounds — see releaseTagReservation's doc comment;
   fold 2: the resolve-failure path's unconditional local `git tag -d` now
   deletes only a resolvable tag matching the peel-verified object — the local twin of
@@ -79,11 +114,13 @@ parses and validates it. Keep it directly under the H1 title. The grammar accept
   additionally requires the remote object to exist in the local store — another
   actor's replacement tag is left alone). Smokes:
   `tests/smoke-i1.mjs` and `tests/smoke-i2.mjs` (SDK dispatch, no inference; i1 asserts
-  the status `Version:` line against plugin.json, now 0.2.7), `tests/smoke-i3.mjs`
+  the status `Version:` line against plugin.json, now 0.2.8), `tests/smoke-i3.mjs`
   (SDK dispatch; real inference inside lane children BY DESIGN; skips cleanly with no
   open PR; when the loop runs it, `SMOKE_INCREMENT` scopes it to the assessed PR —
-  manual runs keep the generic default), `tests/smoke-m1.mjs` (marketplace consistency,
-  no SDK, network: entry present, root path, version + ref tag == plugin.json),
+  manual runs keep the generic default; `SMOKE_PR_NUMBER` forces a target), 
+  `tests/smoke-m1.mjs` (marketplace consistency, no SDK, network: entry present,
+  root path, version + ref agree internally and match EITHER plugin.json OR the
+  last released tag — the R45 either-or gate),
   `tests/smoke-l1.mjs` (dev-loop `--dry-run` with `--merge auto --dogfood on`), and
   `tests/groundtest-v2.mjs` (NOT a gate — the V2 ground-test driver: one real review
   of a named PR, merged ones via `--include-closed --no-comment`, through the
@@ -110,14 +147,18 @@ The USER calls 1.0.0; the session lands their decision (ROADMAP V3 row):
 - Dogfood from I3 onward stands: every increment PR (including V3's, if it lands code)
   is reviewed by this tool before merge.
 
-Bump discipline: an increment that changes code bumps `plugin.json` (additive → patch
-pre-1.0; 1.0.0 only by the user's explicit call) **together with the marketplace
-entry** (one-line direct push to xpepper/copilot-plugins, disclosed in the increment
-PR — pull --rebase on rejection, never stomp the sibling's entries) —
-`tests/smoke-m1.mjs` fails the assessment otherwise. The release tag `vX.Y.Z` is
-pushed at merge (ANNOTATED, `-a -m "z-pr-review release vX.Y.Z"`, peels to the merge
-commit), never from a branch; fresh installs fail on the missing ref inside that
-window (disclose it).
+Bump discipline (R45 flow, replaces the M1 same-increment rule): an increment that
+changes plugin behavior bumps `plugin.json` (additive → patch pre-1.0; 1.0.0 only by
+the user's explicit call) — and NOTHING else moves pre-merge: `tests/smoke-m1.mjs`
+accepts the live entry at either `plugin.json` OR the last released tag. The release
+happens at merge, in order: annotated tag `vX.Y.Z` at the merge commit
+(`-a -m "z-pr-review release vX.Y.Z"` under `-c tag.gpgsign=false`, peels to the
+merge commit, never from a branch), THEN the marketplace entry bump to `X.Y.Z`/
+`vX.Y.Z` — the loop's merge tail does both automatically; a supervised/manual
+landing runs `publishTaggedVersion` (or its steps) from `scripts/dev-loop/
+marketplace.mjs` and discloses the marketplace commit in the increment PR. There is
+no missing-ref window anymore; a skipped post-merge bump fails loudly rather than
+stranding the release.
 
 Dogfood runs from I3 onward: every increment PR (including V3's, if it lands code) is
 reviewed by this tool via the dev-loop before merge. Never merge your own PR — the loop
